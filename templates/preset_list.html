@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 34px;
+      width: 1280px;
+      min-height: 900px;
+      background-color: #f5f7fb;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.78)),
+        linear-gradient(rgba(45, 55, 72, 0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(45, 55, 72, 0.045) 1px, transparent 1px);
+      background-size: initial, 28px 28px, 28px 28px;
+      color: #1f2937;
+      font-family: "Noto Sans SC", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+    }
+    .panel {
+      width: 100%;
+      min-height: 832px;
+      border-radius: 14px;
+      border: 1px solid #d7dde8;
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 14px 38px rgba(31, 41, 55, 0.08);
+      padding: 30px 32px 34px;
+    }
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 24px;
+      margin-bottom: 24px;
+      padding: 20px 24px;
+      border-radius: 10px;
+      background: #243447;
+      color: #ffffff;
+    }
+    .title {
+      margin: 0;
+      font-size: 40px;
+      line-height: 1.15;
+      font-weight: 900;
+    }
+    .subtitle {
+      margin-top: 8px;
+      color: #dce6f2;
+      font-size: 18px;
+      line-height: 1.35;
+      font-weight: 650;
+    }
+    .commands {
+      max-width: 420px;
+      color: #dce6f2;
+      font-size: 17px;
+      line-height: 1.45;
+      text-align: right;
+      word-break: break-all;
+      font-weight: 700;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+    }
+    .card {
+      overflow: hidden;
+      border-radius: 8px;
+      border: 1px solid #dfe5ef;
+      background: #ffffff;
+      min-height: 292px;
+      box-shadow: 0 7px 20px rgba(31, 41, 55, 0.08);
+    }
+    .thumb {
+      height: 210px;
+      background: #e8edf5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    .thumb img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    .placeholder {
+      width: calc(100% - 28px);
+      height: calc(100% - 28px);
+      border: 2px dashed #a8b3c5;
+      border-radius: 8px;
+      color: #718096;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      background: #f8fafc;
+      font-weight: 750;
+    }
+    .meta {
+      padding: 14px 16px 16px;
+    }
+    .badge {
+      display: inline-block;
+      margin-bottom: 8px;
+      padding: 0 10px;
+      border-radius: 999px;
+      font-size: 16px;
+      line-height: 24px;
+      font-weight: 800;
+    }
+    .badge.builtin {
+      background: #e0f2fe;
+      color: #075985;
+    }
+    .badge.custom {
+      background: #dcfce7;
+      color: #166534;
+    }
+    h2 {
+      margin: 0;
+      font-size: 25px;
+      line-height: 1.25;
+      font-weight: 900;
+      word-break: break-all;
+    }
+    .model {
+      margin-top: 7px;
+      font-size: 16px;
+      line-height: 1.35;
+      color: #6b7280;
+      word-break: break-all;
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <header class="header">
+      <div>
+        <h1 class="title">{{ title }}</h1>
+        <div class="subtitle">{{ subtitle }}</div>
+      </div>
+      <div class="commands">{{ command_text }}</div>
+    </header>
+    <section class="grid">
+      {{ cards_html }}
+    </section>
+  </main>
+</body>
+</html>

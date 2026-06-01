@@ -1,0 +1,492 @@
+{
+    "command_model_list": {
+        "description": "【通用】触发指令模型绑定",
+        "type": "list",
+        "hint": "每个自定义/内置触发指令对应的模型，放在最上面方便先配置。按 UPFansWatcher 那种列表对象模板配置，每项包含两个参数：指令、模型名。命中该触发指令时优先使用这里指定的模型；默认触发指令本身不会被改动。",
+        "default": [],
+        "items": {
+            "type": "object",
+            "item_label": "指令模型绑定",
+            "items": {
+                "command": {
+                    "label": "指令",
+                    "type": "string",
+                    "default": "",
+                    "hint": "例如：手办化、Q版化、贴纸化，不需要写 #。"
+                },
+                "model": {
+                    "label": "模型名",
+                    "type": "string",
+                    "default": "",
+                    "hint": "填写 model_list 或 gemini_model_list 中的模型名。"
+                }
+            }
+        }
+    },
+    "generic_api_url": {
+        "description": "【Generic】API地址",
+        "type": "string",
+        "hint": "Generic模式(OpenAI格式)专用：可填 Base URL 或完整URL。插件会按下方端点模型列表自动拼接 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`；未匹配或列表为空默认走 `/v1/chat/completions`。",
+        "default": "https://api.bltcy.ai/v1/chat/completions"
+    },
+    "generic_api_keys": {
+        "description": "【Generic】API Key 池",
+        "type": "list",
+        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。添加/删除可用 #手办化添加key generic、#手办化删除key generic 管理。",
+        "items": {
+            "type": "string",
+            "description": "Generic API Key，通常形如 sk-..."
+        },
+        "default": []
+    },
+    "gemini_api_url": {
+        "description": "【Gemini】API地址",
+        "type": "string",
+        "hint": "Gemini 端点地址，可填 Base URL、完整 generateContent URL，或包含 {model} 的模板。模型命中 gemini_model_list 时自动走此端点。",
+        "default": "https://generativelanguage.googleapis.com"
+    },
+    "gemini_api_keys": {
+        "description": "【Gemini】API Key 池",
+        "type": "list",
+        "hint": "Gemini 路由使用的 API Key 列表。模型命中 gemini_model_list 时生效；多个 Key 会轮询使用。",
+        "items": {
+            "type": "string",
+            "description": "Gemini API Key，通常形如 AIza..."
+        },
+        "default": []
+    },
+    "model_list": {
+        "description": "【核心】模型列表配置",
+        "type": "list",
+        "hint": "后台和 #切换模型 指令可选择的模型 ID 总表。这里决定“有哪些模型可选”；模型命中 gemini_model_list 时走 Gemini，其余模型按下面三个【Generic路由】列表决定 Generic 端点。",
+        "items": {
+            "type": "string",
+            "description": "模型 ID，例如 nano-banana、gemini-2.5-flash-image"
+        },
+        "default": [
+            "nano-banana",
+            "nano-banana-2-4k",
+            "nano-banana-2-2k",
+            "nano-banana-2-1k",
+            "gemini-4k",
+            "gemini-2k",
+            "gemini-1k",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-3-pro-image-preview",
+            "gemini-2.5-flash-image",
+            "nano-banana-hd",
+            "gemini-2.5-flash-image-preview"
+        ]
+    },
+    "gemini_model_list": {
+        "description": "【Gemini路由】Gemini模型列表",
+        "type": "list",
+        "hint": "填入这里的模型会自动走 Gemini 端点；不在此列表的模型继续走 Generic/OpenAI兼容端点。URL 会根据 gemini_api_url 自适应拼接 generateContent。",
+        "items": {
+            "type": "string",
+            "description": "走 Gemini 端点的模型 ID"
+        },
+        "default": [
+            "gemini-4k",
+            "gemini-2k",
+            "gemini-1k",
+            "gemini-1.5-pro",
+            "gemini-1.5-flash",
+            "gemini-3-pro-image-preview",
+            "gemini-2.5-flash-image",
+            "gemini-2.5-flash-image-preview"
+        ]
+    },
+    "chat_completions_model_list": {
+        "description": "【Generic路由】Chat Completions模型列表",
+        "type": "list",
+        "hint": "仅 Generic 模式生效。把需要按聊天补全格式调用的模型 ID 填在这里，请求会发送到 `/v1/chat/completions`，图片会以 image_url/data URL 形式放进 messages。三个路由列表都未匹配时默认走此端点。",
+        "items": {
+            "type": "string",
+            "description": "走 chat/completions 的模型 ID"
+        },
+        "default": []
+    },
+    "images_generations_model_list": {
+        "description": "【Generic路由】Images Generations模型列表",
+        "type": "list",
+        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；如果携带图片，插件会把图片转成 image/images 字段传入。",
+        "items": {
+            "type": "string",
+            "description": "走 images/generations 的模型 ID"
+        },
+        "default": []
+    },
+    "images_edits_model_list": {
+        "description": "【Generic路由】Images Edits模型列表",
+        "type": "list",
+        "hint": "仅 Generic 模式生效。把需要按图片编辑接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/edits`，使用 multipart/form-data 上传 image 和 prompt。此端点必须携带至少一张图片，适合图生图/改图模型。",
+        "items": {
+            "type": "string",
+            "description": "走 images/edits 的模型 ID"
+        },
+        "default": []
+    },
+    "model": {
+        "description": "【通用】默认模型名称",
+        "type": "string",
+        "hint": "默认调用的模型 ID，建议填写 model_list 中已有的值。用户未临时指定模型序号时使用它；也可通过 #切换模型 修改。",
+        "default": "nano-banana"
+    },
+    "show_model_info": {
+        "description": "【显示】显示模型信息",
+        "type": "bool",
+        "hint": "开启后，生成成功或失败时会在消息里附加“模型: xxx”，方便确认当前请求实际走的是默认模型还是临时指定的模型。",
+        "default": false
+    },
+    "debug_mode": {
+        "description": "【调试】调试模式",
+        "type": "bool",
+        "hint": "开启后，插件日志会记录更完整的错误详情，便于排查上游返回、解析图片失败、下载失败等问题。建议日常关闭，需要定位问题时再开启。",
+        "default": false
+    },
+    "send_full_error": {
+        "description": "【调试】发送完整错误信息",
+        "type": "bool",
+        "hint": "开启后，失败时会把完整错误详情直接发到聊天里，可能包含较长的上游响应内容；关闭时只发送简洁提示。公开群聊建议关闭。",
+        "default": false
+    },
+    "send_error_reason": {
+        "description": "【错误提示】显示简要错误原因",
+        "type": "bool",
+        "hint": "开启后，默认报错会附加上游返回的简短原因；不会展示完整响应。",
+        "default": true
+    },
+    "send_error_context": {
+        "description": "【错误提示】显示调试上下文",
+        "type": "bool",
+        "hint": "开启后，默认报错会附加 request_id、endpoint、model 等简要上下文，便于定位问题。",
+        "default": false
+    },
+    "error_detail_max_length": {
+        "description": "【错误提示】错误详情最大长度",
+        "type": "int",
+        "hint": "控制错误模板中 {detail}、{provider_message}、{raw_response} 等长文本最多展示多少字符，避免上游返回过长导致刷屏。最小 80，最大 5000。",
+        "default": 800,
+        "min": 80,
+        "max": 5000
+    },
+    "error_429_custom_tip": {
+        "description": "【错误提示】429错误自定义提示",
+        "type": "text",
+        "hint": "检测到429错误（请求过于频繁）时，在发送的消息下面附加的自定义提示。支持变量：{status_code}、{elapsed}、{detail}、{provider_message}、{model}、{api_mode}、{endpoint_type}、{endpoint}、{request_id}。",
+        "default": ""
+    },
+    "enable_http_status_code": {
+        "description": "【错误提示】启用HTTP状态码返回",
+        "type": "bool",
+        "hint": "开启后，默认错误消息会显示 HTTP 状态码，例如 400 参数错误、401 Key 错误、429 限速、500 上游服务错误、200 但无图片等。",
+        "default": false
+    },
+    "error_default_message": {
+        "description": "【错误提示】默认错误自定义消息",
+        "type": "text",
+        "hint": "所有错误的兜底模板。为空时使用插件默认格式。支持变量：{status_text}、{status_code}、{elapsed}、{error_type}、{message}、{detail}、{provider_message}、{provider_code}、{provider_type}、{request_id}、{model}、{api_mode}、{endpoint_type}、{endpoint}、{url}、{image_url}、{image_count}、{prompt}。",
+        "default": ""
+    },
+    "error_400_message": {
+        "description": "【错误提示】400错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 400参数错误时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_401_message": {
+        "description": "【错误提示】401错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 401鉴权失败时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_403_message": {
+        "description": "【错误提示】403错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 403无权限或被拒绝时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_404_message": {
+        "description": "【错误提示】404错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 404端点或模型不存在时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_429_message": {
+        "description": "【错误提示】429错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 429错误（请求过于频繁）时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_500_message": {
+        "description": "【错误提示】500错误自定义消息",
+        "type": "text",
+        "hint": "HTTP 500错误（服务器内部错误）时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_timeout_message": {
+        "description": "【错误提示】超时错误自定义消息",
+        "type": "text",
+        "hint": "请求超时时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "error_200_no_image_message": {
+        "description": "【错误提示】200但无图片自定义消息",
+        "type": "text",
+        "hint": "HTTP 200成功但未返回图片时显示。支持变量同默认错误模板。",
+        "default": ""
+    },
+    "return_full_response_on_no_image": {
+        "description": "【错误提示】无图片时返回完整响应",
+        "type": "bool",
+        "hint": "开启后，当上游 HTTP 200 但插件没解析到图片 URL/Base64/inlineData 时，会把完整响应作为错误详情返回，方便判断是模型只回了文字、字段结构不同，还是接口异常。公开群聊建议关闭。",
+        "default": false
+    },
+    "prefix": {
+        "description": "【基础】指令前缀限制",
+        "type": "bool",
+        "hint": "开启后，只有带 AstrBot 指令前缀（例如 #）或 @/唤醒机器人时才处理本插件命令；关闭后，消息开头直接写“手办化”“bnn”等也会尝试触发，容易与普通聊天误触。",
+        "default": true
+    },
+    "extra_prefix": {
+        "description": "【基础】自定义提示词前缀",
+        "hint": "自定义 Prompt 入口命令。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图。修改后示例中的 bnn 要替换成你的新前缀。",
+        "type": "string",
+        "default": "bnn"
+    },
+    "preset_list_command": {
+        "description": "【基础】提示词列表触发指令",
+        "type": "string",
+        "hint": "自定义预设列表/提示词列表的触发指令。默认 lm列表；旧的 lm列表、lmlist、预设列表 仍保留兼容。",
+        "default": "lm列表"
+    },
+    "preset_list_template": {
+        "description": "【基础】提示词列表模板",
+        "type": "string",
+        "hint": "和 wtcx 一样使用 templates/ 下的 HTML 模板渲染图片。当前内置 default，对应 templates/preset_list.html。",
+        "options": [
+            "default"
+        ],
+        "default": "default"
+    },
+    "batch_multiplier_symbol": {
+        "description": "【基础】批量生成倍率符号",
+        "hint": "用于在命令后指定并发生成次数。默认 `*`，示例：`#bnn*2 一只小猫` 会并发生成 2 次；也支持临时模型序号组合，如 `#bnn(2)*3 提示词`。留空则关闭倍率写法。",
+        "type": "string",
+        "default": "*"
+    },
+    "default_batch_count": {
+        "description": "【基础】默认批量数",
+        "type": "int",
+        "hint": "用户未写倍率时默认生成多少张。默认 1；仍会受到最大批量生成倍率限制。",
+        "default": 1,
+        "min": 1,
+        "max": 100
+    },
+    "max_batch_multiplier": {
+        "description": "【基础】最大批量生成倍率",
+        "hint": "限制单条命令最多并发生成多少次，避免 `*99` 这类误输入打爆额度或触发限速。用户请求超过上限时会按此上限执行；次数扣除按实际执行倍率计算。",
+        "type": "int",
+        "default": 4,
+        "min": 1,
+        "max": 100
+    },
+    "max_batch_concurrency": {
+        "description": "【基础】最大批量并发数",
+        "hint": "控制批量生成时同一时间最多同时运行多少个 API 请求。倍率表示总生成次数，并发数表示同时跑几个；例如倍率 `*10`、最大并发数 `2` 时，会每次同时跑 2 个，请求完成后继续排队生成，直到共生成 10 次。可填范围 1-20，代码也会强制不超过 20，建议按上游限速和 Key 数量设置。",
+        "type": "int",
+        "default": 4,
+        "min": 1,
+        "max": 20
+    },
+    "allow_append_to_preset": {
+        "description": "【基础】允许在预设提示词后追加自定义内容",
+        "type": "bool",
+        "hint": "开启后，可使用 '指令<分隔符>追加内容' 格式在预设提示词后面追加自定义提示词。例如：#手办化%在森林里",
+        "default": true
+    },
+    "append_separator": {
+        "description": "【基础】追加提示词分隔符",
+        "type": "string",
+        "hint": "用于分隔预设提示词和追加内容的字符。默认为 '%'。使用示例：#手办化%在森林里",
+        "default": "%"
+    },
+    "use_proxy": {
+        "description": "【网络】是否启用代理",
+        "type": "bool",
+        "hint": "开启后，API 请求、图片下载、头像获取等网络访问会走 proxy_url。服务器能直接访问上游接口时建议关闭。",
+        "default": false
+    },
+    "proxy_url": {
+        "description": "【网络】代理地址（支持 HTTP/HTTPS 及 SOCKS5）",
+        "type": "string",
+        "hint": "use_proxy 开启后生效。支持 http、https、socks5 等代理地址，示例：`http://127.0.0.1:7890`、`socks5://user:pass@10.0.0.1:1080`。使用 SOCKS 代理需安装 aiohttp_socks。",
+        "default": ""
+    },
+    "timeout": {
+        "description": "【网络】请求超时时间 (秒)",
+        "type": "int",
+        "hint": "API 请求连接和读取的基础超时时间，单位秒。绘图模型较慢时可调大；太小可能导致还没生成完就超时。默认 120 秒。",
+        "default": 120
+    },
+    "download_timeout": {
+        "description": "【网络】图片下载超时时间 (秒)",
+        "type": "int",
+        "hint": "下载输入图片、头像、预设图片链接、上游生成图片链接时的读取超时时间，单位秒。默认按 timeout 的 2 倍处理；网络慢或图片大时可调大。",
+        "default": 240
+    },
+    "download_size_limit_mb": {
+        "description": "【网络】图片下载大小上限 (MB)",
+        "type": "int",
+        "hint": "单张图片下载的最大体积，单位 MB。超过上限会放弃下载，避免超大图片占用内存或卡住进程。默认 120。",
+        "default": 120
+    },
+    "use_stream": {
+        "description": "【网络】启用流式请求（仅generic模式）",
+        "type": "bool",
+        "hint": "仅 Generic 的 `/v1/chat/completions` 路径生效。开启后使用 SSE 流式读取，适合会长时间生成或被 Cloudflare 100 秒限制的上游；images/generations 和 images/edits 不使用此项。",
+        "default": false
+    },
+    "download_retries": {
+        "description": "【网络】图片下载重试次数",
+        "type": "int",
+        "hint": "下载图片失败时的自动重试次数，适用于用户图片、头像、预设图片链接和上游返回的图片 URL。网络不稳定可调大，过大可能拖慢失败返回。",
+        "default": 3
+    },
+    "help_text": {
+        "description": "【帮助】使用 #手办化帮助或lm帮助 指令时显示的文本",
+        "type": "text",
+        "hint": "用户发送 #手办化帮助 或 lmh/lm帮助 时展示的帮助内容，支持 Markdown 文本。这里可以写你的实际命令、倍率符号、模型说明、次数规则等。",
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#lm列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key [generic|gemini] <key> - 添加Key\n#手办化key列表 - 查看Key池\n#切换模型 - 查看或切换模型\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)\n5. #bnn*2 <提示词> (并发生成2次，倍率符号可在后台配置)"
+    },
+    "user_whitelist": {
+        "description": "【权限】用户白名单",
+        "type": "list",
+        "hint": "填写后，只有列表内用户和全局管理员可以使用生成功能；留空表示不启用用户白名单。请填写平台用户 ID/QQ 号，插件会按字符串比较。",
+        "items": {
+            "type": "string",
+            "description": "允许使用的用户 ID/QQ 号"
+        },
+        "default": []
+    },
+    "user_blacklist": {
+        "description": "【权限】用户黑名单",
+        "type": "list",
+        "hint": "列表内用户会被禁止使用本插件命令，命中后直接忽略，不返回提示。优先级高于次数检查。",
+        "items": {
+            "type": "string",
+            "description": "禁止使用的用户 ID/QQ 号"
+        },
+        "default": []
+    },
+    "group_whitelist": {
+        "description": "【权限】群聊白名单",
+        "type": "list",
+        "hint": "填写后，只有白名单群聊允许使用；白名单群默认免费不扣次数。留空表示不启用群白名单限制。",
+        "items": {
+            "type": "string",
+            "description": "允许使用的群号"
+        },
+        "default": []
+    },
+    "group_blacklist": {
+        "description": "【权限】群聊黑名单",
+        "type": "list",
+        "hint": "列表内群聊会被禁止使用本插件命令，命中后直接忽略，不返回提示。优先级高于群白名单和次数检查。",
+        "items": {
+            "type": "string",
+            "description": "禁止使用的群号"
+        },
+        "default": []
+    },
+    "enable_user_limit": {
+        "description": "【次数】启用用户限制",
+        "type": "bool",
+        "hint": "开启后，每次生成会扣除用户个人剩余次数；次数不足时拒绝生成。用户次数可通过签到或 #手办化增加用户次数 管理。批量倍率会按实际生成次数扣除。",
+        "default": true
+    },
+    "enable_group_limit": {
+        "description": "【次数】启用群组限制",
+        "type": "bool",
+        "hint": "开启后，群聊会优先消耗群组次数；群次数不足时再尝试用户个人次数。群次数可通过 #手办化增加群组次数 管理。群白名单内不扣次数。",
+        "default": false
+    },
+    "enable_checkin": {
+        "description": "【签到】启用每日签到",
+        "type": "bool",
+        "hint": "开启后，用户每天可发送 #手办化签到 获取个人次数。签到只增加用户次数，不增加群组次数；若 enable_user_limit 关闭，签到意义不大。",
+        "default": false
+    },
+    "checkin_fixed_reward": {
+        "description": "【签到】固定奖励",
+        "type": "int",
+        "hint": "enable_random_checkin 关闭时生效。用户每次每日签到固定获得的个人次数，例如 3 表示签到 +3 次。",
+        "default": 3
+    },
+    "enable_random_checkin": {
+        "description": "【签到】启用随机奖励",
+        "type": "bool",
+        "hint": "开启后，签到奖励不再使用固定值，而是在 1 到 checkin_random_reward_max 之间随机发放。",
+        "default": false
+    },
+    "checkin_random_reward_max": {
+        "description": "【签到】随机奖励最大值",
+        "type": "int",
+        "hint": "enable_random_checkin 开启时生效。签到随机奖励范围为 1 到该值，例如填 5 表示随机获得 1-5 次。",
+        "default": 5
+    },
+    "max_images_count": {
+        "description": "【图片处理】最大图片数量",
+        "type": "int",
+        "hint": "单次图生图最多取用多少张输入图片，包括当前消息图片、引用消息图片、@用户头像、预设内图片链接等。超过上限会截取前 N 张，避免请求体太大或上游拒绝。",
+        "default": 10,
+        "min": 1,
+        "max": 10
+    },
+    "prompt_list": {
+        "description": "【预设】提示词列表",
+        "hint": "自定义快捷预设。按列表对象填写指令和提示词；触发指令可直接作为命令使用，如 #贴纸化。也兼容旧格式 `触发词:提示词`，并可用 #lm添加 管理。",
+        "type": "list",
+        "default": [],
+        "items": {
+            "type": "object",
+            "item_label": "提示词预设",
+            "items": {
+                "command": {
+                    "label": "指令",
+                    "type": "string",
+                    "default": "",
+                    "hint": "例如：贴纸化，不需要写 #。"
+                },
+                "prompt": {
+                    "label": "提示词",
+                    "type": "text",
+                    "default": "",
+                    "hint": "该快捷预设实际发送给模型的提示词。"
+                }
+            }
+        }
+    },
+    "custom_success_message": {
+        "description": "【自定义提示】生成成功提示模板",
+        "type": "text",
+        "hint": "生成成功后随图片发送的文字模板。留空使用默认格式。可用变量：{model}=模型名，{label}=显示标签/预设名，{image_count}=输入图片数量，{elapsed}=总耗时秒数，{remaining}=剩余次数，{prompt}=提示词前 50 字，{batch_count}=本次倍率总数，{batch_index}=当前第几张，{max_batch_concurrency}=本次最大并发数。",
+        "default": ""
+    },
+    "custom_img2img_start_message": {
+        "description": "【自定义提示】图生图开始消息模板",
+        "type": "text",
+        "hint": "检测到输入图片后，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀，{action_type}=图生图，{label}=显示标签/预设名，{model}=模型名，{image_count}=输入图片数量，{prompt}=提示词前 50 字，{batch_count}=倍率，{max_batch_concurrency}=本次最大并发数。",
+        "default": ""
+    },
+    "custom_text2img_start_message": {
+        "description": "【自定义提示】文生图开始消息模板",
+        "type": "text",
+        "hint": "未携带图片、走文生图时，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀，{action_type}=文生图，{label}=显示标签，{model}=模型名，{image_count}=0，{prompt}=提示词前 50 字，{batch_count}=倍率，{max_batch_concurrency}=本次最大并发数。",
+        "default": ""
+    }
+}

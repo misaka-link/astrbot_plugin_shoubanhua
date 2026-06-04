@@ -397,6 +397,8 @@ class FigurineProPlugin(Star):
         await self._load_group_counts()
         await self._load_user_checkin_data()
         await self._load_daily_stats()
+        await self._migrate_command_model_list_config()
+        await self._migrate_extra_prefix_config()
         await self._migrate_prompt_list_config()
         await self._load_prompt_map()
         await self._load_preset_images()
@@ -547,7 +549,7 @@ class FigurineProPlugin(Star):
             if not key or not value or key in seen:
                 return
             seen.add(key)
-            migrated.append({"command": key, "prompt": value})
+            migrated.append({"__template_key": "preset", "command": key, "prompt": value})
 
         for item in prompt_list:
             if isinstance(item, dict):
@@ -555,7 +557,7 @@ class FigurineProPlugin(Star):
                 value = str(item.get("prompt") or item.get("提示词") or item.get("value") or "").strip()
                 if key and value:
                     add_item(key, value)
-                    if set(item.keys()) != {"command", "prompt"}:
+                    if item.get("__template_key") != "preset" or set(item.keys()) != {"__template_key", "command", "prompt"}:
                         changed = True
                 else:
                     changed = True
@@ -690,6 +692,108 @@ class FigurineProPlugin(Star):
 
     def _get_command_model(self, command: str) -> Optional[str]:
         return self._get_command_model_map().get((command or "").strip())
+
+    async def _migrate_command_model_list_config(self):
+        raw_list = self.conf.get("command_model_list", [])
+        if not isinstance(raw_list, list):
+            raw_list = []
+
+        migrated: List[Dict[str, str]] = []
+        changed = False
+        seen = set()
+
+        def add_item(command: Any, model: Any):
+            key = str(command or "").strip()
+            value = str(model or "").strip()
+            if not key or not value or key in seen:
+                return
+            seen.add(key)
+            migrated.append({"__template_key": "binding", "command": key, "model": value})
+
+        for item in raw_list:
+            if isinstance(item, dict):
+                key = str(item.get("command") or item.get("指令") or "").strip()
+                value = str(item.get("model") or item.get("模型名") or item.get("model_name") or "").strip()
+                if key and value:
+                    add_item(key, value)
+                    if item.get("__template_key") != "binding" or set(item.keys()) != {"__template_key", "command", "model"}:
+                        changed = True
+                else:
+                    changed = True
+            elif isinstance(item, str) and ":" in item:
+                key, value = item.split(":", 1)
+                add_item(key, value)
+                changed = True
+            elif item:
+                changed = True
+
+        if changed:
+            self.conf["command_model_list"] = migrated
+            try:
+                if hasattr(self.conf, "save"):
+                    self.conf.save()
+                logger.info(f"已自动迁移 command_model_list 到模板列表格式，共 {len(migrated)} 条")
+            except Exception as e:
+                logger.error(f"自动迁移 command_model_list 配置失败: {e}")
+
+    async def _migrate_extra_prefix_config(self):
+        raw_prefixes = self.conf.get("extra_prefix", "bnn")
+        if isinstance(raw_prefixes, list) and all(
+            isinstance(item, dict) and item.get("__template_key") == "prefix" and "prefix" in item
+            for item in raw_prefixes
+        ):
+            return
+
+        prefixes: List[str] = []
+
+        def add_prefix(value: Any):
+            prefix = str(value or "").strip().lstrip("#")
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+
+        if isinstance(raw_prefixes, str):
+            for item in re.split(r"[,，\n]+", raw_prefixes):
+                add_prefix(item)
+        elif isinstance(raw_prefixes, list):
+            for item in raw_prefixes:
+                if isinstance(item, dict):
+                    add_prefix(item.get("prefix") or item.get("前缀") or item.get("command") or item.get("value"))
+                else:
+                    add_prefix(item)
+
+        if not prefixes:
+            prefixes.append("bnn")
+
+        self.conf["extra_prefix"] = [{"__template_key": "prefix", "prefix": prefix} for prefix in prefixes]
+        try:
+            if hasattr(self.conf, "save"):
+                self.conf.save()
+            logger.info(f"已自动迁移 extra_prefix 到模板列表格式，共 {len(prefixes)} 条")
+        except Exception as e:
+            logger.error(f"自动迁移 extra_prefix 配置失败: {e}")
+
+    def _get_extra_prefixes(self) -> List[str]:
+        raw_prefixes = self.conf.get("extra_prefix", "bnn")
+        prefixes: List[str] = []
+
+        def add_prefix(value: Any):
+            prefix = str(value or "").strip().lstrip("#")
+            if prefix and prefix not in prefixes:
+                prefixes.append(prefix)
+
+        if isinstance(raw_prefixes, str):
+            for item in re.split(r"[,，\n]+", raw_prefixes):
+                add_prefix(item)
+        elif isinstance(raw_prefixes, list):
+            for item in raw_prefixes:
+                if isinstance(item, dict):
+                    add_prefix(item.get("prefix") or item.get("前缀") or item.get("command") or item.get("value"))
+                else:
+                    add_prefix(item)
+
+        if not prefixes:
+            prefixes.append("bnn")
+        return prefixes
 
     def _get_preset_list_commands(self) -> List[str]:
         configured = str(self.conf.get("preset_list_command", "lm列表") or "").strip()
@@ -1700,7 +1804,8 @@ class FigurineProPlugin(Star):
             return
 
         # 指令解析
-        bnn_command = self.conf.get("extra_prefix", "bnn")
+        extra_prefixes = self._get_extra_prefixes()
+        matched_extra_prefix = extra_prefixes[0]
         user_prompt = ""
         is_bnn = False
 
@@ -1718,7 +1823,8 @@ class FigurineProPlugin(Star):
                 append_text = parts[1].strip()
                 logger.info(f"检测到分隔符'{separator}'分割: 基础命令='{base_cmd}', 追加内容='{append_text}'")
 
-        if base_cmd == bnn_command:
+        if base_cmd in extra_prefixes:
+            matched_extra_prefix = base_cmd
             remaining_tokens = tokens[consumed_tokens:]
             user_prompt = " ".join(remaining_tokens).strip()
             is_bnn = True
@@ -1816,7 +1922,7 @@ class FigurineProPlugin(Star):
                 if is_bnn:
                     # bnn 模式 + 无图 = 纯文生图
                     if not user_prompt:
-                        yield self._reply_plain_result(event, f"请在指令后添加描述。例如: #{bnn_command} 一个可爱的女孩")
+                        yield self._reply_plain_result(event, f"请在指令后添加描述。例如: #{matched_extra_prefix} 一个可爱的女孩")
                         return
                     is_text_to_image = True
                     images_to_process = []
@@ -2229,7 +2335,7 @@ class FigurineProPlugin(Star):
             if isinstance(item, dict):
                 item_key = str(item.get("command") or item.get("指令") or "").strip()
                 if item_key == key:
-                    prompt_list[idx] = {"command": key, "prompt": new_value}
+                    prompt_list[idx] = {"__template_key": "preset", "command": key, "prompt": new_value}
                     found = True
                     break
             elif isinstance(item, str) and item.strip().startswith(key + ":"):
@@ -2238,7 +2344,7 @@ class FigurineProPlugin(Star):
                 break
 
         if not found:
-            prompt_list.append({"command": key, "prompt": new_value})
+            prompt_list.append({"__template_key": "preset", "command": key, "prompt": new_value})
 
         self.conf["prompt_list"] = prompt_list
         try:

@@ -1,24 +1,27 @@
 {
     "command_model_list": {
         "description": "【通用】触发指令模型绑定",
-        "type": "list",
+        "type": "template_list",
         "hint": "每个自定义/内置触发指令对应的模型，放在最上面方便先配置。按 UPFansWatcher 那种列表对象模板配置，每项包含两个参数：指令、模型名。命中该触发指令时优先使用这里指定的模型；默认触发指令本身不会被改动。",
         "default": [],
-        "items": {
-            "type": "object",
-            "item_label": "指令模型绑定",
-            "items": {
-                "command": {
-                    "label": "指令",
-                    "type": "string",
-                    "default": "",
-                    "hint": "例如：手办化、Q版化、贴纸化，不需要写 #。"
-                },
-                "model": {
-                    "label": "模型名",
-                    "type": "string",
-                    "default": "",
-                    "hint": "填写 model_list 或 gemini_model_list 中的模型名。"
+        "templates": {
+            "binding": {
+                "name": "指令模型绑定",
+                "item_label": "指令模型绑定",
+                "hint": "配置一个触发指令和对应模型名。",
+                "items": {
+                    "command": {
+                        "label": "指令",
+                        "type": "string",
+                        "default": "",
+                        "hint": "例如：手办化、Q版化、贴纸化，不需要写 #。"
+                    },
+                    "model": {
+                        "label": "模型名",
+                        "type": "string",
+                        "default": "",
+                        "hint": "填写 model_list 或 gemini_model_list 中的模型名。"
+                    }
                 }
             }
         }
@@ -36,22 +39,6 @@
         "items": {
             "type": "string",
             "description": "Generic API Key，通常形如 sk-..."
-        },
-        "default": []
-    },
-    "gemini_api_url": {
-        "description": "【Gemini】API地址",
-        "type": "string",
-        "hint": "Gemini 端点地址，可填 Base URL、完整 generateContent URL，或包含 {model} 的模板。模型命中 gemini_model_list 时自动走此端点。",
-        "default": "https://generativelanguage.googleapis.com"
-    },
-    "gemini_api_keys": {
-        "description": "【Gemini】API Key 池",
-        "type": "list",
-        "hint": "Gemini 路由使用的 API Key 列表。模型命中 gemini_model_list 时生效；多个 Key 会轮询使用。",
-        "items": {
-            "type": "string",
-            "description": "Gemini API Key，通常形如 AIza..."
         },
         "default": []
     },
@@ -82,7 +69,7 @@
     "gemini_model_list": {
         "description": "【Gemini路由】Gemini模型列表",
         "type": "list",
-        "hint": "填入这里的模型会自动走 Gemini 端点；不在此列表的模型继续走 Generic/OpenAI兼容端点。URL 会根据 gemini_api_url 自适应拼接 generateContent。",
+        "hint": "填入这里的模型会自动走 Gemini 端点；不在此列表的模型继续走 Generic/OpenAI兼容端点。",
         "items": {
             "type": "string",
             "description": "走 Gemini 端点的模型 ID"
@@ -175,7 +162,7 @@
     "error_429_custom_tip": {
         "description": "【错误提示】429错误自定义提示",
         "type": "text",
-        "hint": "检测到429错误（请求过于频繁）时，在发送的消息下面附加的自定义提示。支持变量：{status_code}、{elapsed}、{detail}、{provider_message}、{model}、{api_mode}、{endpoint_type}、{endpoint}、{request_id}。",
+        "hint": "检测到429错误（请求过于频繁）时，在发送的消息下面附加的自定义提示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "enable_http_status_code": {
@@ -187,55 +174,55 @@
     "error_default_message": {
         "description": "【错误提示】默认错误自定义消息",
         "type": "text",
-        "hint": "所有错误的兜底模板。为空时使用插件默认格式。支持变量：{status_text}、{status_code}、{elapsed}、{error_type}、{message}、{detail}、{provider_message}、{provider_code}、{provider_type}、{request_id}、{model}、{api_mode}、{endpoint_type}、{endpoint}、{url}、{image_url}、{image_count}、{prompt}。",
+        "hint": "所有错误的兜底模板。为空时使用插件默认格式。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_400_message": {
         "description": "【错误提示】400错误自定义消息",
         "type": "text",
-        "hint": "HTTP 400参数错误时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 400参数错误时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_401_message": {
         "description": "【错误提示】401错误自定义消息",
         "type": "text",
-        "hint": "HTTP 401鉴权失败时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 401鉴权失败时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_403_message": {
         "description": "【错误提示】403错误自定义消息",
         "type": "text",
-        "hint": "HTTP 403无权限或被拒绝时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 403无权限或被拒绝时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_404_message": {
         "description": "【错误提示】404错误自定义消息",
         "type": "text",
-        "hint": "HTTP 404端点或模型不存在时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 404端点或模型不存在时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_429_message": {
         "description": "【错误提示】429错误自定义消息",
         "type": "text",
-        "hint": "HTTP 429错误（请求过于频繁）时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 429错误（请求过于频繁）时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_500_message": {
         "description": "【错误提示】500错误自定义消息",
         "type": "text",
-        "hint": "HTTP 500错误（服务器内部错误）时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 500错误（服务器内部错误）时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_timeout_message": {
         "description": "【错误提示】超时错误自定义消息",
         "type": "text",
-        "hint": "请求超时时显示。支持变量同默认错误模板。",
+        "hint": "请求超时时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "error_200_no_image_message": {
         "description": "【错误提示】200但无图片自定义消息",
         "type": "text",
-        "hint": "HTTP 200成功但未返回图片时显示。支持变量同默认错误模板。",
+        "hint": "HTTP 200成功但未返回图片时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
     "return_full_response_on_no_image": {
@@ -252,9 +239,29 @@
     },
     "extra_prefix": {
         "description": "【基础】自定义提示词前缀",
-        "hint": "自定义 Prompt 入口命令。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图。修改后示例中的 bnn 要替换成你的新前缀。",
-        "type": "string",
-        "default": "bnn"
+        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图。可添加多个入口前缀。",
+        "type": "template_list",
+        "default": [
+            {
+                "__template_key": "prefix",
+                "prefix": "bnn"
+            }
+        ],
+        "templates": {
+            "prefix": {
+                "name": "前缀条目",
+                "item_label": "提示词前缀",
+                "hint": "配置一个自定义 Prompt 入口命令。",
+                "items": {
+                    "prefix": {
+                        "label": "前缀",
+                        "type": "string",
+                        "default": "bnn",
+                        "hint": "例如：bnn、画图、生图。使用时不需要在这里填写 #。"
+                    }
+                }
+            }
+        }
     },
     "preset_list_command": {
         "description": "【基础】提示词列表触发指令",
@@ -265,7 +272,7 @@
     "preset_list_template": {
         "description": "【基础】提示词列表模板",
         "type": "string",
-        "hint": "和 wtcx 一样使用 templates/ 下的 HTML 模板渲染图片。当前内置 default，对应 templates/preset_list.html。",
+        "hint": "和 wtcx 一样使用 templates/ 下的 HTML 模板渲染图片。当前内置 default，对应 templates/preset_list.html。HTML模板可用占位符：{{ title }}=页面标题，{{ subtitle }}=副标题，{{ command_text }}=列表触发命令文本，{{ cards_html }}=预设卡片HTML。注意这里不是聊天消息模板，不能直接使用 {model}、{prompt} 这类变量。",
         "options": [
             "default"
         ],
@@ -450,23 +457,26 @@
     "prompt_list": {
         "description": "【预设】提示词列表",
         "hint": "自定义快捷预设。按列表对象填写指令和提示词；触发指令可直接作为命令使用，如 #贴纸化。也兼容旧格式 `触发词:提示词`，并可用 #lm添加 管理。",
-        "type": "list",
+        "type": "template_list",
         "default": [],
-        "items": {
-            "type": "object",
-            "item_label": "提示词预设",
-            "items": {
-                "command": {
-                    "label": "指令",
-                    "type": "string",
-                    "default": "",
-                    "hint": "例如：贴纸化，不需要写 #。"
-                },
-                "prompt": {
-                    "label": "提示词",
-                    "type": "text",
-                    "default": "",
-                    "hint": "该快捷预设实际发送给模型的提示词。"
+        "templates": {
+            "preset": {
+                "name": "预设条目",
+                "item_label": "提示词预设",
+                "hint": "配置一个快捷触发指令和对应提示词。",
+                "items": {
+                    "command": {
+                        "label": "指令",
+                        "type": "string",
+                        "default": "",
+                        "hint": "例如：贴纸化，不需要写 #。"
+                    },
+                    "prompt": {
+                        "label": "提示词",
+                        "type": "text",
+                        "default": "",
+                        "hint": "该快捷预设实际发送给模型的提示词。"
+                    }
                 }
             }
         }
@@ -474,19 +484,19 @@
     "custom_success_message": {
         "description": "【自定义提示】生成成功提示模板",
         "type": "text",
-        "hint": "生成成功后随图片发送的文字模板。留空使用默认格式。可用变量：{model}=模型名，{label}=显示标签/预设名，{image_count}=输入图片数量，{elapsed}=总耗时秒数，{remaining}=剩余次数，{prompt}=提示词前 50 字，{batch_count}=本次倍率总数，{batch_index}=当前第几张，{max_batch_concurrency}=本次最大并发数。",
+        "hint": "生成成功后随图片发送的文字模板。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前图片耗时秒数，{remaining}=扣次后的剩余次数文本，{prompt}=提示词前50字。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=当前返回第几张，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
         "default": ""
     },
     "custom_img2img_start_message": {
         "description": "【自定义提示】图生图开始消息模板",
         "type": "text",
-        "hint": "检测到输入图片后，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀，{action_type}=图生图，{label}=显示标签/预设名，{model}=模型名，{image_count}=输入图片数量，{prompt}=提示词前 50 字，{batch_count}=倍率，{max_batch_concurrency}=本次最大并发数。",
+        "hint": "检测到输入图片后，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为图生图，{label}=显示标签/预设名，{prompt}=提示词前50字，{model}=本次实际调用模型，{image_count}=输入图片数量，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。",
         "default": ""
     },
     "custom_text2img_start_message": {
         "description": "【自定义提示】文生图开始消息模板",
         "type": "text",
-        "hint": "未携带图片、走文生图时，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀，{action_type}=文生图，{label}=显示标签，{model}=模型名，{image_count}=0，{prompt}=提示词前 50 字，{batch_count}=倍率，{max_batch_concurrency}=本次最大并发数。",
+        "hint": "未携带图片、走文生图时，开始生成前发送的文字模板。留空使用默认格式。#bnn/自定义入口文生图可用：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为文生图，{label}=显示标签/截断后的提示词，{prompt}=提示词前50字，{model}=本次实际调用模型，{image_count}=固定为0，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前只替换 {mode_prefix}、{prompt}、{model}。",
         "default": ""
     }
 }

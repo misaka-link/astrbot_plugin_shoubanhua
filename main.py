@@ -1183,6 +1183,49 @@ class FigurineProPlugin(Star):
     def _get_required_invocation_cost(self) -> int:
         return 1
 
+    def _resolve_generation_access(
+        self,
+        event: AstrMessageEvent,
+        sender_id: str,
+        group_id: Optional[str],
+        required_cost: int,
+    ) -> Tuple[bool, Optional[str], Optional[str]]:
+        user_blacklist = [self._norm_id(x) for x in (self.conf.get("user_blacklist") or [])]
+        if sender_id in user_blacklist:
+            return False, None, None
+
+        is_master = self.is_global_admin(event)
+
+        if group_id:
+            group_blacklist = [self._norm_id(x) for x in (self.conf.get("group_blacklist") or [])]
+            if group_id in group_blacklist and not is_master:
+                return False, None, None
+
+        group_whitelist = [self._norm_id(x) for x in (self.conf.get("group_whitelist") or [])]
+        user_whitelist = [self._norm_id(x) for x in (self.conf.get("user_whitelist") or [])]
+
+        if is_master:
+            return True, "free", None
+        if group_id and group_id in group_whitelist:
+            return True, "free", None
+        if group_id and group_whitelist:
+            return False, None, "❌ 本群未授权使用此功能。"
+        if user_whitelist and sender_id not in user_whitelist:
+            return False, None, None
+
+        if group_id and self.conf.get("enable_group_limit", False):
+            if self._get_group_count(group_id) >= required_cost:
+                return True, "group", None
+
+        if self.conf.get("enable_user_limit", True):
+            if self._get_user_count(sender_id) >= required_cost:
+                return True, "user", None
+
+        if not self.conf.get("enable_group_limit", False) and not self.conf.get("enable_user_limit", True):
+            return True, "free", None
+
+        return False, None, self._build_limit_exhausted_message(group_id)
+
     def _build_reply_chain(self, event: AstrMessageEvent) -> List[Reply]:
         msg_obj = getattr(event, "message_obj", None)
         message_id = getattr(msg_obj, "message_id", None)
@@ -1856,55 +1899,18 @@ class FigurineProPlugin(Star):
         # --- 权限与次数逻辑 ---
         sender_id = self._norm_id(event.get_sender_id())
         group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
-
-        user_blacklist = [self._norm_id(x) for x in (self.conf.get("user_blacklist") or [])]
-        if sender_id in user_blacklist: return
-
-        if group_id:
-            group_blacklist = [self._norm_id(x) for x in (self.conf.get("group_blacklist") or [])]
-            if group_id in group_blacklist: return
-
-        raw_g_whitelist = self.conf.get("group_whitelist") or []
-        group_whitelist = [self._norm_id(x) for x in raw_g_whitelist]
-
-        raw_u_whitelist = self.conf.get("user_whitelist") or []
-        user_whitelist = [self._norm_id(x) for x in raw_u_whitelist]
-
-        is_master = self.is_global_admin(event)
-        deduction_source = None
         per_invocation_cost = self._get_required_invocation_cost()
         required_cost = per_invocation_cost * batch_count
-
-        if is_master:
-            deduction_source = 'free'
-        elif group_id and group_id in group_whitelist:
-            deduction_source = 'free'
-        elif group_id and len(group_whitelist) > 0:
-            yield self._reply_plain_result(event, "❌ 本群未授权使用此功能。")
+        allowed, deduction_source, deny_message = self._resolve_generation_access(
+            event,
+            sender_id,
+            group_id,
+            required_cost,
+        )
+        if not allowed:
+            if deny_message:
+                yield self._reply_plain_result(event, deny_message)
             return
-        elif len(user_whitelist) > 0 and sender_id not in user_whitelist:
-            return
-
-        if deduction_source is None:
-            if group_id and self.conf.get("enable_group_limit", False):
-                g_cnt = self._get_group_count(group_id)
-                if g_cnt >= required_cost:
-                    deduction_source = 'group'
-
-            if deduction_source is None and self.conf.get("enable_user_limit", True):
-                u_cnt = self._get_user_count(sender_id)
-                if u_cnt >= required_cost:
-                    deduction_source = 'user'
-
-            if deduction_source is None:
-                if not self.conf.get("enable_group_limit", False) and not self.conf.get("enable_user_limit", True):
-                    deduction_source = 'free'
-                else:
-                    yield self._reply_plain_result(
-                        event,
-                        self._build_limit_exhausted_message(group_id)
-                    )
-                    return
 
         if requested_batch_count and requested_batch_count > batch_count:
             yield self._reply_plain_result(event, f"⚠️ 本次倍率最高为 {batch_count}，已按 {batch_count} 次并发生成。")
@@ -2196,28 +2202,16 @@ class FigurineProPlugin(Star):
         group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
 
         required_cost = self._get_required_invocation_cost()
-
-        deduction_source = None
-        if self.is_global_admin(event):
-            deduction_source = 'free'
-        else:
-            if group_id and self.conf.get("enable_group_limit", False):
-                if self._get_group_count(group_id) >= required_cost:
-                    deduction_source = 'group'
-
-            if deduction_source is None and self.conf.get("enable_user_limit", True):
-                if self._get_user_count(sender_id) >= required_cost:
-                    deduction_source = 'user'
-
-            if deduction_source is None:
-                if not self.conf.get("enable_group_limit", False) and not self.conf.get("enable_user_limit", True):
-                    deduction_source = 'free'
-                else:
-                    yield self._reply_plain_result(
-                        event,
-                        self._build_limit_exhausted_message(group_id)
-                    )
-                    return
+        allowed, deduction_source, deny_message = self._resolve_generation_access(
+            event,
+            sender_id,
+            group_id,
+            required_cost,
+        )
+        if not allowed:
+            if deny_message:
+                yield self._reply_plain_result(event, deny_message)
+            return
 
         display_prompt = prompt[:10] + "..." if len(prompt) > 10 else prompt
         mode_prefix = ""

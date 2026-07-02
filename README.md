@@ -66,7 +66,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `download_retries` | 图片下载重试次数 |
 | `help_text` | 自定义 #手办化帮助 文本 |
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
-| `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群不限制次数 |
+| `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群不限制次数；全局管理员可无视群黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组次数限制 |
 | `enable_checkin` | 是否启用每日签到获取次数 |
 | `checkin_fixed_reward` | 签到固定奖励（未开启随机时） |

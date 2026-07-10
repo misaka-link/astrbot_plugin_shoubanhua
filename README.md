@@ -20,7 +20,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - **强大的管理功能 (管理员限定)**：
   - **Key 管理**：通过指令动态添加、查看、删除 API Key，支持配置多个 Key 并自动轮换使用。
   - **用户次数管理**：可为普通用户设置使用次数，并通过指令进行增加和查询，实现轻量级付费或激励机制。
-- **高度可定制**：所有指令的默认提示词（Prompt）都在后台配置文件中开放，可随时按自己的喜好进行微调。
+- **高度可定制**：所有指令的默认提示词（Prompt）都在后台配置文件中开放，也可按模型指定最终提示词模板。
 - **代理支持**：内置 HTTP / SOCKS5 代理支持，方便在特殊网络环境下部署。
 
 ## 安装与配置
@@ -43,6 +43,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `model_list` | 可用模型 ID 列表，默认包含 nano-banana 等 |
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
+| `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `images_generations_model_list` | 走 `/v1/images/generations` 的模型列表。常用于文生图 |
 | `images_edits_model_list` | 走 `/v1/images/edits` 的模型列表。常用于带图请求，插件会用 multipart/form-data 上传图片 |
@@ -77,6 +78,25 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 > 使用 SOCKS 代理时，需要在 AstrBot 的 Python 环境中先执行 `pip install aiohttp_socks`。
 
+### 按模型预设提示词模板
+
+`model_prompt_template_list` 用于给不同模型配置不同的最终提示词模板。命中模型后，插件会用该模板替换默认英文包装提示词；未命中模型时保持原逻辑。
+
+可用变量：
+
+- `{prompt}`：用户输入或预设展开后的提示词内容。
+- `{model}`：本次实际调用模型。
+- `{mode}`：生成模式，值为 `文生图` 或 `图生图`。
+- `{image_count}`：输入图片数量。
+- `{default_prompt}`：插件原本默认包装后的完整提示词。
+
+配置示例：
+
+| 模型 | 提示词模板 |
+| --- | --- |
+| `gemini-2.5-flash-image` | `请根据以下内容直接生成图片，不要解释：{prompt}` |
+| `nano-banana` | `{default_prompt}` |
+
 ## 使用方法
 
 - **发送图片**并使用命令。
@@ -91,6 +111,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 ### 本次更新
 
 - 后台新增触发指令与模型绑定列表，配置项位于最上方。
+- 后台新增按模型配置的预设提示词列表，可覆盖不同模型最终收到的提示词模板。
 - 移除后台 `gemini_official` / API 模式切换，改为 `gemini_model_list` 自动路由。
 - 预设列表改为 HTML 模板渲染，模板位于 `templates/preset_list.html`。
 - `prompt_list` 改为对象列表，并自动兼容/导入旧字符串格式。

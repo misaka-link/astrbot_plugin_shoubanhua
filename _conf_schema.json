@@ -26,6 +26,33 @@
             }
         }
     },
+    "model_prompt_template_list": {
+        "description": "【通用】预设提示词列表",
+        "type": "template_list",
+        "hint": "按模型指定最终发送给绘图接口的提示词模板。每项包含两个参数：模型、提示词模板。命中模型后会用模板替换插件默认的英文包装提示词；未命中则保持原逻辑。支持变量：{prompt}=用户输入或预设展开后的提示词内容，{model}=本次实际调用模型，{mode}=生成模式（文生图/图生图），{image_count}=输入图片数量，{default_prompt}=插件原本默认包装后的完整提示词。",
+        "default": [],
+        "templates": {
+            "model_prompt_template": {
+                "name": "预设提示词",
+                "item_label": "预设提示词",
+                "hint": "配置一个模型和该模型专用的提示词模板。",
+                "items": {
+                    "model": {
+                        "label": "模型",
+                        "type": "string",
+                        "default": "",
+                        "hint": "填写 model_list、gemini_model_list 或端点模型列表中的模型名。"
+                    },
+                    "prompt_template": {
+                        "label": "提示词模板",
+                        "type": "text",
+                        "default": "",
+                        "hint": "最终发送给模型的提示词模板。可用变量：{prompt}=用户输入或预设展开后的提示词内容；{model}=本次实际调用模型；{mode}=文生图或图生图；{image_count}=输入图片数量；{default_prompt}=插件原本默认包装后的完整提示词。示例：请根据以下内容直接生成图片，不要解释：{prompt}"
+                    }
+                }
+            }
+        }
+    },
     "generic_api_url": {
         "description": "【Generic】API地址",
         "type": "string",

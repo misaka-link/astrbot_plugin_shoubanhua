@@ -693,6 +693,90 @@ class FigurineProPlugin(Star):
     def _get_command_model(self, command: str) -> Optional[str]:
         return self._get_command_model_map().get((command or "").strip())
 
+    def _get_model_prompt_template_map(self) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        raw_list = self.conf.get("model_prompt_template_list", [])
+
+        def add_item(model: Any, template: Any):
+            model_name = str(model or "").strip()
+            prompt_template = str(template or "").strip()
+            if model_name and prompt_template:
+                mapping[model_name] = prompt_template
+
+        if isinstance(raw_list, dict):
+            for model_name, prompt_template in raw_list.items():
+                add_item(model_name, prompt_template)
+            return mapping
+
+        if not isinstance(raw_list, list):
+            return mapping
+
+        def first_value(*values: Any) -> Any:
+            for value in values:
+                if value is not None:
+                    return value
+            return ""
+
+        for item in raw_list:
+            if isinstance(item, dict):
+                model_name = first_value(
+                    item.get("model"),
+                    item.get("模型"),
+                    item.get("model_name"),
+                    item.get("模型名"),
+                )
+                prompt_template = first_value(
+                    item.get("prompt_template"),
+                    item.get("提示词模板"),
+                    item.get("template"),
+                    item.get("模板"),
+                    item.get("prompt"),
+                    item.get("提示词"),
+                )
+                add_item(model_name, prompt_template)
+            elif isinstance(item, str) and ":" in item:
+                model_name, prompt_template = item.split(":", 1)
+                add_item(model_name, prompt_template)
+
+        return mapping
+
+    def _get_model_prompt_template(self, model_name: str) -> Optional[str]:
+        return self._get_model_prompt_template_map().get((model_name or "").strip())
+
+    @staticmethod
+    def _render_prompt_template(template: str, variables: Dict[str, Any]) -> str:
+        def replace_var(match: re.Match) -> str:
+            key = match.group(1)
+            if key in variables:
+                return str(variables[key])
+            return match.group(0)
+
+        return re.sub(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", replace_var, template)
+
+    def _build_final_prompt(self, prompt: str, model_name: str, image_count: int) -> str:
+        user_prompt = str(prompt or "")
+        has_images = image_count > 0
+        if has_images:
+            default_prompt = f"Re-imagine the attached image with the following style/description: {user_prompt}. Draw it directly. Do not analyze."
+        else:
+            default_prompt = f"Generate a high quality image based on this description: {user_prompt}"
+
+        prompt_template = self._get_model_prompt_template(model_name)
+        if not prompt_template:
+            return default_prompt
+
+        rendered_prompt = self._render_prompt_template(
+            prompt_template,
+            {
+                "prompt": user_prompt,
+                "model": (model_name or "").strip(),
+                "mode": "图生图" if has_images else "文生图",
+                "image_count": image_count,
+                "default_prompt": default_prompt,
+            },
+        ).strip()
+        return rendered_prompt or default_prompt
+
     async def _migrate_command_model_list_config(self):
         raw_list = self.conf.get("command_model_list", [])
         if not isinstance(raw_list, list):
@@ -1478,13 +1562,8 @@ class FigurineProPlugin(Star):
         if not api_key:
             return make_error("config_error", f"无可用 API Key (请在 {api_mode} 池中添加Key)", 0)
 
-        # --- 构造最终 Prompt (注入指令以强制画图) ---
-        if len(image_bytes_list) > 0:
-            # 图生图 - 使用默认模板
-            final_prompt = f"Re-imagine the attached image with the following style/description: {prompt}. Draw it directly. Do not analyze."
-        else:
-            # 文生图 - 使用默认模板
-            final_prompt = f"Generate a high quality image based on this description: {prompt}"
+        # --- 构造最终 Prompt (支持按模型指定预设提示词模板) ---
+        final_prompt = self._build_final_prompt(prompt, model_name, len(image_bytes_list))
 
         headers = {
             "Connection": "keep-alive"

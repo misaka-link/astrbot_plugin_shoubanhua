@@ -56,7 +56,7 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方OpenAI绘图格式和Gemini模型路由，文生图/图生图插件",
-    "1.7.6",
+    "1.7.7",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -82,6 +82,9 @@ class FigurineProPlugin(Star):
         "images_generations": "images_generations_model_list",
         "images_edits": "images_edits_model_list",
     }
+
+    IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
+    IMAGE_MODERATION_OPTIONS = {"auto", "low"}
 
     PRESET_LIST_RENDER_OPTIONS = {
         "width": 1280,
@@ -743,6 +746,51 @@ class FigurineProPlugin(Star):
     def _get_model_prompt_template(self, model_name: str) -> Optional[str]:
         return self._get_model_prompt_template_map().get((model_name or "").strip())
 
+    def _get_model_parameter_map(self) -> Dict[str, Dict[str, str]]:
+        mapping: Dict[str, Dict[str, str]] = {}
+        raw_list = self.conf.get("model_parameter_list", [])
+
+        def normalize_option(value: Any, allowed: set[str], default: str) -> str:
+            normalized = str(value or default).strip().lower()
+            return normalized if normalized in allowed else default
+
+        def add_item(model: Any, quality: Any = "auto", moderation: Any = "auto"):
+            model_name = str(model or "").strip()
+            if not model_name:
+                return
+            mapping[model_name] = {
+                "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
+                "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
+            }
+
+        if isinstance(raw_list, dict):
+            for model_name, parameters in raw_list.items():
+                if isinstance(parameters, dict):
+                    add_item(
+                        model_name,
+                        parameters.get("quality") or parameters.get("质量"),
+                        parameters.get("moderation") or parameters.get("审核"),
+                    )
+            return mapping
+
+        if not isinstance(raw_list, list):
+            return mapping
+
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            add_item(
+                item.get("model") or item.get("模型") or item.get("model_name") or item.get("模型名"),
+                item.get("quality") or item.get("质量"),
+                item.get("moderation") or item.get("审核"),
+            )
+
+        return mapping
+
+    def _get_model_parameters(self, model_name: str) -> Dict[str, str]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        return dict(parameters) if parameters else {}
+
     @staticmethod
     def _render_prompt_template(template: str, variables: Dict[str, Any]) -> str:
         def replace_var(match: re.Match) -> str:
@@ -889,7 +937,11 @@ class FigurineProPlugin(Star):
         return "gemini" if (model_name or "").strip() in gemini_models else "generic"
 
     def _get_generic_endpoint_type_for_model(self, model_name: str, has_images: bool) -> str:
-        """根据端点模型列表决定 Generic 模式的请求端点。"""
+        """根据端点模型列表和输入图片决定 Generic 模式的请求端点。
+
+        同一模型同时配置在 Images Edits 与 Images Generations 列表时，
+        图生图优先走 Edits，文生图走 Generations。
+        """
         if not self._has_generic_endpoint_model_routes():
             return "chat_completions"
 
@@ -1220,6 +1272,7 @@ class FigurineProPlugin(Star):
             "prompt": final_prompt,
             "n": 1,
         }
+        payload.update(self._get_model_parameters(model_name))
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
@@ -1240,6 +1293,8 @@ class FigurineProPlugin(Star):
         form.add_field("model", model_name)
         form.add_field("prompt", final_prompt)
         form.add_field("n", "1")
+        for field_name, value in self._get_model_parameters(model_name).items():
+            form.add_field(field_name, value)
 
         for idx, image_bytes in enumerate(image_bytes_list):
             mime_type = self._guess_image_mime_type(image_bytes)

@@ -53,6 +53,49 @@
             }
         }
     },
+    "model_parameter_list": {
+        "description": "【通用】模型参数设置",
+        "type": "template_list",
+        "hint": "按模型设置 Images Generations 和 Images Edits 端点参数。只有模型实际走 `/v1/images/generations` 或 `/v1/images/edits` 时才会发送 quality 和 moderation；未配置的模型保持原请求不变。",
+        "default": [],
+        "templates": {
+            "model_parameters": {
+                "name": "模型参数设置",
+                "item_label": "模型参数设置",
+                "hint": "配置一个模型在 Images Generations / Images Edits 端点使用的质量和审核参数。",
+                "items": {
+                    "model": {
+                        "label": "模型",
+                        "type": "string",
+                        "default": "",
+                        "hint": "填写 images_generations_model_list 或 images_edits_model_list 中的模型名。"
+                    },
+                    "quality": {
+                        "label": "质量",
+                        "type": "string",
+                        "options": [
+                            "low",
+                            "medium",
+                            "high",
+                            "auto"
+                        ],
+                        "default": "auto",
+                        "hint": "图片生成质量。可选 low、medium、high、auto，默认 auto。"
+                    },
+                    "moderation": {
+                        "label": "审核",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "low"
+                        ],
+                        "default": "auto",
+                        "hint": "auto（默认）：标准过滤，旨在限制创建某些类别的潜在不适合年龄的内容；low：过滤限制较少。"
+                    }
+                }
+            }
+        }
+    },
     "generic_api_url": {
         "description": "【Generic】API地址",
         "type": "string",
@@ -125,7 +168,7 @@
     "images_generations_model_list": {
         "description": "【Generic路由】Images Generations模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；如果携带图片，插件会把图片转成 image/images 字段传入。",
+        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；如果模型同时也在 Images Edits 模型列表中，文生图走此端点，图生图优先走 Images Edits。",
         "items": {
             "type": "string",
             "description": "走 images/generations 的模型 ID"
@@ -135,7 +178,7 @@
     "images_edits_model_list": {
         "description": "【Generic路由】Images Edits模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按图片编辑接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/edits`，使用 multipart/form-data 上传 image 和 prompt。此端点必须携带至少一张图片，适合图生图/改图模型。",
+        "hint": "仅 Generic 模式生效。把需要按图片编辑接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/edits`，使用 multipart/form-data 上传 image 和 prompt。此端点必须携带至少一张图片，适合图生图/改图模型；同一模型也在 Images Generations 模型列表中时，图生图优先走此端点。",
         "items": {
             "type": "string",
             "description": "走 images/edits 的模型 ID"

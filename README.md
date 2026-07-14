@@ -44,6 +44,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
+| `model_parameter_list` | 模型参数设置列表；模型走 Images Generations / Edits 端点时按模型发送 `quality` 和 `moderation` |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `images_generations_model_list` | 走 `/v1/images/generations` 的模型列表。常用于文生图 |
 | `images_edits_model_list` | 走 `/v1/images/edits` 的模型列表。常用于带图请求，插件会用 multipart/form-data 上传图片 |
@@ -74,7 +75,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `enable_random_checkin` / `checkin_random_reward_max` | 签到随机奖励开关与最大值 |
 | `prompt_list` | 预设提示词列表，每项包含 `指令` / `提示词`；旧 `触发词:提示词` 会自动迁移 |
 
-> 路径说明：建议把 `generic_api_url` 填成上游 Base URL 或任一完整端点 URL，然后在三个端点模型列表中按模型分流；未填写或未匹配的模型默认走 `/v1/chat/completions`。
+> 路径说明：建议把 `generic_api_url` 填成上游 Base URL 或任一完整端点 URL，然后在三个端点模型列表中按模型分流；未填写或未匹配的模型默认走 `/v1/chat/completions`。同一模型同时配置在 `images_generations_model_list` 和 `images_edits_model_list` 时，文生图走 `/v1/images/generations`，图生图走 `/v1/images/edits`。
 
 > 使用 SOCKS 代理时，需要在 AstrBot 的 Python 环境中先执行 `pip install aiohttp_socks`。
 
@@ -97,6 +98,23 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `gemini-2.5-flash-image` | `请根据以下内容直接生成图片，不要解释：{prompt}` |
 | `nano-banana` | `{default_prompt}` |
 
+### 模型参数设置
+
+`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式，按模型配置 Images Generations 和 Images Edits 请求参数。
+
+- `模型`：填写 `images_generations_model_list` 或 `images_edits_model_list` 中的模型名。
+- `质量`：可选 `low`、`medium`、`high`、`auto`，默认 `auto`。
+- `审核`：可选 `auto`、`low`。`auto` 为标准过滤；`low` 的过滤限制较少。
+
+只有请求实际走 `/v1/images/generations` 或 `/v1/images/edits` 且模型命中配置时，插件才会增加 `quality` 和 `moderation` 参数。未配置模型、Chat Completions 和 Gemini 路由均保持原请求不变。
+
+配置示例：
+
+| 模型 | 质量 | 审核 |
+| --- | --- | --- |
+| `gpt-image-1` | `high` | `auto` |
+| `gpt-image-1-mini` | `medium` | `low` |
+
 ## 使用方法
 
 - **发送图片**并使用命令。
@@ -112,6 +130,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 - 后台新增触发指令与模型绑定列表，配置项位于最上方。
 - 后台新增按模型配置的预设提示词列表，可覆盖不同模型最终收到的提示词模板。
+- 后台新增模型参数设置列表，支持为 Images Generations / Edits 模型指定质量与审核参数。
 - 移除后台 `gemini_official` / API 模式切换，改为 `gemini_model_list` 自动路由。
 - 预设列表改为 HTML 模板渲染，模板位于 `templates/preset_list.html`。
 - `prompt_list` 改为对象列表，并自动兼容/导入旧字符串格式。

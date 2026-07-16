@@ -870,14 +870,35 @@ class FigurineProPlugin(Star):
             aligned_units = round(units)
         return max(cls.ADAPTIVE_SIZE_ALIGNMENT, aligned_units * cls.ADAPTIVE_SIZE_ALIGNMENT)
 
+    @staticmethod
+    def _parse_aspect_ratio(value: Any) -> Optional[Tuple[float, float]]:
+        """解析宽:高比例，兼容半角和全角冒号。"""
+        match = re.fullmatch(
+            r"\s*(\d+(?:\.\d+)?)\s*[:：]\s*(\d+(?:\.\d+)?)\s*",
+            str(value or ""),
+        )
+        if not match:
+            return None
+        width, height = float(match.group(1)), float(match.group(2))
+        if width <= 0 or height <= 0:
+            return None
+        return width, height
+
     def _calculate_adaptive_image_size(
             self,
             source_width: int,
             source_height: int,
             resolution: str,
+            aspect_ratio: Optional[str] = None,
     ) -> str:
-        is_landscape = source_width >= source_height
-        source_ratio = max(source_width, source_height) / min(source_width, source_height)
+        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if parsed_ratio:
+            ratio_width, ratio_height = parsed_ratio
+            is_landscape = ratio_width >= ratio_height
+            source_ratio = max(ratio_width / ratio_height, ratio_height / ratio_width)
+        else:
+            is_landscape = source_width >= source_height
+            source_ratio = max(source_width, source_height) / min(source_width, source_height)
         target_ratio = min(source_ratio, self.ADAPTIVE_MAX_ASPECT_RATIO)
         target_long_edge = self.ADAPTIVE_RESOLUTION_LONG_EDGES[resolution]
         target_short_edge = target_long_edge / target_ratio
@@ -908,8 +929,10 @@ class FigurineProPlugin(Star):
             short_edge = self._align_adaptive_dimension(short_edge * scale, "floor")
 
         if source_ratio > self.ADAPTIVE_MAX_ASPECT_RATIO:
+            ratio_label = aspect_ratio or f"{source_width}:{source_height}"
+            ratio_subject = "目标比例" if aspect_ratio else "首图比例"
             logger.warning(
-                f"首图比例 {source_width}:{source_height} 超过自适应 size 的 3:1 限制，"
+                f"{ratio_subject} {ratio_label} 超过自适应 size 的 3:1 限制，"
                 "已按最大 3:1 比例计算 size"
             )
 
@@ -923,6 +946,7 @@ class FigurineProPlugin(Star):
             model_name: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str],
+            aspect_ratio: Optional[str] = None,
     ) -> Optional[str]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         normalized_resolution = str(resolution or "").strip().upper()
@@ -951,11 +975,12 @@ class FigurineProPlugin(Star):
             source_width,
             source_height,
             normalized_resolution,
+            aspect_ratio=aspect_ratio,
         )
 
         logger.info(
             f"自适应比例参数: model={model_name}, source={source_width}x{source_height}, "
-            f"resolution={normalized_resolution}, size={size}"
+            f"resolution={normalized_resolution}, aspect_ratio={aspect_ratio or 'source'}, size={size}"
         )
         return size
 
@@ -964,9 +989,15 @@ class FigurineProPlugin(Star):
             model_name: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> Dict[str, str]:
         parameters = self._get_model_parameters(model_name)
-        adaptive_size = self._get_adaptive_image_size(model_name, image_bytes_list, resolution)
+        adaptive_size = self._get_adaptive_image_size(
+            model_name,
+            image_bytes_list,
+            resolution,
+            aspect_ratio,
+        )
         if adaptive_size:
             parameters["size"] = adaptive_size
         return parameters
@@ -1154,8 +1185,8 @@ class FigurineProPlugin(Star):
     def _parse_command_token(
             self,
             token: str,
-    ) -> Tuple[str, int, Optional[int], Optional[int], Optional[str]]:
-        """解析命令词末尾可任意排序的模型、批量和分辨率修饰符。"""
+    ) -> Tuple[str, int, Optional[int], Optional[int], Optional[str], Optional[str]]:
+        """解析命令词末尾可任意排序的模型、批量、分辨率和比例修饰符。"""
         command = str(token or "").strip()
         default_batch = _normalize_positive_int(self.conf.get("default_batch_count", 1), 1)
         max_batch = _normalize_positive_int(self.conf.get("max_batch_multiplier", 4), 4)
@@ -1163,12 +1194,16 @@ class FigurineProPlugin(Star):
         requested_batch_count: Optional[int] = None
         model_index: Optional[int] = None
         resolution: Optional[str] = None
+        aspect_ratio: Optional[str] = None
         batch_symbol = str(self.conf.get("batch_multiplier_symbol", "*") or "").strip()
         resolution_symbol = str(self.conf.get("resolution_symbol", "x") or "").strip()
+        aspect_ratio_symbol = str(self.conf.get("aspect_ratio_symbol", "=") or "").strip()
 
         # 两种符号相同时无法区分含义，优先保留原有批量写法。
         if resolution_symbol == batch_symbol:
             resolution_symbol = ""
+        if aspect_ratio_symbol in {batch_symbol, resolution_symbol}:
+            aspect_ratio_symbol = ""
 
         while command:
             matched = False
@@ -1192,6 +1227,19 @@ class FigurineProPlugin(Star):
                     command = command[:resolution_match.start()].strip()
                     matched = True
 
+            if not matched and aspect_ratio is None and aspect_ratio_symbol:
+                ratio_match = re.search(
+                    rf"{re.escape(aspect_ratio_symbol)}"
+                    r"(\d+(?:\.\d+)?)\s*[:：]\s*(\d+(?:\.\d+)?)$",
+                    command,
+                )
+                if ratio_match:
+                    ratio_value = f"{ratio_match.group(1)}:{ratio_match.group(2)}"
+                    if self._parse_aspect_ratio(ratio_value):
+                        aspect_ratio = ratio_value
+                        command = command[:ratio_match.start()].strip()
+                        matched = True
+
             if not matched and model_index is None:
                 model_match = re.search(r"[\(（](\d+)[\)）]$", command)
                 if model_match:
@@ -1202,7 +1250,7 @@ class FigurineProPlugin(Star):
             if not matched:
                 break
 
-        return command, batch_count, requested_batch_count, model_index, resolution
+        return command, batch_count, requested_batch_count, model_index, resolution, aspect_ratio
 
     def is_global_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
@@ -1537,13 +1585,19 @@ class FigurineProPlugin(Star):
             final_prompt: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str],
+            aspect_ratio: Optional[str] = None,
     ) -> Dict[str, Any]:
         parameters: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
             "n": "1",
         }
-        parameters.update(self._get_image_request_parameters(model_name, image_bytes_list, resolution))
+        parameters.update(self._get_image_request_parameters(
+            model_name,
+            image_bytes_list,
+            resolution,
+            aspect_ratio,
+        ))
         parameters["image"] = "<image omitted>"
         return parameters
 
@@ -1563,13 +1617,19 @@ class FigurineProPlugin(Star):
             final_prompt: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
             "n": 1,
         }
-        payload.update(self._get_image_request_parameters(model_name, image_bytes_list, resolution))
+        payload.update(self._get_image_request_parameters(
+            model_name,
+            image_bytes_list,
+            resolution,
+            aspect_ratio,
+        ))
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
@@ -1586,6 +1646,7 @@ class FigurineProPlugin(Star):
             final_prompt: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> aiohttp.FormData:
         form = aiohttp.FormData()
         form.add_field("model", model_name)
@@ -1595,6 +1656,7 @@ class FigurineProPlugin(Star):
                 model_name,
                 image_bytes_list,
                 resolution,
+                aspect_ratio,
         ).items():
             form.add_field(field_name, value)
 
@@ -1959,6 +2021,7 @@ class FigurineProPlugin(Star):
             prompt: str,
             override_model: str | None = None,
             resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> Tuple[bytes | str | Dict[str, Any], int]:
         """
         调用API生成图片
@@ -2066,6 +2129,7 @@ class FigurineProPlugin(Star):
                     final_prompt,
                     image_bytes_list,
                     resolution,
+                    aspect_ratio,
                 )
             elif generic_endpoint_type == "images_generations":
                 headers["Content-Type"] = "application/json"
@@ -2074,6 +2138,7 @@ class FigurineProPlugin(Star):
                     final_prompt,
                     image_bytes_list,
                     resolution,
+                    aspect_ratio,
                 )
             else:
                 headers["Content-Type"] = "application/json"
@@ -2120,6 +2185,7 @@ class FigurineProPlugin(Star):
                 final_prompt,
                 image_bytes_list,
                 resolution,
+                aspect_ratio,
             )
         else:
             body_type = "application/json"
@@ -2370,6 +2436,7 @@ class FigurineProPlugin(Star):
             requested_batch_count,
             temp_model_idx,
             requested_resolution,
+            requested_aspect_ratio,
         ) = self._parse_command_token(raw_cmd_token)
         consumed_tokens = 1
 
@@ -2598,6 +2665,7 @@ class FigurineProPlugin(Star):
                         user_prompt,
                         override_model=override_model_name,
                         resolution=effective_resolution,
+                        aspect_ratio=requested_aspect_ratio,
                     )
                 except Exception as exc:
                     result = exc

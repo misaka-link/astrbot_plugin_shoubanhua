@@ -385,6 +385,12 @@
         "type": "string",
         "default": "x"
     },
+    "aspect_ratio_symbol": {
+        "description": "【基础】比例设置符号",
+        "hint": "用于临时覆盖参考图比例并按自适应分辨率生成 size，默认 `=`。格式为 `=宽:高`，同时支持中文冒号 `：`，例如 `#bnn=16:9`、`#bnn=9：16x4*2`；可与批量倍率、分辨率级别任意排序组合。只有开启自适应比例、请求带图且走 Images 端点时才会提交 size。留空则关闭命令比例写法。",
+        "type": "string",
+        "default": "="
+    },
     "default_batch_count": {
         "description": "【基础】默认批量数",
         "type": "int",

@@ -56,19 +56,19 @@
     "model_parameter_list": {
         "description": "【通用】模型参数设置",
         "type": "template_list",
-        "hint": "按模型设置 Images Generations 和 Images Edits 端点参数。只有模型实际走 `/v1/images/generations` 或 `/v1/images/edits` 时才会发送 quality 和 moderation；未配置的模型保持原请求不变。",
+        "hint": "按模型设置 Images Generations / Edits 请求参数和默认扣除次数。开启自适应比例后，会按所选 1K、2K 或 4K 分辨率生成 size；命令中的 x1/x2/x4 可临时覆盖。未配置模型时默认每次扣除 1 次。",
         "default": [],
         "templates": {
             "model_parameters": {
                 "name": "模型参数设置",
                 "item_label": "模型参数设置",
-                "hint": "配置一个模型在 Images Generations / Images Edits 端点使用的质量和审核参数。",
+                "hint": "配置一个模型使用的质量、审核、自适应比例、分辨率和默认扣除次数。",
                 "items": {
                     "model": {
                         "label": "模型",
                         "type": "string",
                         "default": "",
-                        "hint": "填写 images_generations_model_list 或 images_edits_model_list 中的模型名。"
+                        "hint": "填写 model_list、gemini_model_list 或端点模型列表中的模型名。"
                     },
                     "quality": {
                         "label": "质量",
@@ -91,6 +91,31 @@
                         ],
                         "default": "auto",
                         "hint": "auto（默认）：标准过滤，旨在限制创建某些类别的潜在不适合年龄的内容；low：过滤限制较少。"
+                    },
+                    "adaptive_aspect_ratio": {
+                        "label": "自适应比例",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "开启后，带图的 Images Generations / Edits 请求会读取第一张图片比例，按下方配置的分辨率生成合法的 size。"
+                    },
+                    "adaptive_resolution": {
+                        "label": "自适应比例分辨率",
+                        "type": "string",
+                        "options": [
+                            "1K",
+                            "2K",
+                            "4K"
+                        ],
+                        "default": "1K",
+                        "hint": "仅在开启自适应比例时生效。默认使用这里选择的分辨率；命令中的 x1、x2、x4 可临时覆盖。生成的 size 宽高均为 16 的倍数、最长边不超过 3840、比例不超过 3:1、总像素为 655360 至 8294400。"
+                    },
+                    "deduction_count": {
+                        "label": "默认扣除次数",
+                        "type": "int",
+                        "default": 1,
+                        "min": 1,
+                        "max": 100,
+                        "hint": "当前模型未启用有效自适应分辨率时，每次生成默认扣除多少次；批量生成还会乘以实际生成倍率。"
                     }
                 }
             }
@@ -354,6 +379,12 @@
         "type": "string",
         "default": "*"
     },
+    "resolution_symbol": {
+        "description": "【基础】分辨率设置符号",
+        "hint": "用于临时覆盖模型参数中的自适应比例分辨率，默认 `x`。`x1`、`x2`、`x4` 分别表示 1K、2K、4K，可与批量倍率任意排序组合，例如 `#bnn*2x4`、`#bnnx4*2`。只有开启自适应比例、请求带图且走 Images 端点时才会提交 size；请勿与批量倍率符号设置为相同内容。留空则关闭命令覆盖写法。",
+        "type": "string",
+        "default": "x"
+    },
     "default_batch_count": {
         "description": "【基础】默认批量数",
         "type": "int",
@@ -483,7 +514,49 @@
     "enable_user_limit": {
         "description": "【次数】启用用户限制",
         "type": "bool",
-        "hint": "开启后，每次生成会扣除用户个人剩余次数；次数不足时拒绝生成。用户次数可通过签到或 #手办化增加用户次数 管理。批量倍率会按实际生成次数扣除。",
+        "hint": "开启后，生成成功或失败状态码命中扣次列表时，会扣除用户个人剩余次数；次数不足时拒绝生成。用户次数可通过签到或 #手办化增加用户次数 管理。批量倍率按每个实际结果分别结算。",
+        "default": true
+    },
+    "resolution_1k_cost": {
+        "description": "【次数】1K 扣除次数",
+        "type": "int",
+        "hint": "命令使用有效的 1K 分辨率参数时，每次生成扣除多少次。批量生成还会乘以实际生成倍率。",
+        "default": 1,
+        "min": 1,
+        "max": 100
+    },
+    "resolution_2k_cost": {
+        "description": "【次数】2K 扣除次数",
+        "type": "int",
+        "hint": "命令使用有效的 2K 分辨率参数时，每次生成扣除多少次。批量生成还会乘以实际生成倍率。",
+        "default": 2,
+        "min": 1,
+        "max": 100
+    },
+    "resolution_4k_cost": {
+        "description": "【次数】4K 扣除次数",
+        "type": "int",
+        "hint": "命令使用有效的 4K 分辨率参数时，每次生成扣除多少次。批量生成还会乘以实际生成倍率。",
+        "default": 4,
+        "min": 1,
+        "max": 100
+    },
+    "failure_deduction_status_codes": {
+        "description": "【次数】失败扣除次数的错误码设置列表",
+        "type": "list",
+        "hint": "启用“失败扣次错误码限制”时生效。生成失败时，只有 HTTP 状态码在此列表内才扣除对应模型/分辨率的次数。默认仅 400；留空表示所有失败都不扣次。生成成功始终正常扣次。",
+        "items": {
+            "type": "int",
+            "description": "失败仍扣次的 HTTP 状态码"
+        },
+        "default": [
+            400
+        ]
+    },
+    "enable_failure_deduction_status_codes": {
+        "description": "【次数】启用失败扣次错误码限制",
+        "type": "bool",
+        "hint": "开启时，仅失败扣除次数的错误码设置列表中的 HTTP 状态码会扣次；关闭时，所有生成失败都会扣次。默认开启。",
         "default": true
     },
     "enable_group_limit": {
@@ -560,13 +633,13 @@
     "custom_img2img_start_message": {
         "description": "【自定义提示】图生图开始消息模板",
         "type": "text",
-        "hint": "检测到输入图片后，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为图生图，{label}=显示标签/预设名，{prompt}=提示词前50字，{model}=本次实际调用模型，{image_count}=输入图片数量，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。",
+        "hint": "检测到输入图片后，开始生成前发送的文字模板。留空使用默认格式。可用变量：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为图生图，{label}=显示标签/预设名，{prompt}=提示词前50字，{model}=本次实际调用模型，{endpoint}=当前调用端点简名（如 edits），{image_count}=输入图片数量，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。只有模板包含 {endpoint} 时才显示端点。",
         "default": ""
     },
     "custom_text2img_start_message": {
         "description": "【自定义提示】文生图开始消息模板",
         "type": "text",
-        "hint": "未携带图片、走文生图时，开始生成前发送的文字模板。留空使用默认格式。#bnn/自定义入口文生图可用：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为文生图，{label}=显示标签/截断后的提示词，{prompt}=提示词前50字，{model}=本次实际调用模型，{image_count}=固定为0，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前只替换 {mode_prefix}、{prompt}、{model}。",
+        "hint": "未携带图片、走文生图时，开始生成前发送的文字模板。留空使用默认格式。#bnn/自定义入口文生图可用：{mode_prefix}=模式前缀（当前通常为空），{action_type}=固定为文生图，{label}=显示标签/截断后的提示词，{prompt}=提示词前50字，{model}=本次实际调用模型，{endpoint}=当前调用端点简名（如 generations），{image_count}=固定为0，{batch_count}=本次总生成次数/倍率，{max_batch_concurrency}=本次最大并发数。只有模板包含 {endpoint} 时才显示端点。注意：独立 #文生图 指令当前可替换 {mode_prefix}、{prompt}、{model}、{endpoint}。",
         "default": ""
     }
 }

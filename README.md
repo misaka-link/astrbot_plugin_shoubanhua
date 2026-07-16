@@ -44,7 +44,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
-| `model_parameter_list` | 模型参数设置列表；模型走 Images Generations / Edits 端点时按模型发送 `quality` 和 `moderation` |
+| `model_parameter_list` | 模型参数设置列表；可设置模型默认扣次，并在 Images Generations / Edits 端点按模型发送 `quality`、`moderation` 和启用后的自适应 `size` |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `images_generations_model_list` | 走 `/v1/images/generations` 的模型列表。常用于文生图 |
 | `images_edits_model_list` | 走 `/v1/images/edits` 的模型列表。常用于带图请求，插件会用 multipart/form-data 上传图片 |
@@ -59,6 +59,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `preset_list_command` | 预设/提示词列表触发指令，默认 lm列表 |
 | `preset_list_template` | 预设列表图片模板，默认读取 `templates/preset_list.html` |
 | `batch_multiplier_symbol` | 批量生成倍率符号，默认 `*`，如 `#bnn*2 一只小猫` |
+| `resolution_symbol` | 临时覆盖模型自适应分辨率的符号，默认 `x`；`x1/x2/x4` 对应 `1K/2K/4K`，可与批量倍率任意排序组合 |
 | `default_batch_count` | 未写倍率时的默认批量数，默认 1 |
 | `max_batch_multiplier` | 单次指令最大生成倍率，可填 1-100，扣次按实际倍率计算 |
 | `max_batch_concurrency` | 批量生成最大并发数，可填 1-20，倍率更大时会排队执行 |
@@ -70,12 +71,19 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
 | `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群不限制次数；全局管理员可无视群黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组次数限制 |
+| `resolution_1k_cost` / `resolution_2k_cost` / `resolution_4k_cost` | 有效分辨率参数每次生成的扣除次数，默认分别为 1、2、4 |
+| `failure_deduction_status_codes` | 失败仍扣次的 HTTP 状态码列表，默认仅 `400`；留空时失败均不扣次 |
+| `enable_failure_deduction_status_codes` | 是否只按失败扣次错误码列表扣次，默认开启；关闭后所有失败都会扣次 |
 | `enable_checkin` | 是否启用每日签到获取次数 |
 | `checkin_fixed_reward` | 签到固定奖励（未开启随机时） |
 | `enable_random_checkin` / `checkin_random_reward_max` | 签到随机奖励开关与最大值 |
 | `prompt_list` | 预设提示词列表，每项包含 `指令` / `提示词`；旧 `触发词:提示词` 会自动迁移 |
 
 > 路径说明：建议把 `generic_api_url` 填成上游 Base URL 或任一完整端点 URL，然后在三个端点模型列表中按模型分流；未填写或未匹配的模型默认走 `/v1/chat/completions`。同一模型同时配置在 `images_generations_model_list` 和 `images_edits_model_list` 时，文生图走 `/v1/images/generations`，图生图走 `/v1/images/edits`。
+
+> 默认生成开始消息会显示当前调用端点简名，例如 `端点: edits`。自定义 `custom_img2img_start_message` 或 `custom_text2img_start_message` 只有包含 `{endpoint}` 时才显示端点，不再自动追加。
+
+> 每次提交生图请求前，插件日志会输出请求方式、最终 URL、路由、请求头和全部非图片生图参数。API Key 会显示为 `<redacted>`，图片字段仅显示 `<image omitted>`，不会输出图片内容、Base64 或图片摘要。Images Edits 的其他 multipart 字段会逐项展开记录。
 
 > 使用 SOCKS 代理时，需要在 AstrBot 的 Python 环境中先执行 `pip install aiohttp_socks`。
 
@@ -102,18 +110,29 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 `model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式，按模型配置 Images Generations 和 Images Edits 请求参数。
 
-- `模型`：填写 `images_generations_model_list` 或 `images_edits_model_list` 中的模型名。
+- `模型`：填写模型列表或端点模型列表中的模型名。
 - `质量`：可选 `low`、`medium`、`high`、`auto`，默认 `auto`。
 - `审核`：可选 `auto`、`low`。`auto` 为标准过滤；`low` 的过滤限制较少。
+- `自适应比例`：默认关闭。开启后，带图的 Images 请求会读取第一张图片宽高比并计算满足 Images API 约束的 `size` 参数。
+- `自适应比例分辨率`：可选 `1K`、`2K`、`4K`，默认 `1K`。开启自适应比例后默认使用此值；命令中的 `x1/x2/x4` 可临时覆盖。
+- `默认扣除次数`：当前模型未启用有效自适应分辨率时，每次生成默认扣除多少次，默认 1。
 
-只有请求实际走 `/v1/images/generations` 或 `/v1/images/edits` 且模型命中配置时，插件才会增加 `quality` 和 `moderation` 参数。未配置模型、Chat Completions 和 Gemini 路由均保持原请求不变。
+自适应尺寸统一遵守以下规则：宽高都是 16 的倍数、最长边不超过 3840、长短边比例不超过 3:1，总像素不少于 655,360 且不超过 8,294,400。`1K` 和 `2K` 分别以 1024、2048 为目标最长边，`4K` 以 3840 为目标最长边；若目标尺寸超出总像素范围，会等比放大或缩小后再对齐到 16。
+
+例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的首图会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
+
+请求携带图片、当前模型开启“自适应比例”并实际走 `/v1/images/generations` 或 `/v1/images/edits` 时，插件会按模型配置的分辨率增加 `size`；命令带 `x1/x2/x4` 时以命令值为准。未配置模型、关闭自适应比例、Chat Completions 和 Gemini 路由均不提交 `size`，并按模型默认次数扣除。
+
+最终生效的 `1K/2K/4K` 分别按 `resolution_1k_cost`、`resolution_2k_cost`、`resolution_4k_cost` 扣次，默认是 1、2、4 次；自适应分辨率未生效时按模型的“默认扣除次数”扣次。最后再乘批量倍率，例如默认配置下 `#bnn*2x4` 共扣 `4 x 2 = 8` 次。
+
+次数按每个请求的实际结果结算：生成成功正常扣次。`enable_failure_deduction_status_codes` 开启时，生成失败只有 HTTP 状态码命中 `failure_deduction_status_codes` 才扣次，默认仅状态码 `400` 会扣；关闭时，所有失败都会扣次。批量生成逐个结果结算。
 
 配置示例：
 
-| 模型 | 质量 | 审核 |
-| --- | --- | --- |
-| `gpt-image-1` | `high` | `auto` |
-| `gpt-image-1-mini` | `medium` | `low` |
+| 模型 | 质量 | 审核 | 自适应比例 | 自适应比例分辨率 | 默认扣除次数 |
+| --- | --- | --- | --- | --- | --- |
+| `gpt-image-1` | `high` | `auto` | 开启 | `2K` | `1` |
+| `gpt-image-1-mini` | `medium` | `low` | 关闭 | `1K`（不生效） | `2` |
 
 ## 使用方法
 
@@ -131,6 +150,11 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - 后台新增触发指令与模型绑定列表，配置项位于最上方。
 - 后台新增按模型配置的预设提示词列表，可覆盖不同模型最终收到的提示词模板。
 - 后台新增模型参数设置列表，支持为 Images Generations / Edits 模型指定质量与审核参数。
+- 模型参数设置新增自适应比例开关和 `1K/2K/4K` 默认分辨率；分辨率符号（默认 `x`）可用 `x1/x2/x4` 临时覆盖，并支持与批量倍率任意排序组合。
+- 新增 `1K/2K/4K` 扣次配置和模型默认扣次配置。
+- 新增失败扣次错误码列表，默认仅 HTTP `400` 失败会扣次。
+- 新增失败扣次错误码限制开关；关闭后所有失败都会扣次。
+- 生图请求发送前记录全部非图片参数，API Key 脱敏且图片字段不输出内容。
 - 移除后台 `gemini_official` / API 模式切换，改为 `gemini_model_list` 自动路由。
 - 预设列表改为 HTML 模板渲染，模板位于 `templates/preset_list.html`。
 - `prompt_list` 改为对象列表，并自动兼容/导入旧字符串格式。
@@ -192,6 +216,8 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | :--- | :--- |
 | `#bnn <提示词>` | 使用自定义提示词生成 |
 | `#bnn*2 <提示词>` | 使用倍率并发生成 2 次，倍率符号可在后台配置 |
+| `#bnnx4 <提示词>` | 临时覆盖为 4K 分辨率；仅在当前模型开启自适应比例且请求带图时生效 |
+| `#bnn*2x4` / `#bnnx4*2` | 使用 4K 分辨率并批量生成 2 次，两种顺序都支持 |
 | `#手办化查询次数` | 查询自己的剩余次数 |
 
 ### 👑 管理命令 (仅主人)

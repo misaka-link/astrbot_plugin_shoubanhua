@@ -4,12 +4,13 @@ import functools
 import html
 import io
 import json
+import math
 import random
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 import aiohttp
 from PIL import Image as PILImage
@@ -77,6 +78,12 @@ class FigurineProPlugin(Star):
         "images_edits": "/v1/images/edits",
     }
 
+    GENERIC_ENDPOINT_DISPLAY_NAMES = {
+        "chat_completions": "chat",
+        "images_generations": "generations",
+        "images_edits": "edits",
+    }
+
     GENERIC_ENDPOINT_MODEL_LIST_KEYS = {
         "chat_completions": "chat_completions_model_list",
         "images_generations": "images_generations_model_list",
@@ -85,6 +92,15 @@ class FigurineProPlugin(Star):
 
     IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+    ADAPTIVE_RESOLUTION_LONG_EDGES = {
+        "1K": 1024,
+        "2K": 2048,
+        "4K": 3840,
+    }
+    ADAPTIVE_SIZE_ALIGNMENT = 16
+    ADAPTIVE_MIN_PIXELS = 655_360
+    ADAPTIVE_MAX_PIXELS = 8_294_400
+    ADAPTIVE_MAX_ASPECT_RATIO = 3.0
 
     PRESET_LIST_RENDER_OPTIONS = {
         "width": 1280,
@@ -746,21 +762,50 @@ class FigurineProPlugin(Star):
     def _get_model_prompt_template(self, model_name: str) -> Optional[str]:
         return self._get_model_prompt_template_map().get((model_name or "").strip())
 
-    def _get_model_parameter_map(self) -> Dict[str, Dict[str, str]]:
-        mapping: Dict[str, Dict[str, str]] = {}
+    def _get_model_parameter_map(self) -> Dict[str, Dict[str, Any]]:
+        mapping: Dict[str, Dict[str, Any]] = {}
         raw_list = self.conf.get("model_parameter_list", [])
 
         def normalize_option(value: Any, allowed: set[str], default: str) -> str:
             normalized = str(value or default).strip().lower()
             return normalized if normalized in allowed else default
 
-        def add_item(model: Any, quality: Any = "auto", moderation: Any = "auto"):
+        def normalize_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            return str(value or "").strip().lower() in {
+                "1", "true", "yes", "on", "enable", "enabled", "是", "开启",
+            }
+
+        def normalize_resolution(value: Any) -> str:
+            normalized = str(value or "1K").strip().upper()
+            return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "1K"
+
+        def get_value(item: Dict[str, Any], *keys: str, default: Any = None) -> Any:
+            for key in keys:
+                if key in item and item[key] is not None:
+                    return item[key]
+            return default
+
+        def add_item(
+                model: Any,
+                quality: Any = "auto",
+                moderation: Any = "auto",
+                adaptive_aspect_ratio: Any = False,
+                adaptive_resolution: Any = "1K",
+                deduction_count: Any = 1,
+        ):
             model_name = str(model or "").strip()
             if not model_name:
                 return
             mapping[model_name] = {
                 "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
+                "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
+                "adaptive_resolution": normalize_resolution(adaptive_resolution),
+                "deduction_count": _normalize_positive_int(deduction_count, 1),
             }
 
         if isinstance(raw_list, dict):
@@ -768,8 +813,17 @@ class FigurineProPlugin(Star):
                 if isinstance(parameters, dict):
                     add_item(
                         model_name,
-                        parameters.get("quality") or parameters.get("质量"),
-                        parameters.get("moderation") or parameters.get("审核"),
+                        get_value(parameters, "quality", "质量", default="auto"),
+                        get_value(parameters, "moderation", "审核", default="auto"),
+                        get_value(parameters, "adaptive_aspect_ratio", "自适应比例", default=False),
+                        get_value(
+                            parameters,
+                            "adaptive_resolution",
+                            "自适应比例分辨率",
+                            "自适应分辨率",
+                            default="1K",
+                        ),
+                        get_value(parameters, "deduction_count", "扣除次数", default=1),
                     )
             return mapping
 
@@ -781,15 +835,141 @@ class FigurineProPlugin(Star):
                 continue
             add_item(
                 item.get("model") or item.get("模型") or item.get("model_name") or item.get("模型名"),
-                item.get("quality") or item.get("质量"),
-                item.get("moderation") or item.get("审核"),
+                get_value(item, "quality", "质量", default="auto"),
+                get_value(item, "moderation", "审核", default="auto"),
+                get_value(item, "adaptive_aspect_ratio", "自适应比例", default=False),
+                get_value(
+                    item,
+                    "adaptive_resolution",
+                    "自适应比例分辨率",
+                    "自适应分辨率",
+                    default="1K",
+                ),
+                get_value(item, "deduction_count", "扣除次数", default=1),
             )
 
         return mapping
 
     def _get_model_parameters(self, model_name: str) -> Dict[str, str]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        return dict(parameters) if parameters else {}
+        if not parameters:
+            return {}
+        return {
+            "quality": parameters["quality"],
+            "moderation": parameters["moderation"],
+        }
+
+    @classmethod
+    def _align_adaptive_dimension(cls, value: float, mode: str = "nearest") -> int:
+        units = value / cls.ADAPTIVE_SIZE_ALIGNMENT
+        if mode == "ceil":
+            aligned_units = math.ceil(units)
+        elif mode == "floor":
+            aligned_units = math.floor(units)
+        else:
+            aligned_units = round(units)
+        return max(cls.ADAPTIVE_SIZE_ALIGNMENT, aligned_units * cls.ADAPTIVE_SIZE_ALIGNMENT)
+
+    def _calculate_adaptive_image_size(
+            self,
+            source_width: int,
+            source_height: int,
+            resolution: str,
+    ) -> str:
+        is_landscape = source_width >= source_height
+        source_ratio = max(source_width, source_height) / min(source_width, source_height)
+        target_ratio = min(source_ratio, self.ADAPTIVE_MAX_ASPECT_RATIO)
+        target_long_edge = self.ADAPTIVE_RESOLUTION_LONG_EDGES[resolution]
+        target_short_edge = target_long_edge / target_ratio
+        target_pixels = target_long_edge * target_short_edge
+        alignment_mode = "nearest"
+
+        if target_pixels < self.ADAPTIVE_MIN_PIXELS:
+            scale = math.sqrt(self.ADAPTIVE_MIN_PIXELS / target_pixels)
+            target_long_edge *= scale
+            target_short_edge *= scale
+            alignment_mode = "ceil"
+        elif target_pixels > self.ADAPTIVE_MAX_PIXELS:
+            scale = math.sqrt(self.ADAPTIVE_MAX_PIXELS / target_pixels)
+            target_long_edge *= scale
+            target_short_edge *= scale
+            alignment_mode = "floor"
+
+        long_edge = self._align_adaptive_dimension(target_long_edge, alignment_mode)
+        short_edge = self._align_adaptive_dimension(target_short_edge, alignment_mode)
+
+        if long_edge * short_edge < self.ADAPTIVE_MIN_PIXELS:
+            scale = math.sqrt(self.ADAPTIVE_MIN_PIXELS / (long_edge * short_edge))
+            long_edge = self._align_adaptive_dimension(long_edge * scale, "ceil")
+            short_edge = self._align_adaptive_dimension(short_edge * scale, "ceil")
+        elif long_edge * short_edge > self.ADAPTIVE_MAX_PIXELS:
+            scale = math.sqrt(self.ADAPTIVE_MAX_PIXELS / (long_edge * short_edge))
+            long_edge = self._align_adaptive_dimension(long_edge * scale, "floor")
+            short_edge = self._align_adaptive_dimension(short_edge * scale, "floor")
+
+        if source_ratio > self.ADAPTIVE_MAX_ASPECT_RATIO:
+            logger.warning(
+                f"首图比例 {source_width}:{source_height} 超过自适应 size 的 3:1 限制，"
+                "已按最大 3:1 比例计算 size"
+            )
+
+        target_width, target_height = (
+            (long_edge, short_edge) if is_landscape else (short_edge, long_edge)
+        )
+        return f"{target_width}x{target_height}"
+
+    def _get_adaptive_image_size(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            resolution: Optional[str],
+    ) -> Optional[str]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        normalized_resolution = str(resolution or "").strip().upper()
+        if (
+                not parameters
+                or not parameters.get("adaptive_aspect_ratio")
+                or not image_bytes_list
+        ):
+            return None
+
+        if normalized_resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
+            normalized_resolution = str(parameters.get("adaptive_resolution") or "1K").upper()
+
+        try:
+            with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
+                source_width, source_height = image.size
+        except Exception as e:
+            logger.warning(f"读取首图尺寸失败，跳过自适应比例参数: {e}")
+            return None
+
+        if source_width <= 0 or source_height <= 0:
+            logger.warning("首图宽高无效，跳过自适应比例参数")
+            return None
+
+        size = self._calculate_adaptive_image_size(
+            source_width,
+            source_height,
+            normalized_resolution,
+        )
+
+        logger.info(
+            f"自适应比例参数: model={model_name}, source={source_width}x{source_height}, "
+            f"resolution={normalized_resolution}, size={size}"
+        )
+        return size
+
+    def _get_image_request_parameters(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            resolution: Optional[str] = None,
+    ) -> Dict[str, str]:
+        parameters = self._get_model_parameters(model_name)
+        adaptive_size = self._get_adaptive_image_size(model_name, image_bytes_list, resolution)
+        if adaptive_size:
+            parameters["size"] = adaptive_size
+        return parameters
 
     @staticmethod
     def _render_prompt_template(template: str, variables: Dict[str, Any]) -> str:
@@ -959,6 +1139,70 @@ class FigurineProPlugin(Star):
                 return endpoint_type
 
         return "chat_completions"
+
+    def _get_endpoint_display_for_request(self, model_name: str, has_images: bool) -> str:
+        """返回开始消息中显示的当前请求端点。"""
+        if self._get_api_route_for_model(model_name) == "gemini":
+            return "generateContent"
+
+        endpoint_type = self._get_generic_endpoint_type_for_model(model_name, has_images)
+        return self.GENERIC_ENDPOINT_DISPLAY_NAMES.get(
+            endpoint_type,
+            self.GENERIC_ENDPOINT_DISPLAY_NAMES["chat_completions"],
+        )
+
+    def _parse_command_token(
+            self,
+            token: str,
+    ) -> Tuple[str, int, Optional[int], Optional[int], Optional[str]]:
+        """解析命令词末尾可任意排序的模型、批量和分辨率修饰符。"""
+        command = str(token or "").strip()
+        default_batch = _normalize_positive_int(self.conf.get("default_batch_count", 1), 1)
+        max_batch = _normalize_positive_int(self.conf.get("max_batch_multiplier", 4), 4)
+        batch_count = min(default_batch, max_batch)
+        requested_batch_count: Optional[int] = None
+        model_index: Optional[int] = None
+        resolution: Optional[str] = None
+        batch_symbol = str(self.conf.get("batch_multiplier_symbol", "*") or "").strip()
+        resolution_symbol = str(self.conf.get("resolution_symbol", "x") or "").strip()
+
+        # 两种符号相同时无法区分含义，优先保留原有批量写法。
+        if resolution_symbol == batch_symbol:
+            resolution_symbol = ""
+
+        while command:
+            matched = False
+
+            if requested_batch_count is None and batch_symbol:
+                batch_match = re.search(rf"{re.escape(batch_symbol)}(\d+)$", command)
+                if batch_match:
+                    requested_batch_count = max(1, int(batch_match.group(1)))
+                    batch_count = min(requested_batch_count, max_batch)
+                    command = command[:batch_match.start()].strip()
+                    matched = True
+
+            if not matched and resolution is None and resolution_symbol:
+                resolution_match = re.search(
+                    rf"{re.escape(resolution_symbol)}([124])$",
+                    command,
+                    re.IGNORECASE,
+                )
+                if resolution_match:
+                    resolution = f"{resolution_match.group(1)}K"
+                    command = command[:resolution_match.start()].strip()
+                    matched = True
+
+            if not matched and model_index is None:
+                model_match = re.search(r"[\(（](\d+)[\)）]$", command)
+                if model_match:
+                    model_index = int(model_match.group(1))
+                    command = command[:model_match.start()].strip()
+                    matched = True
+
+            if not matched:
+                break
+
+        return command, batch_count, requested_batch_count, model_index, resolution
 
     def is_global_admin(self, event: AstrMessageEvent) -> bool:
         return event.get_sender_id() in self.context.get_config().get("admins_id", [])
@@ -1251,6 +1495,58 @@ class FigurineProPlugin(Star):
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{mime_type};base64,{b64}"
 
+    def _sanitize_request_log_value(self, value: Any, field_name: str = "") -> Any:
+        normalized_field = field_name.strip().lower().replace("-", "_")
+        if normalized_field in {
+                "authorization",
+                "api_key",
+                "x_goog_api_key",
+                "x_api_key",
+        }:
+            return "<redacted>"
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._sanitize_request_log_value(item, str(key))
+                for key, item in value.items()
+            }
+        if isinstance(value, (list, tuple)):
+            return [self._sanitize_request_log_value(item, field_name) for item in value]
+        if isinstance(value, bytes):
+            return "<image omitted>"
+        if isinstance(value, str):
+            if value.startswith("data:") and ";base64," in value:
+                return "<image omitted>"
+            if normalized_field == "data" and value:
+                return "<image omitted>"
+        return value
+
+    @staticmethod
+    def _sanitize_request_log_url(url: str) -> str:
+        parsed = urlparse(str(url or ""))
+        sensitive_names = {"api_key", "apikey", "key", "token", "access_token"}
+        sanitized_query = [
+            (name, "<redacted>" if name.lower() in sensitive_names else value)
+            for name, value in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+        return parsed._replace(query=urlencode(sanitized_query)).geturl()
+
+    def _build_images_edits_log_parameters(
+            self,
+            model_name: str,
+            final_prompt: str,
+            image_bytes_list: List[bytes],
+            resolution: Optional[str],
+    ) -> Dict[str, Any]:
+        parameters: Dict[str, Any] = {
+            "model": model_name,
+            "prompt": final_prompt,
+            "n": "1",
+        }
+        parameters.update(self._get_image_request_parameters(model_name, image_bytes_list, resolution))
+        parameters["image"] = "<image omitted>"
+        return parameters
+
     @staticmethod
     def _mime_type_to_extension(mime_type: str) -> str:
         return {
@@ -1266,13 +1562,14 @@ class FigurineProPlugin(Star):
             model_name: str,
             final_prompt: str,
             image_bytes_list: List[bytes],
+            resolution: Optional[str] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
             "n": 1,
         }
-        payload.update(self._get_model_parameters(model_name))
+        payload.update(self._get_image_request_parameters(model_name, image_bytes_list, resolution))
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
@@ -1288,12 +1585,17 @@ class FigurineProPlugin(Star):
             model_name: str,
             final_prompt: str,
             image_bytes_list: List[bytes],
+            resolution: Optional[str] = None,
     ) -> aiohttp.FormData:
         form = aiohttp.FormData()
         form.add_field("model", model_name)
         form.add_field("prompt", final_prompt)
         form.add_field("n", "1")
-        for field_name, value in self._get_model_parameters(model_name).items():
+        for field_name, value in self._get_image_request_parameters(
+                model_name,
+                image_bytes_list,
+                resolution,
+        ).items():
             form.add_field(field_name, value)
 
         for idx, image_bytes in enumerate(image_bytes_list):
@@ -1319,8 +1621,84 @@ class FigurineProPlugin(Star):
 
         return msg
 
-    def _get_required_invocation_cost(self) -> int:
-        return 1
+    def _get_effective_resolution(
+            self,
+            model_name: str,
+            resolution: Optional[str],
+            has_images: bool,
+    ) -> Optional[str]:
+        if not has_images:
+            return None
+
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not parameters or not parameters.get("adaptive_aspect_ratio"):
+            return None
+        if self._get_api_route_for_model(model_name) != "generic":
+            return None
+
+        endpoint_type = self._get_generic_endpoint_type_for_model(model_name, has_images=True)
+        if endpoint_type not in {"images_generations", "images_edits"}:
+            return None
+
+        normalized_resolution = str(resolution or "").strip().upper()
+        if normalized_resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
+            normalized_resolution = str(parameters.get("adaptive_resolution") or "1K").upper()
+        return normalized_resolution
+
+    def _get_required_invocation_cost(
+            self,
+            model_name: str = "",
+            resolution: Optional[str] = None,
+            has_images: bool = False,
+    ) -> int:
+        effective_resolution = self._get_effective_resolution(model_name, resolution, has_images)
+        if effective_resolution:
+            config_key = f"resolution_{effective_resolution[0]}k_cost"
+            default_cost = {"1K": 1, "2K": 2, "4K": 4}[effective_resolution]
+            return _normalize_positive_int(self.conf.get(config_key, default_cost), default_cost)
+
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
+
+    def _get_failure_deduction_status_codes(self) -> set[int]:
+        raw_codes = self.conf.get("failure_deduction_status_codes", [400])
+        if isinstance(raw_codes, str):
+            items: List[Any] = re.split(r"[,，\s]+", raw_codes)
+        elif isinstance(raw_codes, list):
+            items = raw_codes
+        else:
+            items = [raw_codes]
+
+        status_codes = set()
+        for item in items:
+            if isinstance(item, dict):
+                item = item.get("code") or item.get("status_code") or item.get("错误码")
+            try:
+                status_code = int(item)
+            except (TypeError, ValueError):
+                continue
+            if 100 <= status_code <= 599:
+                status_codes.add(status_code)
+        return status_codes
+
+    def _should_deduct_generation_result(self, result: Any, http_status: int) -> bool:
+        if isinstance(result, bytes):
+            return True
+        if not self.conf.get("enable_failure_deduction_status_codes", True):
+            return True
+        return http_status in self._get_failure_deduction_status_codes()
+
+    async def _deduct_generation_cost(
+            self,
+            deduction_source: Optional[str],
+            sender_id: str,
+            group_id: Optional[str],
+            amount: int,
+    ):
+        if deduction_source == "group" and group_id:
+            await self._decrease_group_count(group_id, amount)
+        elif deduction_source == "user":
+            await self._decrease_user_count(sender_id, amount)
 
     def _resolve_generation_access(
         self,
@@ -1575,8 +1953,13 @@ class FigurineProPlugin(Star):
             logger.error(f"调试模式错误详情: {detail}")
         return summary
 
-    async def _call_api(self, image_bytes_list: List[bytes], prompt: str,
-                        override_model: str | None = None) -> Tuple[bytes | str | Dict[str, Any], int]:
+    async def _call_api(
+            self,
+            image_bytes_list: List[bytes],
+            prompt: str,
+            override_model: str | None = None,
+            resolution: Optional[str] = None,
+    ) -> Tuple[bytes | str | Dict[str, Any], int]:
         """
         调用API生成图片
         返回: (结果, HTTP状态码) 元组，其中结果可以是bytes(成功)或str(错误信息)，状态码为0表示未获取到
@@ -1678,10 +2061,20 @@ class FigurineProPlugin(Star):
                 return make_error("request_build_error", "Images Edits 端点需要至少一张输入图片。", 0)
 
             if generic_endpoint_type == "images_edits":
-                form_data = self._build_generic_images_edits_form(model_name, final_prompt, image_bytes_list)
+                form_data = self._build_generic_images_edits_form(
+                    model_name,
+                    final_prompt,
+                    image_bytes_list,
+                    resolution,
+                )
             elif generic_endpoint_type == "images_generations":
                 headers["Content-Type"] = "application/json"
-                payload = self._build_generic_images_payload(model_name, final_prompt, image_bytes_list)
+                payload = self._build_generic_images_payload(
+                    model_name,
+                    final_prompt,
+                    image_bytes_list,
+                    resolution,
+                )
             else:
                 headers["Content-Type"] = "application/json"
                 messages = []
@@ -1713,6 +2106,38 @@ class FigurineProPlugin(Star):
                     "stream": use_stream,
                     "messages": messages
                 }
+
+        safe_log_url = self._sanitize_request_log_url(final_url)
+        logger.info(
+            f"调用图片生成端点: model={model_name}, endpoint_type={endpoint_type}, "
+            f"endpoint={safe_log_url}, image_count={len(image_bytes_list)}"
+        )
+
+        if form_data is not None:
+            body_type = "multipart/form-data"
+            request_parameters = self._build_images_edits_log_parameters(
+                model_name,
+                final_prompt,
+                image_bytes_list,
+                resolution,
+            )
+        else:
+            body_type = "application/json"
+            request_parameters = payload
+
+        request_log = {
+            "method": "POST",
+            "url": safe_log_url,
+            "api_mode": api_mode,
+            "endpoint_type": endpoint_type,
+            "body_type": body_type,
+            "headers": self._sanitize_request_log_value(headers),
+            "parameters": self._sanitize_request_log_value(request_parameters),
+        }
+        logger.info(
+            "提交生图请求全部参数:\n"
+            + json.dumps(request_log, ensure_ascii=False, indent=2)
+        )
 
         timeout_cfg = _build_client_timeout(self.request_timeout, self.download_timeout)
         http_status = 0  # 初始化HTTP状态码
@@ -1938,37 +2363,14 @@ class FigurineProPlugin(Star):
         if not tokens:
             return
 
-        def _normalize_token(token: str) -> Tuple[str, Optional[int]]:
-            token = token.strip()
-            match = re.search(r"[\(（](\d+)[\)）]$", token)
-            if match:
-                idx = int(match.group(1))
-                return token[:match.start()].strip(), idx
-            return token, None
-
-        def _extract_batch_count(token: str) -> Tuple[str, int, Optional[int]]:
-            token = token.strip()
-            default_batch = _normalize_positive_int(self.conf.get("default_batch_count", 1), 1)
-            max_batch = _normalize_positive_int(self.conf.get("max_batch_multiplier", 4), 4)
-            default_batch = min(default_batch, max_batch)
-            symbol = str(self.conf.get("batch_multiplier_symbol", "*") or "").strip()
-            if not symbol:
-                return token, default_batch, None
-
-            match = re.search(rf"{re.escape(symbol)}(\d+)$", token)
-            if not match:
-                return token, default_batch, None
-
-            requested_count = max(1, int(match.group(1)))
-            batch_count = min(requested_count, max_batch)
-            return token[:match.start()].strip(), batch_count, requested_count
-
         raw_cmd_token = tokens[0].strip()
-        command_token, batch_count, requested_batch_count = _extract_batch_count(raw_cmd_token)
-        command_token, temp_model_idx = _normalize_token(command_token)
-        if requested_batch_count is None:
-            command_token, temp_model_idx = _normalize_token(raw_cmd_token)
-            command_token, batch_count, requested_batch_count = _extract_batch_count(command_token)
+        (
+            command_token,
+            batch_count,
+            requested_batch_count,
+            temp_model_idx,
+            requested_resolution,
+        ) = self._parse_command_token(raw_cmd_token)
         consumed_tokens = 1
 
         cmd = command_token
@@ -2030,24 +2432,8 @@ class FigurineProPlugin(Star):
             if not is_bnn:
                 return
 
-        # --- 权限与次数逻辑 ---
         sender_id = self._norm_id(event.get_sender_id())
         group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
-        per_invocation_cost = self._get_required_invocation_cost()
-        required_cost = per_invocation_cost * batch_count
-        allowed, deduction_source, deny_message = self._resolve_generation_access(
-            event,
-            sender_id,
-            group_id,
-            required_cost,
-        )
-        if not allowed:
-            if deny_message:
-                yield self._reply_plain_result(event, deny_message)
-            return
-
-        if requested_batch_count and requested_batch_count > batch_count:
-            yield self._reply_plain_result(event, f"⚠️ 本次倍率最高为 {batch_count}，已按 {batch_count} 次并发生成。")
 
         # --- 图片获取 (融合逻辑) ---
         images_to_process = []
@@ -2128,6 +2514,35 @@ class FigurineProPlugin(Star):
         display_label = display_cmd
         base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
+        effective_resolution = self._get_effective_resolution(
+            model_in_use,
+            requested_resolution,
+            has_images=bool(images_to_process),
+        )
+        per_invocation_cost = self._get_required_invocation_cost(
+            model_in_use,
+            effective_resolution,
+            has_images=bool(images_to_process),
+        )
+        required_cost = per_invocation_cost * batch_count
+        allowed, deduction_source, deny_message = self._resolve_generation_access(
+            event,
+            sender_id,
+            group_id,
+            required_cost,
+        )
+        if not allowed:
+            if deny_message:
+                yield self._reply_plain_result(event, deny_message)
+            return
+
+        if requested_batch_count and requested_batch_count > batch_count:
+            yield self._reply_plain_result(event, f"⚠️ 本次倍率最高为 {batch_count}，已按 {batch_count} 次并发生成。")
+
+        endpoint_display = self._get_endpoint_display_for_request(
+            model_in_use,
+            has_images=bool(images_to_process),
+        )
         show_model_info = self.conf.get("show_model_info", False)
 
         mode_prefix = ""
@@ -2159,19 +2574,18 @@ class FigurineProPlugin(Star):
                 .replace("{label}", display_label)
                 .replace("{prompt}", user_prompt[:50] if user_prompt else display_label)
                 .replace("{model}", model_in_use)
+                .replace("{endpoint}", endpoint_display)
                 .replace("{image_count}", str(len(images_to_process)))
                 .replace("{batch_count}", str(batch_count))
                 .replace("{max_batch_concurrency}", str(max_batch_concurrency)))
         else:
             # 使用默认格式
-            info_msg = f"🎨 收到{mode_prefix}{action_type}请求{batch_suffix}，正在生成 [{display_label}]..."
+            info_msg = (
+                f"🎨 收到{mode_prefix}{action_type}请求{batch_suffix}，正在生成 [{display_label}]...\n"
+                f"端点: {endpoint_display}"
+            )
         
         yield self._reply_plain_result(event, info_msg)
-
-        if deduction_source == 'group' and group_id:
-            await self._decrease_group_count(group_id, required_cost)
-        elif deduction_source == 'user':
-            await self._decrease_user_count(sender_id, required_cost)
 
         batch_semaphore = asyncio.Semaphore(max_batch_concurrency)
 
@@ -2183,6 +2597,7 @@ class FigurineProPlugin(Star):
                         images_to_process,
                         user_prompt,
                         override_model=override_model_name,
+                        resolution=effective_resolution,
                     )
                 except Exception as exc:
                     result = exc
@@ -2196,6 +2611,7 @@ class FigurineProPlugin(Star):
         ]
 
         success_count = 0
+        failed_deduction_count = 0
         first_error = None
         first_error_status = 0
 
@@ -2213,7 +2629,18 @@ class FigurineProPlugin(Star):
                 continue
 
             res, http_status = result
+            should_deduct = self._should_deduct_generation_result(res, http_status)
+            if should_deduct:
+                await self._deduct_generation_cost(
+                    deduction_source,
+                    sender_id,
+                    group_id,
+                    per_invocation_cost,
+                )
+
             if not isinstance(res, bytes):
+                if should_deduct:
+                    failed_deduction_count += 1
                 if first_error is None:
                     first_error = res
                     first_error_status = http_status
@@ -2276,13 +2703,18 @@ class FigurineProPlugin(Star):
                 prompt=user_prompt,
                 image_count=len(images_to_process),
             )
-            if deduction_source in ['group', 'user']:
-                msg += "\n(注: 触发即扣次)"
+            if failed_deduction_count and deduction_source in ["group", "user"]:
+                deducted_amount = failed_deduction_count * per_invocation_cost
+                msg += f"\n(失败状态码命中扣次设置，已扣除 {deducted_amount} 次)"
             if show_model_info:
                 msg += f"\n模型: {model_in_use}"
             yield self._reply_plain_result(event, msg)
         elif success_count < batch_count:
-            yield self._reply_plain_result(event, f"⚠️ 批量生成完成：成功 {success_count}/{batch_count}，失败 {batch_count - success_count} 次。")
+            summary = f"⚠️ 批量生成完成：成功 {success_count}/{batch_count}，失败 {batch_count - success_count} 次。"
+            if failed_deduction_count and deduction_source in ["group", "user"]:
+                deducted_amount = failed_deduction_count * per_invocation_cost
+                summary += f"\n其中失败请求按错误码设置扣除 {deducted_amount} 次。"
+            yield self._reply_plain_result(event, summary)
 
         event.stop_event()
 
@@ -2335,7 +2767,9 @@ class FigurineProPlugin(Star):
         sender_id = self._norm_id(event.get_sender_id())
         group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
 
-        required_cost = self._get_required_invocation_cost()
+        base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
+        model_in_use = (override_model_name or base_model_name).strip() or base_model_name
+        required_cost = self._get_required_invocation_cost(model_in_use)
         allowed, deduction_source, deny_message = self._resolve_generation_access(
             event,
             sender_id,
@@ -2350,8 +2784,7 @@ class FigurineProPlugin(Star):
         display_prompt = prompt[:10] + "..." if len(prompt) > 10 else prompt
         mode_prefix = ""
         
-        base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
-        model_in_use = (override_model_name or base_model_name).strip() or base_model_name
+        endpoint_display = self._get_endpoint_display_for_request(model_in_use, has_images=False)
         show_model_info = self.conf.get("show_model_info", False)
         
         # 检查是否有自定义文生图开始消息模板
@@ -2361,21 +2794,28 @@ class FigurineProPlugin(Star):
             info_str = (custom_start_template
                 .replace("{mode_prefix}", mode_prefix)
                 .replace("{prompt}", display_prompt)
-                .replace("{model}", model_in_use))
+                .replace("{model}", model_in_use)
+                .replace("{endpoint}", endpoint_display))
         else:
             # 使用默认格式
-            info_str = f"🎨 收到{mode_prefix}文生图请求，正在生成 [{display_prompt}]"
+            info_str = (
+                f"🎨 收到{mode_prefix}文生图请求，正在生成 [{display_prompt}]\n"
+                f"端点: {endpoint_display}"
+            )
         
         yield self._reply_plain_result(event, info_str)
-
-        if deduction_source == 'group' and group_id:
-            await self._decrease_group_count(group_id, required_cost)
-        elif deduction_source == 'user':
-            await self._decrease_user_count(sender_id, required_cost)
 
         start_time = datetime.now()
         res, http_status = await self._call_api([], prompt, override_model=override_model_name)
         elapsed = (datetime.now() - start_time).total_seconds()
+        should_deduct = self._should_deduct_generation_result(res, http_status)
+        if should_deduct:
+            await self._deduct_generation_cost(
+                deduction_source,
+                sender_id,
+                group_id,
+                required_cost,
+            )
 
         if isinstance(res, bytes):
             await self._record_daily_usage(sender_id, group_id)
@@ -2427,6 +2867,8 @@ class FigurineProPlugin(Star):
             )
             if show_model_info:
                 msg += f"\n模型: {model_in_use}"
+            if should_deduct and deduction_source in ["group", "user"]:
+                msg += f"\n(失败状态码命中扣次设置，已扣除 {required_cost} 次)"
             yield self._reply_plain_result(event, msg)
 
         event.stop_event()

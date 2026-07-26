@@ -38,13 +38,15 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | --- | --- |
 | `generic_api_url` | Generic 模式 API 地址。支持 Base URL 或完整端点 URL，插件会按端点模型列表拼接/切换 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits` |
 | `generic_api_keys` | Generic 模式 Key 池（可多条轮询），示例：123 |
+| `request_user_agent` | 发送 Generic/Gemini 生图 API 请求时使用的 User-Agent，默认 `Codex Desktop/0.145.0-alpha.30 (Ubuntu 22.4.0; x86_64) xterm-256color (Codex Desktop; 26.715.72359)`；留空使用 HTTP 客户端默认值，不影响图片下载请求 |
 | `gemini_api_url` | Gemini 端点地址，默认 https://generativelanguage.googleapis.com |
 | `gemini_api_keys` | Gemini 路由 Key 池 |
+| `max_output_tokens` | Gemini 和 Generic Chat Completions 的最大输出/思考 Token 默认值；`0`（默认）不发送限制参数，即不限制；模型级正数可覆盖 |
 | `model_list` | 可用模型 ID 列表，默认包含 nano-banana 等 |
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
-| `model_parameter_list` | 模型参数设置列表；可设置模型默认扣次，并在 Images Generations / Edits 端点按模型发送 `quality`、`moderation` 和启用后的自适应 `size` |
+| `model_parameter_list` | 模型参数设置列表；模型名、扣次和最大输出/思考 Token 始终生效，GPT/Gemini 图片参数必须开启各自开关后才会发送 |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `images_generations_model_list` | 走 `/v1/images/generations` 的模型列表。常用于文生图 |
 | `images_edits_model_list` | 走 `/v1/images/edits` 的模型列表。常用于带图请求，插件会用 multipart/form-data 上传图片 |
@@ -55,8 +57,10 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `send_error_context` | 默认报错中展示 request_id、endpoint、model 等定位信息 |
 | `error_default_message` / `error_400_message` 等 | 自定义错误模板。支持 `{status_code}`、`{elapsed}`、`{detail}`、`{provider_message}`、`{model}`、`{endpoint_type}`、`{endpoint}`、`{request_id}` 等变量 |
 | `prefix` | 是否需要命令前缀或 @ 才触发 |
+| `maintenance_mode` | 维护模式开关。开启后拦截所有插件命令；不调用上游 API，也不扣除次数，可在后台关闭恢复使用 |
+| `maintenance_message` | 维护模式下返回给用户的提示文本；留空时使用默认提示 |
 | `extra_prefix` | 自定义提示词前缀（如 bnn，用 bnn <prompt> 调用） |
-| `preset_list_command` | 预设/提示词列表触发指令，默认 lm列表 |
+| `preset_list_command` | 预设/提示词列表触发指令，默认 `手办化列表`；修改后仅新配置的命令可触发，`lm列表`、`lmlist`、`预设列表` 不再兼容 |
 | `preset_list_template` | 预设列表图片模板，默认读取 `templates/preset_list.html` |
 | `batch_multiplier_symbol` | 批量生成倍率符号，默认 `*`，如 `#bnn*2 一只小猫` |
 | `resolution_symbol` | 临时覆盖模型自适应分辨率的符号，默认 `x`；`x1/x2/x4` 对应 `1K/2K/4K`，可与批量倍率、比例任意排序组合 |
@@ -68,7 +72,8 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `timeout` | 请求超时（秒），默认 120 |
 | `use_stream` | Generic 模式是否走流式请求。仅 `chat/completions` 路径有效，`images/generations` 不使用流式 |
 | `download_retries` | 图片下载重试次数 |
-| `help_text` | 自定义 #手办化帮助 文本 |
+| `help_command` | 帮助菜单触发命令，默认 `手办化帮助`；不需要写 `#`，`lmh` 和 `lm帮助` 不再作为别名 |
+| `help_text` | 自定义帮助菜单显示文本，支持 Markdown |
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
 | `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群不限制次数；全局管理员可无视群黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组次数限制 |
@@ -109,32 +114,50 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 ### 模型参数设置
 
-`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式，按模型配置 Images Generations 和 Images Edits 请求参数。
+`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式。模型名、扣除次数、最大输出/思考 Token 位于每项最上方，且不受下方两个参数开关影响。
 
 - `模型`：填写模型列表或端点模型列表中的模型名。
+- `该模型扣除次数`：每次生成扣除多少次，默认 `1`；不受 GPT/Gemini 参数开关影响，批量生成还会乘以实际生成倍率。
+- `最大输出/思考 Token`：仅 Gemini 和 Generic Chat Completions 路由生效。大于 `0` 时覆盖全局 `max_output_tokens`；填 `0` 时继承全局设置。全局也为 `0`（默认）时不发送限制参数，即不限制。Gemini 使用 `maxOutputTokens`，Generic Chat Completions 使用 `max_tokens`；不受 GPT/Gemini 参数开关影响。
+- `GPT参数设置`：默认关闭。只有开启后，下面的质量、审核、自适应比例、自适应比例分辨率、默认分辨率和强制限制分辨率才会生效；关闭时即使已填写也不会发送这些参数。
 - `质量`：可选 `low`、`medium`、`high`、`auto`，默认 `auto`。
 - `审核`：可选 `auto`、`low`。`auto` 为标准过滤；`low` 的过滤限制较少。
 - `自适应比例`：默认关闭。开启后，带图的 Images 请求会读取第一张图片宽高比并计算满足 Images API 约束的 `size` 参数。
 - `自适应比例分辨率`：可选 `1K`、`2K`、`4K`，默认 `1K`。开启自适应比例后默认使用此值；命令中的 `x1/x2/x4` 可临时覆盖。
+- `默认分辨率`：自适应比例未启动或未生成有效尺寸时发送的 `size` 参数，默认 `auto`；可填写供应商支持的其他 `size` 值。
 - `比例设置符号`：默认 `=`。命令中的 `=16:9` 或 `=16：9` 可临时覆盖参考图比例；比例参数会与 `x1/x2/x4`、批量倍率任意排序，例如 `#bnnx4*2=16:9`、`#bnn=16:9x4*2`。未传比例时继续使用参考图比例。
-- `默认扣除次数`：当前模型未启用有效自适应分辨率时，每次生成默认扣除多少次，默认 1。
+- `强制限制分辨率`：默认关闭。开启后按供应商的最长边计费档位限制输出 `size`：`1K` 不超过 `1024`、`2K` 不超过 `2048`、`4K` 不超过 `3840`；宽高仍保持为 16 的倍数且总像素不少于 `655,360`。原始比例无法同时满足时会增大短边，1K 的宽屏或竖屏比例最多为 `8:5`。
+- `Gemini参数设置`：默认关闭。只有模型走 Gemini 路由且该开关开启时，下面的 Gemini 分辨率才会发送到上游。
+- `Gemini分辨率`：可选 `自动`、`1K`、`2K`、`4K`，默认 `自动`。选择 `自动` 时不发送分辨率操作，由上游自动决定；选择 `1K`、`2K` 或 `4K` 时，请求根节点会增加：
 
-自适应尺寸统一遵守以下规则：宽高都是 16 的倍数、最长边不超过 3840、长短边比例不超过 3:1，总像素不少于 655,360 且不超过 8,294,400。`1K` 和 `2K` 分别以 1024、2048 为目标最长边，`4K` 以 3840 为目标最长边；若目标尺寸超出总像素范围，会等比放大或缩小后再对齐到 16。
+  ```json
+  {
+    "operations": [
+      {
+        "mode": "set",
+        "path": "generationConfig.imageConfig.imageSize",
+        "value": "4K"
+      }
+    ]
+  }
+  ```
 
-例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
+自适应尺寸默认遵守以下规则：宽高都是 16 的倍数、最长边不超过 3840、长短边比例不超过 3:1，总像素不少于 655,360 且不超过 8,294,400。`1K` 和 `2K` 分别以 1024、2048 为目标最长边，`4K` 以 3840 为目标最长边；若目标尺寸超出总像素范围，会等比放大或缩小后再对齐到 16。开启“强制限制分辨率”后，最长边限制与最小总像素规则同时生效；比例无法同时满足时会调整短边。
 
-请求携带图片、当前模型开启“自适应比例”并实际走 `/v1/images/generations` 或 `/v1/images/edits` 时，插件会按模型配置的分辨率增加 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。未配置模型、关闭自适应比例、Chat Completions 和 Gemini 路由均不提交 `size`，并按模型默认次数扣除。
+例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；开启后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
 
-最终生效的 `1K/2K/4K` 分别按 `resolution_1k_cost`、`resolution_2k_cost`、`resolution_4k_cost` 扣次，默认是 1、2、4 次；自适应分辨率未生效时按模型的“默认扣除次数”扣次。最后再乘批量倍率，例如默认配置下 `#bnn*2x4` 共扣 `4 x 2 = 8` 次。
+当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和 `size`。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。自适应比例未启动、无图片或未生成有效尺寸时，已配置模型会改为发送其“默认分辨率”（默认 `size=auto`）。关闭“GPT参数设置”时以上参数均不发送。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 分辨率由“Gemini参数设置”单独控制。自适应分辨率只影响请求参数，不影响扣次规则。
+
+每次请求都按模型的“该模型扣除次数”扣次，无论自适应分辨率是否启用或实际生效；最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。
 
 次数按每个请求的实际结果结算：生成成功正常扣次。`enable_failure_deduction_status_codes` 开启时，生成失败只有 HTTP 状态码命中 `failure_deduction_status_codes` 才扣次，默认仅状态码 `400` 会扣；关闭时，所有失败都会扣次。批量生成逐个结果结算。
 
 配置示例：
 
-| 模型 | 质量 | 审核 | 自适应比例 | 自适应比例分辨率 | 默认扣除次数 |
-| --- | --- | --- | --- | --- | --- |
-| `gpt-image-1` | `high` | `auto` | 开启 | `2K` | `1` |
-| `gpt-image-1-mini` | `medium` | `low` | 关闭 | `1K`（不生效） | `2` |
+| 模型 | 扣除次数 | 最大输出/思考 Token | GPT参数设置 | GPT 分辨率 | Gemini参数设置 | Gemini分辨率 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `gpt-image-1` | `1` | `0` | 开启 | 自适应 `2K` | 关闭 | 自动（不生效） |
+| `gemini-2.5-flash-image` | `1` | `8192` | 关闭 | 不发送 | 开启 | `4K` |
 
 ## 使用方法
 
@@ -149,6 +172,8 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 ### 本次更新
 
+- 新增维护模式开关和可配置提示内容；开启后会拦截所有插件命令，不调用 API 或扣次。
+- 模型参数设置新增 GPT/Gemini 参数开关；模型名、模型扣次和最大输出/思考 Token 始终生效，其余参数须开启对应开关。Gemini 支持自动、`1K`、`2K`、`4K` 分辨率。
 - 后台新增触发指令与模型绑定列表，配置项位于最上方。
 - 后台新增按模型配置的预设提示词列表，可覆盖不同模型最终收到的提示词模板。
 - 后台新增模型参数设置列表，支持为 Images Generations / Edits 模型指定质量与审核参数。
@@ -223,6 +248,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `#bnn*2x4` / `#bnnx4*2` | 使用 4K 分辨率并批量生成 2 次，两种顺序都支持 |
 | `#bnn=16:9` / `#bnn=16：9` | 覆盖参考图比例为 16:9；仅在当前模型开启自适应比例且请求带图时生效 |
 | `#bnnx4*2=16:9` / `#bnn=16:9x4*2` | 使用 16:9 比例、4K 分辨率并批量生成 2 次，参数顺序可调整 |
+| `#手办化帮助` | 显示帮助菜单；默认命令，可通过 `help_command` 自定义 |
 | `#手办化查询次数` | 查询自己的剩余次数 |
 
 ### 👑 管理命令 (仅主人)

@@ -40,6 +40,14 @@ def _normalize_positive_int(value: Any, default: int, minimum: int = 1) -> int:
     return max(minimum, number)
 
 
+def _normalize_nonnegative_int(value: Any, default: int = 0) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0, number)
+
+
 def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None) -> aiohttp.ClientTimeout:
     connect_seconds = max(1, connect_seconds)
     if read_seconds is None:
@@ -101,6 +109,10 @@ class FigurineProPlugin(Star):
     ADAPTIVE_MIN_PIXELS = 655_360
     ADAPTIVE_MAX_PIXELS = 8_294_400
     ADAPTIVE_MAX_ASPECT_RATIO = 3.0
+    DEFAULT_REQUEST_USER_AGENT = (
+        "Codex Desktop/0.145.0-alpha.30 (Ubuntu 22.4.0; x86_64) "
+        "xterm-256color (Codex Desktop; 26.715.72359)"
+    )
 
     PRESET_LIST_RENDER_OPTIONS = {
         "width": 1280,
@@ -783,6 +795,15 @@ class FigurineProPlugin(Star):
             normalized = str(value or "1K").strip().upper()
             return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "1K"
 
+        def normalize_gemini_resolution(value: Any) -> str:
+            normalized = str(value or "自动").strip().upper()
+            if normalized in {"", "AUTO", "AUTOMATIC", "自动"}:
+                return "auto"
+            return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "auto"
+
+        def normalize_default_resolution(value: Any) -> str:
+            return str(value or "auto").strip() or "auto"
+
         def get_value(item: Dict[str, Any], *keys: str, default: Any = None) -> Any:
             for key in keys:
                 if key in item and item[key] is not None:
@@ -795,7 +816,13 @@ class FigurineProPlugin(Star):
                 moderation: Any = "auto",
                 adaptive_aspect_ratio: Any = False,
                 adaptive_resolution: Any = "1K",
+                default_resolution: Any = "auto",
+                max_output_tokens: Any = 0,
                 deduction_count: Any = 1,
+                force_resolution_limit: Any = False,
+                enable_gpt_parameters: Any = False,
+                enable_gemini_parameters: Any = False,
+                gemini_resolution: Any = "自动",
         ):
             model_name = str(model or "").strip()
             if not model_name:
@@ -805,7 +832,13 @@ class FigurineProPlugin(Star):
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
                 "adaptive_resolution": normalize_resolution(adaptive_resolution),
+                "default_resolution": normalize_default_resolution(default_resolution),
+                "max_output_tokens": _normalize_nonnegative_int(max_output_tokens),
                 "deduction_count": _normalize_positive_int(deduction_count, 1),
+                "force_resolution_limit": normalize_bool(force_resolution_limit),
+                "enable_gpt_parameters": normalize_bool(enable_gpt_parameters),
+                "enable_gemini_parameters": normalize_bool(enable_gemini_parameters),
+                "gemini_resolution": normalize_gemini_resolution(gemini_resolution),
             }
 
         if isinstance(raw_list, dict):
@@ -823,7 +856,42 @@ class FigurineProPlugin(Star):
                             "自适应分辨率",
                             default="1K",
                         ),
-                        get_value(parameters, "deduction_count", "扣除次数", default=1),
+                        get_value(parameters, "default_resolution", "默认分辨率", default="auto"),
+                        get_value(
+                            parameters,
+                            "max_output_tokens",
+                            "最大输出思考Token",
+                            "最大输出Token",
+                            "思考Token限制",
+                            default=0,
+                        ),
+                        get_value(parameters, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
+                        get_value(
+                            parameters,
+                            "force_resolution_limit",
+                            "强制限制分辨率",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "enable_gpt_parameters",
+                            "gpt_parameters",
+                            "GPT参数设置",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "enable_gemini_parameters",
+                            "gemini_parameters",
+                            "Gemini参数设置",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "gemini_resolution",
+                            "Gemini分辨率",
+                            default="自动",
+                        ),
                     )
             return mapping
 
@@ -845,19 +913,78 @@ class FigurineProPlugin(Star):
                     "自适应分辨率",
                     default="1K",
                 ),
-                get_value(item, "deduction_count", "扣除次数", default=1),
+                get_value(item, "default_resolution", "默认分辨率", default="auto"),
+                get_value(
+                    item,
+                    "max_output_tokens",
+                    "最大输出思考Token",
+                    "最大输出Token",
+                    "思考Token限制",
+                    default=0,
+                ),
+                get_value(item, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
+                get_value(
+                    item,
+                    "force_resolution_limit",
+                    "强制限制分辨率",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "enable_gpt_parameters",
+                    "gpt_parameters",
+                    "GPT参数设置",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "enable_gemini_parameters",
+                    "gemini_parameters",
+                    "Gemini参数设置",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "gemini_resolution",
+                    "Gemini分辨率",
+                    default="自动",
+                ),
             )
 
         return mapping
 
     def _get_model_parameters(self, model_name: str) -> Dict[str, str]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        if not parameters:
+        if not parameters or not parameters.get("enable_gpt_parameters"):
             return {}
         return {
             "quality": parameters["quality"],
             "moderation": parameters["moderation"],
         }
+
+    def _get_max_output_tokens(self, model_name: str) -> int:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        model_limit = _normalize_nonnegative_int((parameters or {}).get("max_output_tokens", 0))
+        if model_limit:
+            return model_limit
+        return _normalize_nonnegative_int(
+            self.conf.get("max_output_tokens", self.conf.get("gemini_max_output_tokens", 0))
+        )
+
+    def _get_gemini_image_operations(self, model_name: str) -> List[Dict[str, str]]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not parameters or not parameters.get("enable_gemini_parameters"):
+            return []
+
+        resolution = parameters.get("gemini_resolution")
+        if resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
+            return []
+
+        return [{
+            "mode": "set",
+            "path": "generationConfig.imageConfig.imageSize",
+            "value": resolution,
+        }]
 
     @classmethod
     def _align_adaptive_dimension(cls, value: float, mode: str = "nearest") -> int:
@@ -890,6 +1017,7 @@ class FigurineProPlugin(Star):
             source_height: int,
             resolution: str,
             aspect_ratio: Optional[str] = None,
+            force_resolution_limit: bool = False,
     ) -> str:
         parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
         if parsed_ratio:
@@ -928,6 +1056,18 @@ class FigurineProPlugin(Star):
             long_edge = self._align_adaptive_dimension(long_edge * scale, "floor")
             short_edge = self._align_adaptive_dimension(short_edge * scale, "floor")
 
+        if force_resolution_limit:
+            max_long_edge = self.ADAPTIVE_RESOLUTION_LONG_EDGES[resolution]
+            if long_edge > max_long_edge:
+                long_edge = max_long_edge
+                short_edge = max(
+                    self._align_adaptive_dimension(long_edge / target_ratio),
+                    self._align_adaptive_dimension(
+                        self.ADAPTIVE_MIN_PIXELS / long_edge,
+                        "ceil",
+                    ),
+                )
+
         if source_ratio > self.ADAPTIVE_MAX_ASPECT_RATIO:
             ratio_label = aspect_ratio or f"{source_width}:{source_height}"
             ratio_subject = "目标比例" if aspect_ratio else "首图比例"
@@ -952,6 +1092,7 @@ class FigurineProPlugin(Star):
         normalized_resolution = str(resolution or "").strip().upper()
         if (
                 not parameters
+                or not parameters.get("enable_gpt_parameters")
                 or not parameters.get("adaptive_aspect_ratio")
                 or not image_bytes_list
         ):
@@ -976,11 +1117,13 @@ class FigurineProPlugin(Star):
             source_height,
             normalized_resolution,
             aspect_ratio=aspect_ratio,
+            force_resolution_limit=bool(parameters.get("force_resolution_limit")),
         )
 
         logger.info(
             f"自适应比例参数: model={model_name}, source={source_width}x{source_height}, "
-            f"resolution={normalized_resolution}, aspect_ratio={aspect_ratio or 'source'}, size={size}"
+            f"resolution={normalized_resolution}, aspect_ratio={aspect_ratio or 'source'}, "
+            f"force_resolution_limit={bool(parameters.get('force_resolution_limit'))}, size={size}"
         )
         return size
 
@@ -991,6 +1134,10 @@ class FigurineProPlugin(Star):
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
     ) -> Dict[str, str]:
+        model_parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not model_parameters or not model_parameters.get("enable_gpt_parameters"):
+            return {}
+
         parameters = self._get_model_parameters(model_name)
         adaptive_size = self._get_adaptive_image_size(
             model_name,
@@ -1000,6 +1147,8 @@ class FigurineProPlugin(Star):
         )
         if adaptive_size:
             parameters["size"] = adaptive_size
+        else:
+            parameters["size"] = model_parameters["default_resolution"]
         return parameters
 
     @staticmethod
@@ -1139,9 +1288,9 @@ class FigurineProPlugin(Star):
         return prefixes
 
     def _get_preset_list_commands(self) -> List[str]:
-        configured = str(self.conf.get("preset_list_command", "lm列表") or "").strip()
-        commands = [configured, "lm列表", "lmlist", "预设列表"]
-        return [cmd for cmd in self._dedupe_preserve_order(commands) if cmd]
+        configured = str(self.conf.get("preset_list_command", "手办化列表") or "").strip()
+        configured = configured.lstrip("#").strip()
+        return [configured or "手办化列表"]
 
     def _get_api_route_for_model(self, model_name: str) -> str:
         gemini_models = self._normalize_model_list(self.conf.get("gemini_model_list", []))
@@ -1260,8 +1409,26 @@ class FigurineProPlugin(Star):
             return ""
         return str(raw_id).strip()
 
+    def _get_maintenance_message(self) -> Optional[str]:
+        if not self.conf.get("maintenance_mode", False):
+            return None
+        message = str(
+            self.conf.get("maintenance_message", "插件当前正在维护中，请稍后再试。") or ""
+        ).strip()
+        return message or "插件当前正在维护中，请稍后再试。"
+
+    def _get_help_command(self) -> str:
+        command = str(self.conf.get("help_command", "手办化帮助") or "").strip()
+        command = command.lstrip("#").strip()
+        return command or "手办化帮助"
+
     @filter.command("切换API模式", aliases={"SwitchApi"}, prefix_optional=True)
     async def on_switch_api_mode(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             yield event.plain_result("❌ 只有管理员可以执行此操作。")
             return
@@ -1273,6 +1440,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("切换模型", aliases={"SwitchModel", "模型列表"}, prefix_optional=True)
     async def on_switch_model(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         all_models = self._get_all_models()
         raw_msg = event.message_str.strip()
         parts = raw_msg.split()
@@ -1693,7 +1865,11 @@ class FigurineProPlugin(Star):
             return None
 
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        if not parameters or not parameters.get("adaptive_aspect_ratio"):
+        if (
+                not parameters
+                or not parameters.get("enable_gpt_parameters")
+                or not parameters.get("adaptive_aspect_ratio")
+        ):
             return None
         if self._get_api_route_for_model(model_name) != "generic":
             return None
@@ -1713,12 +1889,6 @@ class FigurineProPlugin(Star):
             resolution: Optional[str] = None,
             has_images: bool = False,
     ) -> int:
-        effective_resolution = self._get_effective_resolution(model_name, resolution, has_images)
-        if effective_resolution:
-            config_key = f"resolution_{effective_resolution[0]}k_cost"
-            default_cost = {"1K": 1, "2K": 2, "4K": 4}[effective_resolution]
-            return _normalize_positive_int(self.conf.get(config_key, default_cost), default_cost)
-
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
 
@@ -2069,6 +2239,16 @@ class FigurineProPlugin(Star):
         headers = {
             "Connection": "keep-alive"
         }
+        request_user_agent = " ".join(
+            str(
+                self.conf.get(
+                    "request_user_agent",
+                    self.DEFAULT_REQUEST_USER_AGENT,
+                ) or ""
+            ).splitlines()
+        ).strip()
+        if request_user_agent:
+            headers["User-Agent"] = request_user_agent
 
         payload: Dict[str, Any] = {}
         form_data: aiohttp.FormData | None = None
@@ -2091,7 +2271,6 @@ class FigurineProPlugin(Star):
 
             payload = {
                 "contents": [{"parts": parts}],
-                "generationConfig": {"maxOutputTokens": 2048},
                 "safetySettings": [
                     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -2104,6 +2283,10 @@ class FigurineProPlugin(Star):
                     }
                 }
             }
+            if max_output_tokens := self._get_max_output_tokens(model_name):
+                payload["generationConfig"] = {"maxOutputTokens": max_output_tokens}
+            if operations := self._get_gemini_image_operations(model_name):
+                payload["operations"] = operations
 
         else:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -2167,10 +2350,11 @@ class FigurineProPlugin(Star):
                 use_stream = self.conf.get("use_stream", True)
                 payload = {
                     "model": model_name,
-                    "max_tokens": 4000,
                     "stream": use_stream,
                     "messages": messages
                 }
+                if max_output_tokens := self._get_max_output_tokens(model_name):
+                    payload["max_tokens"] = max_output_tokens
 
         safe_log_url = self._sanitize_request_log_url(final_url)
         logger.info(
@@ -2445,6 +2629,10 @@ class FigurineProPlugin(Star):
             return
 
         if cmd in self._get_preset_list_commands():
+            if maintenance_message := self._get_maintenance_message():
+                yield self._reply_plain_result(event, maintenance_message)
+                event.stop_event()
+                return
             yield await self._build_preset_list_result(event)
             event.stop_event()
             return
@@ -2469,6 +2657,14 @@ class FigurineProPlugin(Star):
                 append_text = parts[1].strip()
                 logger.info(f"检测到分隔符'{separator}'分割: 基础命令='{base_cmd}', 追加内容='{append_text}'")
 
+        if base_cmd == self._get_help_command():
+            if maintenance_message := self._get_maintenance_message():
+                yield self._reply_plain_result(event, maintenance_message)
+            else:
+                yield self._get_help_result(event)
+            event.stop_event()
+            return
+
         if base_cmd in extra_prefixes:
             matched_extra_prefix = base_cmd
             remaining_tokens = tokens[consumed_tokens:]
@@ -2484,12 +2680,9 @@ class FigurineProPlugin(Star):
                     logger.info(f"将追加内容'{append_text}'添加到预设prompt后面")
 
         if not user_prompt and not is_bnn:
-            cmd_map = {**self.BUILT_IN_CMD_MAP, "手办化帮助": "help"}
+            cmd_map = self.BUILT_IN_CMD_MAP
             if base_cmd in cmd_map:
                 key = cmd_map[base_cmd]
-                if key == "help":
-                    yield self._get_help_result(event)
-                    return
                 user_prompt = self.prompt_map.get(key) or self.prompt_map.get(base_cmd)
                 if append_text:
                     user_prompt = user_prompt + append_text
@@ -2498,6 +2691,11 @@ class FigurineProPlugin(Star):
         if not user_prompt:
             if not is_bnn:
                 return
+
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
 
         sender_id = self._norm_id(event.get_sender_id())
         group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
@@ -2809,6 +3007,11 @@ class FigurineProPlugin(Star):
     # 修复：使用 ctx=None 替代 *args
     @filter.command("文生图", prefix_optional=True)
     async def on_text_to_image(self, event: AstrMessageEvent, ctx=None):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         raw_cmd = event.message_str.strip()
         cmd_name = "文生图"
         override_model_name = None
@@ -2943,6 +3146,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("lm添加", aliases={"lma"}, prefix_optional=True)
     async def add_lm_prompt(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 
@@ -2996,6 +3204,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("lm查看", aliases={"lmv", "lm预览"}, prefix_optional=True)
     async def lm_preview_prompt(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         raw = event.message_str.strip()
         parts = raw.split()
         if len(parts) < 2:
@@ -3009,11 +3222,6 @@ class FigurineProPlugin(Star):
             yield event.plain_result(f"🔍 关键词【{keyword}】的提示词：\n\n{prompt_content}")
         else:
             yield event.plain_result(f"❌ 未找到关键词【{keyword}】的预设。")
-
-    @filter.command("lm列表", aliases={"lmlist", "预设列表"}, prefix_optional=True)
-    async def on_get_preset_list(self, event: AstrMessageEvent):
-        """输出所有可用预设列表预览图。"""
-        yield await self._build_preset_list_result(event)
 
     def _image_data_to_bytes(self, image_data: object) -> bytes | None:
         if isinstance(image_data, bytes):
@@ -3184,34 +3392,6 @@ class FigurineProPlugin(Star):
         for placeholder, value in replacements.items():
             template = template.replace(placeholder, value)
         return template
-
-    @filter.command("lm帮助", aliases={"lmh", "手办化帮助"}, prefix_optional=True)
-    async def on_prompt_help(self, event: AstrMessageEvent):
-        parts = event.message_str.strip().split()
-        keyword = parts[1] if len(parts) > 1 else ""
-
-        if not keyword:
-            yield self._get_help_result(event)
-            return
-
-        prompt = self.prompt_map.get(keyword)
-        content = f"📄 预设 [{keyword}] 内容:\n{prompt}" if prompt else f"❌ 未找到 [{keyword}]"
-
-        bot_uin = "2854196310"
-        try:
-            if hasattr(event, "robot") and event.robot:
-                bot_uin = str(event.robot.id)
-            elif hasattr(event, "bot") and hasattr(event.bot, "self_id"):
-                bot_uin = str(event.bot.self_id)
-        except:
-            pass
-
-        node = Node(
-            name="手办化助手",
-            uin=str(bot_uin),
-            content=[Plain(content)]
-        )
-        yield event.chain_result([Nodes(nodes=[node])])
 
     # ---------------- 统计与存储 ----------------
 
@@ -3421,6 +3601,11 @@ class FigurineProPlugin(Star):
     @filter.command("预设图片清理", prefix_optional=True)
     async def on_cleanup_preset_images(self, event: AstrMessageEvent):
         """清理过期的预设图片"""
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             yield event.plain_result("❌ 只有管理员可以执行此操作。")
             return
@@ -3444,6 +3629,11 @@ class FigurineProPlugin(Star):
     @filter.command("预设图片统计", prefix_optional=True)
     async def on_preset_images_stats(self, event: AstrMessageEvent):
         """输出预设图片统计信息"""
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             yield event.plain_result("❌ 只有管理员可以执行此操作。")
             return
@@ -3479,6 +3669,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化今日统计", prefix_optional=True)
     async def get_daily_stats_report(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             yield event.plain_result("❌ 权限不足")
             return
@@ -3511,6 +3706,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化签到", prefix_optional=True)
     async def on_checkin(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.conf.get("enable_checkin", False):
             yield event.plain_result("📅 签到未开启。")
             return
@@ -3536,6 +3736,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化增加用户次数", prefix_optional=True)
     async def on_add_user_counts(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 
@@ -3569,6 +3774,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化增加群组次数", prefix_optional=True)
     async def on_add_group_counts(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 
@@ -3589,6 +3799,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化查询次数", prefix_optional=True)
     async def on_query_counts(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         uid = self._norm_id(event.get_sender_id())
 
         if self.is_global_admin(event):
@@ -3608,6 +3823,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化添加key", prefix_optional=True)
     async def on_add_key(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 
@@ -3645,6 +3865,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化key列表", prefix_optional=True)
     async def on_list_keys(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 
@@ -3661,6 +3886,11 @@ class FigurineProPlugin(Star):
 
     @filter.command("手办化删除key", prefix_optional=True)
     async def on_delete_key(self, event: AstrMessageEvent):
+        if maintenance_message := self._get_maintenance_message():
+            yield self._reply_plain_result(event, maintenance_message)
+            event.stop_event()
+            return
+
         if not self.is_global_admin(event):
             return
 

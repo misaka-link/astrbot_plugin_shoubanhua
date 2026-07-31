@@ -86,6 +86,18 @@
                         "max": 1000000,
                         "hint": "仅 Gemini 和 Generic Chat Completions 路由生效。大于 0 时覆盖全局最大输出/思考 Token；0 时继承全局设置。全局也是 0 时不发送限制参数，即不限制。"
                     },
+                    "default_resolution": {
+                        "label": "默认分辨率",
+                        "type": "string",
+                        "default": "auto",
+                        "hint": "开启“默认传递 size”后，自适应比例未启动或未生成有效 size 时发送的 size 参数。默认 auto，可填写供应商支持的其他 size 值。"
+                    },
+                    "send_default_size": {
+                        "label": "默认传递 size",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "独立于 GPT/Gemini 参数设置。开启后，Images Generations / Edits 请求在未生成自适应 size 时传递“默认分辨率”（默认 size=auto）；关闭时不传递兜底 size。"
+                    },
                     "enable_gpt_parameters": {
                         "label": "GPT参数设置",
                         "type": "bool",
@@ -131,50 +143,113 @@
                         "default": "1K",
                         "hint": "仅在开启自适应比例时生效。默认使用这里选择的分辨率；命令中的 x1、x2、x4 可临时覆盖。生成的 size 宽高均为 16 的倍数、最长边不超过 3840、比例不超过 3:1、总像素为 655360 至 8294400。"
                     },
-                    "default_resolution": {
-                        "label": "默认分辨率",
-                        "type": "string",
-                        "default": "auto",
-                        "hint": "自适应比例未启动或未生成有效 size 时发送的 size 参数，默认 auto。可填写供应商支持的其他 size 值。"
+                    "auto_upgrade_1k_adaptive_resolution": {
+                        "label": "1K超限自动转2K",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 GPT参数设置和自适应比例开启时生效。有效分辨率为 1K 且初算 size 任一边超过 1024 时，改按 2K 重新计算 size，并按“2K 扣除次数”结算。与“强制限制分辨率”互斥；开启本项后会自动按关闭强制限制处理。"
                     },
                     "force_resolution_limit": {
                         "label": "强制限制分辨率",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 GPT参数设置开启时生效。开启后按当前分辨率强制限制输出 size 的最长边：1K 不超过 1024、2K 不超过 2048、4K 不超过 3840；宽高仍为 16 的倍数且总像素不少于 655360。原始比例无法同时满足时会增大短边，因此宽屏或竖屏的 1K 图片比例最多为 8:5。"
+                        "hint": "仅 GPT参数设置开启时生效。开启后按当前分辨率强制限制输出 size 的最长边：1K 不超过 1024、2K 不超过 2048、4K 不超过 3840；宽高仍为 16 的倍数且总像素不少于 655360。原始比例无法同时满足时会增大短边，因此宽屏或竖屏的 1K 图片比例最多为 8:5。与“1K超限自动转2K”互斥，后者开启时本项自动失效。"
                     },
                     "enable_gemini_parameters": {
                         "label": "Gemini参数设置",
                         "type": "bool",
                         "default": false,
-                        "hint": "开启后才会发送下方 Gemini 分辨率操作；关闭时下方设置即使已选择也不生效。"
+                        "hint": "开启后才会发送下方 Gemini 图片配置；关闭时下方设置即使已选择也不生效。"
                     },
                     "gemini_resolution": {
                         "label": "Gemini分辨率",
                         "type": "string",
                         "options": [
-                            "自动",
+                            "auto",
                             "1K",
                             "2K",
                             "4K"
                         ],
-                        "default": "自动",
-                        "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。选择 1K、2K 或 4K 时发送 imageSize 操作；选择自动时不发送分辨率操作，由上游自动决定。"
+                        "default": "auto",
+                        "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。选择 1K、2K 或 4K 时发送 imageConfig.imageSize；选择 auto 时不发送该字段，由上游使用默认值。"
+                    },
+                    "gemini_adaptive_aspect_ratio": {
+                        "label": "Gemini自适应比例",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。开启后，带图请求会读取第一张图片的比例，并映射为 Gemini 官方支持的最接近 aspectRatio；命令中的 =宽:高 可在带图时优先覆盖参考图比例。"
+                    },
+                    "gemini_aspect_ratio": {
+                        "label": "Gemini图片比例",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "1:1",
+                            "1:4",
+                            "4:1",
+                            "1:8",
+                            "8:1",
+                            "2:3",
+                            "3:2",
+                            "3:4",
+                            "4:3",
+                            "4:5",
+                            "5:4",
+                            "9:16",
+                            "16:9",
+                            "21:9"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。选择 auto 时不发送 imageConfig.aspectRatio：有参考图时由上游按参考图决定，无参考图时由模型使用默认比例；选择其他值时发送对应比例。开启 Gemini自适应比例且读取到首图时，本项会被自适应结果覆盖。不同 Gemini 模型支持的比例可能不同。"
+                    }
+                }
+            }
+        }
+    },
+    "model_mapping_list": {
+        "description": "【通用】模型映射列表",
+        "type": "template_list",
+        "hint": "为源模型按从上到下的顺序配置实际调用模型。只要源模型存在映射项，插件会直接请求第一条映射模型；失败后再依次尝试其余映射模型。每次尝试都使用实际调用模型自身的路由、提示词模板和模型参数设置。",
+        "default": [],
+        "templates": {
+            "model_mapping": {
+                "name": "模型映射",
+                "item_label": "模型映射",
+                "hint": "同一源模型可添加多个映射模型，列表最上方的项为首选模型，其余项依次作为热备。",
+                "items": {
+                    "model": {
+                        "label": "源模型",
+                        "type": "string",
+                        "default": "",
+                        "hint": "逻辑入口模型名，例如 nano-banana；配置了映射项后不会直接请求该模型。"
+                    },
+                    "mapped_model": {
+                        "label": "映射模型",
+                        "type": "string",
+                        "default": "",
+                        "hint": "实际请求的模型名。列表中的第一条会直接请求，后续条目在前一条失败后尝试；该模型可在“模型参数设置”中单独配置，调用时遵循它自己的参数。"
+                    },
+                    "priority": {
+                        "label": "优先权重",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "hint": "可选，数值越大越优先；同一源模型的权重相同时按列表中的先后顺序调用。未填写或无效时按 0 处理。"
                     }
                 }
             }
         }
     },
     "generic_api_url": {
-        "description": "【Generic】API地址",
+        "description": "【通用】API地址",
         "type": "string",
-        "hint": "Generic模式(OpenAI格式)专用：可填 Base URL 或完整URL。插件会按下方端点模型列表自动拼接 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`；未匹配或列表为空默认走 `/v1/chat/completions`。",
+        "hint": "可直接填写服务根地址，例如 `http://10.10.10.99:3000` 或末尾带 `/` 的地址。模型命中 Gemini模型列表时自动拼接 Gemini `v1beta/models/{model}:generateContent`；其余模型按下方端点模型列表拼接 OpenAI `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`。也兼容完整 OpenAI 端点 URL。",
         "default": "https://api.bltcy.ai/v1/chat/completions"
     },
     "generic_api_keys": {
         "description": "【Generic】API Key 池",
         "type": "list",
-        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。添加/删除可用 #手办化添加key generic、#手办化删除key generic 管理。",
+        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。API地址填写服务根地址且模型走 Gemini 路由时，Gemini Key 池为空会自动复用本池。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。添加/删除可用 #手办化添加key generic、#手办化删除key generic 管理。",
         "items": {
             "type": "string",
             "description": "Generic API Key，通常形如 sk-..."
@@ -222,7 +297,7 @@
     "gemini_model_list": {
         "description": "【Gemini路由】Gemini模型列表",
         "type": "list",
-        "hint": "填入这里的模型会自动走 Gemini 端点；不在此列表的模型继续走 Generic/OpenAI兼容端点。",
+        "hint": "填入这里的模型会自动走 Gemini 端点；不在此列表的模型继续走 Generic/OpenAI兼容端点。使用模型热备时，映射模型也必须按其实际路由填入本列表或下方 Generic 端点列表，不能只填写源模型。",
         "items": {
             "type": "string",
             "description": "走 Gemini 端点的模型 ID"
@@ -241,7 +316,7 @@
     "chat_completions_model_list": {
         "description": "【Generic路由】Chat Completions模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按聊天补全格式调用的模型 ID 填在这里，请求会发送到 `/v1/chat/completions`，图片会以 image_url/data URL 形式放进 messages。三个路由列表都未匹配时默认走此端点。",
+        "hint": "仅 Generic 模式生效。把需要按聊天补全格式调用的模型 ID 填在这里，请求会发送到 `/v1/chat/completions`，图片会以 image_url/data URL 形式放进 messages。使用模型热备时要填写映射模型名，不能只填写源模型。三个路由列表都未匹配时默认走此端点。",
         "items": {
             "type": "string",
             "description": "走 chat/completions 的模型 ID"
@@ -251,7 +326,7 @@
     "images_generations_model_list": {
         "description": "【Generic路由】Images Generations模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；如果模型同时也在 Images Edits 模型列表中，文生图走此端点，图生图优先走 Images Edits。",
+        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；使用模型热备时要填写映射模型名，不能只填写源模型。如果模型同时也在 Images Edits 模型列表中，文生图走此端点，图生图优先走 Images Edits。",
         "items": {
             "type": "string",
             "description": "走 images/generations 的模型 ID"
@@ -261,7 +336,7 @@
     "images_edits_model_list": {
         "description": "【Generic路由】Images Edits模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按图片编辑接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/edits`，使用 multipart/form-data 上传 image 和 prompt。此端点必须携带至少一张图片，适合图生图/改图模型；同一模型也在 Images Generations 模型列表中时，图生图优先走此端点。",
+        "hint": "仅 Generic 模式生效。把需要按图片编辑接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/edits`，使用 multipart/form-data 上传 image 和 prompt。使用模型热备时要填写映射模型名，不能只填写源模型。此端点必须携带至少一张图片，适合图生图/改图模型；同一模型也在 Images Generations 模型列表中时，图生图优先走此端点。",
         "items": {
             "type": "string",
             "description": "走 images/edits 的模型 ID"
@@ -378,6 +453,14 @@
         "hint": "HTTP 200成功但未返回图片时显示。支持变量：{status_text}=错误标题文本，{status_code}=HTTP状态码，{elapsed}=请求耗时秒数，{error_type}=错误类型，{message}=简短错误消息，{detail}=错误详情，{provider_message}=上游返回的主要错误信息，{provider_code}=上游错误码，{provider_type}=上游错误类型或参数类型，{request_id}=上游请求ID，{model}=本次请求使用的模型名，{api_mode}=接口模式，{endpoint_type}=端点类型，{endpoint}=实际请求端点，{url}=请求地址，通常与 endpoint 相同，{image_url}=相关图片地址，{image_count}=输入图片数量，{prompt}=提示词前300字。",
         "default": ""
     },
+    "content_policy_warning_message": {
+        "description": "【错误提示】违规内容警告内容",
+        "type": "text",
+        "hint": "上游判定输入内容违规、触发安全拦截，或 HTTP 状态码命中“失败扣除次数的错误码设置列表”时单独发送的警告内容。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前任务耗时秒数，{remaining}=扣次后的剩余次数文本，{prompt}=提示词前50字，{reason}=上游返回的主要错误原因。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=触发警告的任务序号，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
+        "editor_mode": true,
+        "editor_language": "markdown",
+        "default": "您的请求包含违规内容，无法生成图片。\n请更换模型或提示词/参考图 尝试 ！！\n模型: {model}\n\n任务 {batch_index}/{batch_count}"
+    },
     "return_full_response_on_no_image": {
         "description": "【错误提示】无图片时返回完整响应",
         "type": "bool",
@@ -459,7 +542,7 @@
     },
     "aspect_ratio_symbol": {
         "description": "【基础】比例设置符号",
-        "hint": "用于临时覆盖参考图比例并按自适应分辨率生成 size，默认 `=`。格式为 `=宽:高`，同时支持中文冒号 `：`，例如 `#bnn=16:9`、`#bnn=9：16x4*2`；可与批量倍率、分辨率级别任意排序组合。只有开启自适应比例、请求带图且走 Images 端点时才会提交 size。留空则关闭命令比例写法。",
+        "hint": "用于临时覆盖参考图比例，默认 `=`。格式为 `=宽:高`，同时支持中文冒号 `：`，例如 `#bnn=16:9`、`#bnn=9：16x4*2`；可与批量倍率、分辨率级别任意排序组合。开启 GPT 自适应比例时，带图的 Images 请求会按此比例生成 size；开启 Gemini自适应比例时，带图的 Gemini 请求会按此比例选择最接近的官方 aspectRatio。留空则关闭命令比例写法。",
         "type": "string",
         "default": "="
     },
@@ -550,10 +633,10 @@
     "help_text": {
         "description": "【帮助】帮助菜单显示文本",
         "type": "text",
-        "hint": "用户发送配置的帮助菜单命令时展示的内容，支持 Markdown 文本。这里可以写你的实际命令、倍率符号、模型说明、次数规则等。",
+        "hint": "用户发送配置的帮助菜单命令时展示的内容，支持 Markdown 文本。变量 {custom_command_model_bindings} 会自动替换为“自定义提示词前缀 -> 模型”列表；未绑定的前缀显示默认模型，每行一项且自动去重，箭头按最长触发词自动对齐。这里还可以写实际命令、倍率符号、模型说明、次数规则等。",
         "editor_mode": true,
         "editor_language": "markdown",
-        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#手办化列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key [generic|gemini] <key> - 添加Key\n#手办化key列表 - 查看Key池\n#切换模型 - 查看或切换模型\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)\n5. #bnn*2 <提示词> (并发生成2次，倍率符号可在后台配置)"
+        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#手办化列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key [generic|gemini] <key> - 添加Key\n#手办化key列表 - 查看Key池\n#切换模型 - 查看或切换模型\n\n📌 自定义触发词模型：\n{custom_command_model_bindings}\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)\n5. #bnn*2 <提示词> (并发生成2次，倍率符号可在后台配置)"
     },
     "user_whitelist": {
         "description": "【权限】用户白名单",
@@ -612,7 +695,7 @@
     "resolution_2k_cost": {
         "description": "【次数】2K 扣除次数",
         "type": "int",
-        "hint": "命令使用有效的 2K 分辨率参数时，每次生成扣除多少次。批量生成还会乘以实际生成倍率。",
+        "hint": "启用模型 GPT 参数“1K超限自动转2K”且实际升级为 2K 时，每次生成扣除多少次。批量生成还会乘以实际生成倍率。",
         "default": 2,
         "min": 1,
         "max": 100
@@ -628,7 +711,7 @@
     "failure_deduction_status_codes": {
         "description": "【次数】失败扣除次数的错误码设置列表",
         "type": "list",
-        "hint": "启用“失败扣次错误码限制”时生效。生成失败时，只有 HTTP 状态码在此列表内才扣除对应模型/分辨率的次数。默认仅 400；留空表示所有失败都不扣次。生成成功始终正常扣次。",
+        "hint": "生成失败时，HTTP 状态码命中本列表会触发违规内容警告，并停止模型热备切换，不再请求后续映射模型。是否扣次由“错误码是否扣除次数”控制。默认仅 400；留空时错误码失败不扣次且不会因错误码停止热备。生成成功始终正常扣次。",
         "items": {
             "type": "int",
             "description": "失败仍扣次的 HTTP 状态码"
@@ -637,10 +720,10 @@
             400
         ]
     },
-    "enable_failure_deduction_status_codes": {
-        "description": "【次数】启用失败扣次错误码限制",
+    "deduct_on_failure_status_codes": {
+        "description": "【次数】错误码是否扣除次数",
         "type": "bool",
-        "hint": "开启时，仅失败扣除次数的错误码设置列表中的 HTTP 状态码会扣次；关闭时，所有生成失败都会扣次。默认开启。",
+        "hint": "开启后，HTTP 状态码命中“失败扣除次数的错误码设置列表”时扣除对应模型/分辨率的次数；关闭后不扣次。无论开关状态，命中错误码都会单独发送违规内容警告并停止模型热备切换。默认开启。",
         "default": true
     },
     "enable_group_limit": {

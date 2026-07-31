@@ -7,6 +7,7 @@ import json
 import math
 import random
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -85,6 +86,14 @@ class FigurineProPlugin(Star):
         "images_generations": "/v1/images/generations",
         "images_edits": "/v1/images/edits",
     }
+    DEFAULT_GENERIC_API_URL = "https://api.bltcy.ai/v1/chat/completions"
+    DEFAULT_GEMINI_API_URL = "https://generativelanguage.googleapis.com"
+    DEFAULT_CONTENT_POLICY_WARNING_MESSAGE = (
+        "您的请求包含违规内容，无法生成图片。\n"
+        "请更换模型或提示词/参考图 尝试 ！！\n"
+        "模型: {model}\n\n"
+        "任务 {batch_index}/{batch_count}"
+    )
 
     GENERIC_ENDPOINT_DISPLAY_NAMES = {
         "chat_completions": "chat",
@@ -104,6 +113,14 @@ class FigurineProPlugin(Star):
         "1K": 1024,
         "2K": 2048,
         "4K": 3840,
+    }
+    GEMINI_ASPECT_RATIO_ORDER = (
+        "1:8", "1:4", "9:16", "2:3", "3:4", "4:5", "1:1",
+        "5:4", "4:3", "3:2", "16:9", "21:9", "4:1", "8:1",
+    )
+    GEMINI_ASPECT_RATIO_OPTIONS = {
+        "1:1", "1:4", "4:1", "1:8", "8:1", "2:3", "3:2", "3:4",
+        "4:3", "4:5", "5:4", "9:16", "16:9", "21:9",
     }
     ADAPTIVE_SIZE_ALIGNMENT = 16
     ADAPTIVE_MIN_PIXELS = 655_360
@@ -428,6 +445,7 @@ class FigurineProPlugin(Star):
         await self._load_group_counts()
         await self._load_user_checkin_data()
         await self._load_daily_stats()
+        await self._migrate_failure_deduction_config()
         await self._migrate_command_model_list_config()
         await self._migrate_extra_prefix_config()
         await self._migrate_prompt_list_config()
@@ -445,6 +463,20 @@ class FigurineProPlugin(Star):
 
         if not g_keys and not o_keys:
             logger.warning("FigurinePro: 未配置任何 API Key")
+
+    async def _migrate_failure_deduction_config(self):
+        legacy_key = "deduct_on_content_policy_violation"
+        current_key = "deduct_on_failure_status_codes"
+        if legacy_key not in self.conf or current_key in self.conf:
+            return
+
+        self.conf[current_key] = bool(self.conf.get(legacy_key, True))
+        try:
+            if hasattr(self.conf, "save"):
+                self.conf.save()
+            logger.info("已迁移违规内容扣次配置为错误码扣次配置")
+        except Exception as exc:
+            logger.error(f"迁移错误码扣次配置失败: {exc}")
 
     def _extract_image_urls_from_text(self, text: str) -> List[str]:
         """从文本中提取图片链接和本地文件路径"""
@@ -701,6 +733,10 @@ class FigurineProPlugin(Star):
         ):
             models.extend(self._get_endpoint_models(endpoint_type))
         models.extend(self._get_command_model_map().values())
+        model_mapping = self._get_model_mapping_map()
+        models.extend(model_mapping.keys())
+        for mapped_models in model_mapping.values():
+            models.extend(mapped_models)
         return self._dedupe_preserve_order(models)
 
     def _get_command_model_map(self) -> Dict[str, str]:
@@ -723,6 +759,129 @@ class FigurineProPlugin(Star):
 
     def _get_command_model(self, command: str) -> Optional[str]:
         return self._get_command_model_map().get((command or "").strip())
+
+    @staticmethod
+    def _get_text_display_width(text: str) -> int:
+        """按东亚字符宽度计算文本列宽，用于纯文本帮助内容对齐。"""
+        width = 0
+        for character in text:
+            if unicodedata.combining(character):
+                continue
+            width += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+        return width
+
+    def _get_custom_command_model_bindings_text(self) -> str:
+        """返回自定义提示词前缀与实际选择模型的帮助文本。"""
+        default_model = str(self.conf.get("model", "nano-banana") or "nano-banana").strip()
+        default_model = default_model or "nano-banana"
+        command_models = self._get_command_model_map()
+        seen = set()
+        bindings: List[Tuple[str, str]] = []
+
+        for prefix in self._get_extra_prefixes():
+            command = (prefix or "").strip().lstrip("#")
+            if not command or command in seen:
+                continue
+            seen.add(command)
+            bindings.append((command, command_models.get(command) or default_model))
+
+        max_command_width = max(
+            (self._get_text_display_width(command) for command, _ in bindings),
+            default=0,
+        )
+        return "\n".join(
+            f"{command}{' ' * (max_command_width - self._get_text_display_width(command))} -> {model}"
+            for command, model in bindings
+        )
+
+    def _render_help_text(self) -> str:
+        help_text = str(self.conf.get("help_text", "帮助文档未配置") or "")
+        return help_text.replace(
+            "{custom_command_model_bindings}",
+            self._get_custom_command_model_bindings_text(),
+        )
+
+    def _get_model_mapping_map(self) -> Dict[str, List[str]]:
+        """获取源模型到按优先权重排列的热备模型映射。"""
+        mapping_entries: Dict[str, List[Tuple[int, str]]] = {}
+        mapping: Dict[str, List[str]] = {}
+        raw_list = self.conf.get("model_mapping_list", [])
+
+        def add_item(source: Any, mapped: Any, priority: Any = 0):
+            source_name = str(source or "").strip()
+            if not source_name:
+                return
+
+            normalized_priority = _normalize_nonnegative_int(priority, 0)
+            if isinstance(mapped, (list, tuple, set)):
+                for item in mapped:
+                    add_item(source_name, item, normalized_priority)
+                return
+
+            mapped_name = str(mapped or "").strip()
+            if not mapped_name or mapped_name == source_name:
+                return
+
+            mapping_entries.setdefault(source_name, []).append(
+                (normalized_priority, mapped_name)
+            )
+
+        def get_priority(item: Dict[str, Any]) -> Any:
+            return item.get("priority") if "priority" in item else item.get("优先权重")
+
+        if isinstance(raw_list, dict):
+            for source, mapped in raw_list.items():
+                if isinstance(mapped, dict):
+                    add_item(
+                        source,
+                        mapped.get("mapped_model")
+                        or mapped.get("target_model")
+                        or mapped.get("映射模型"),
+                        get_priority(mapped),
+                    )
+                else:
+                    add_item(source, mapped)
+        elif isinstance(raw_list, list):
+            for item in raw_list:
+                if isinstance(item, dict):
+                    add_item(
+                        item.get("model")
+                        or item.get("source_model")
+                        or item.get("源模型"),
+                        item.get("mapped_model")
+                        or item.get("target_model")
+                        or item.get("mapping_model")
+                        or item.get("映射模型"),
+                        get_priority(item),
+                    )
+                elif isinstance(item, str) and ":" in item:
+                    source, mapped = item.split(":", 1)
+                    add_item(source, mapped)
+
+        for source, candidates in mapping_entries.items():
+            # Python 的稳定排序保留同权重配置的原始顺序。
+            ordered_candidates = sorted(
+                candidates,
+                key=lambda candidate: candidate[0],
+                reverse=True,
+            )
+            seen = set()
+            mapping[source] = []
+            for _, mapped in ordered_candidates:
+                if mapped in seen:
+                    continue
+                seen.add(mapped)
+                mapping[source].append(mapped)
+
+        return mapping
+
+    def _get_model_failover_candidates(self, model_name: str) -> List[str]:
+        """返回实际调用模型列表；配置映射时首项即为首选模型。"""
+        source_name = (model_name or "").strip()
+        if not source_name:
+            return []
+        mapped_models = self._get_model_mapping_map().get(source_name, [])
+        return mapped_models or [source_name]
 
     def _get_model_prompt_template_map(self) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
@@ -796,10 +955,16 @@ class FigurineProPlugin(Star):
             return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "1K"
 
         def normalize_gemini_resolution(value: Any) -> str:
-            normalized = str(value or "自动").strip().upper()
+            normalized = str(value or "auto").strip().upper()
             if normalized in {"", "AUTO", "AUTOMATIC", "自动"}:
                 return "auto"
             return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "auto"
+
+        def normalize_gemini_aspect_ratio(value: Any) -> str:
+            normalized = str(value or "auto").strip()
+            if normalized.upper() in {"", "AUTO", "AUTOMATIC", "自动"}:
+                return "auto"
+            return normalized if normalized in self.GEMINI_ASPECT_RATIO_OPTIONS else "auto"
 
         def normalize_default_resolution(value: Any) -> str:
             return str(value or "auto").strip() or "auto"
@@ -816,29 +981,40 @@ class FigurineProPlugin(Star):
                 moderation: Any = "auto",
                 adaptive_aspect_ratio: Any = False,
                 adaptive_resolution: Any = "1K",
+                auto_upgrade_1k_adaptive_resolution: Any = False,
                 default_resolution: Any = "auto",
+                send_default_size: Any = False,
                 max_output_tokens: Any = 0,
                 deduction_count: Any = 1,
                 force_resolution_limit: Any = False,
                 enable_gpt_parameters: Any = False,
                 enable_gemini_parameters: Any = False,
-                gemini_resolution: Any = "自动",
+                gemini_resolution: Any = "auto",
+                gemini_adaptive_aspect_ratio: Any = False,
+                gemini_aspect_ratio: Any = "auto",
         ):
             model_name = str(model or "").strip()
             if not model_name:
                 return
+            auto_upgrade_1k = normalize_bool(auto_upgrade_1k_adaptive_resolution)
             mapping[model_name] = {
                 "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
                 "adaptive_resolution": normalize_resolution(adaptive_resolution),
+                "auto_upgrade_1k_adaptive_resolution": auto_upgrade_1k,
                 "default_resolution": normalize_default_resolution(default_resolution),
+                "send_default_size": normalize_bool(send_default_size),
                 "max_output_tokens": _normalize_nonnegative_int(max_output_tokens),
                 "deduction_count": _normalize_positive_int(deduction_count, 1),
-                "force_resolution_limit": normalize_bool(force_resolution_limit),
+                "force_resolution_limit": (
+                    normalize_bool(force_resolution_limit) and not auto_upgrade_1k
+                ),
                 "enable_gpt_parameters": normalize_bool(enable_gpt_parameters),
                 "enable_gemini_parameters": normalize_bool(enable_gemini_parameters),
                 "gemini_resolution": normalize_gemini_resolution(gemini_resolution),
+                "gemini_adaptive_aspect_ratio": normalize_bool(gemini_adaptive_aspect_ratio),
+                "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
             }
 
         if isinstance(raw_list, dict):
@@ -856,7 +1032,14 @@ class FigurineProPlugin(Star):
                             "自适应分辨率",
                             default="1K",
                         ),
+                        get_value(
+                            parameters,
+                            "auto_upgrade_1k_adaptive_resolution",
+                            "1K超限自动转2K",
+                            default=False,
+                        ),
                         get_value(parameters, "default_resolution", "默认分辨率", default="auto"),
+                        get_value(parameters, "send_default_size", "默认传递 size", default=False),
                         get_value(
                             parameters,
                             "max_output_tokens",
@@ -890,7 +1073,19 @@ class FigurineProPlugin(Star):
                             parameters,
                             "gemini_resolution",
                             "Gemini分辨率",
-                            default="自动",
+                            default="auto",
+                        ),
+                        get_value(
+                            parameters,
+                            "gemini_adaptive_aspect_ratio",
+                            "Gemini自适应比例",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "gemini_aspect_ratio",
+                            "Gemini图片比例",
+                            default="auto",
                         ),
                     )
             return mapping
@@ -913,7 +1108,14 @@ class FigurineProPlugin(Star):
                     "自适应分辨率",
                     default="1K",
                 ),
+                get_value(
+                    item,
+                    "auto_upgrade_1k_adaptive_resolution",
+                    "1K超限自动转2K",
+                    default=False,
+                ),
                 get_value(item, "default_resolution", "默认分辨率", default="auto"),
+                get_value(item, "send_default_size", "默认传递 size", default=False),
                 get_value(
                     item,
                     "max_output_tokens",
@@ -947,7 +1149,19 @@ class FigurineProPlugin(Star):
                     item,
                     "gemini_resolution",
                     "Gemini分辨率",
-                    default="自动",
+                    default="auto",
+                ),
+                get_value(
+                    item,
+                    "gemini_adaptive_aspect_ratio",
+                    "Gemini自适应比例",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "gemini_aspect_ratio",
+                    "Gemini图片比例",
+                    default="auto",
                 ),
             )
 
@@ -971,20 +1185,88 @@ class FigurineProPlugin(Star):
             self.conf.get("max_output_tokens", self.conf.get("gemini_max_output_tokens", 0))
         )
 
-    def _get_gemini_image_operations(self, model_name: str) -> List[Dict[str, str]]:
+    @classmethod
+    def _get_nearest_gemini_aspect_ratio(
+            cls,
+            width: float,
+            height: float,
+    ) -> Optional[str]:
+        if width <= 0 or height <= 0:
+            return None
+
+        source_ratio = width / height
+
+        def distance(candidate: str) -> float:
+            parsed = cls._parse_aspect_ratio(candidate)
+            if not parsed:
+                return float("inf")
+            candidate_width, candidate_height = parsed
+            return abs(math.log(source_ratio / (candidate_width / candidate_height)))
+
+        return min(cls.GEMINI_ASPECT_RATIO_ORDER, key=distance)
+
+    def _get_gemini_adaptive_aspect_ratio(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str] = None,
+    ) -> Optional[str]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if (
+                not parameters
+                or not parameters.get("enable_gemini_parameters")
+                or not parameters.get("gemini_adaptive_aspect_ratio")
+                or not image_bytes_list
+        ):
+            return None
+
+        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if parsed_ratio:
+            source_width, source_height = parsed_ratio
+            source_label = aspect_ratio
+        else:
+            try:
+                with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
+                    source_width, source_height = image.size
+            except Exception as e:
+                logger.warning(f"读取首图尺寸失败，跳过 Gemini 自适应比例: {e}")
+                return None
+            source_label = f"{source_width}:{source_height}"
+
+        selected_ratio = self._get_nearest_gemini_aspect_ratio(source_width, source_height)
+        if selected_ratio:
+            logger.info(
+                f"Gemini 自适应比例: model={model_name}, source={source_label}, "
+                f"aspectRatio={selected_ratio}"
+            )
+        return selected_ratio
+
+    def _get_gemini_image_config(
+            self,
+            model_name: str,
+            image_bytes_list: Optional[List[bytes]] = None,
+            aspect_ratio: Optional[str] = None,
+    ) -> Dict[str, str]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         if not parameters or not parameters.get("enable_gemini_parameters"):
-            return []
+            return {}
 
-        resolution = parameters.get("gemini_resolution")
-        if resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
-            return []
+        image_config: Dict[str, str] = {}
+        if resolution := parameters.get("gemini_resolution"):
+            if resolution in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
+                image_config["imageSize"] = resolution
+        adaptive_aspect_ratio = self._get_gemini_adaptive_aspect_ratio(
+            model_name,
+            image_bytes_list or [],
+            aspect_ratio,
+        )
+        if adaptive_aspect_ratio:
+            image_config["aspectRatio"] = adaptive_aspect_ratio
+        elif configured_aspect_ratio := parameters.get("gemini_aspect_ratio"):
+            if configured_aspect_ratio in self.GEMINI_ASPECT_RATIO_OPTIONS:
+                image_config["aspectRatio"] = configured_aspect_ratio
 
-        return [{
-            "mode": "set",
-            "path": "generationConfig.imageConfig.imageSize",
-            "value": resolution,
-        }]
+        return image_config
 
     @classmethod
     def _align_adaptive_dimension(cls, value: float, mode: str = "nearest") -> int:
@@ -1081,13 +1363,21 @@ class FigurineProPlugin(Star):
         )
         return f"{target_width}x{target_height}"
 
-    def _get_adaptive_image_size(
+    @staticmethod
+    def _adaptive_size_exceeds_long_edge(size: str, long_edge_limit: int) -> bool:
+        try:
+            width, height = (int(dimension) for dimension in size.lower().split("x", 1))
+        except (AttributeError, TypeError, ValueError):
+            return False
+        return max(width, height) > long_edge_limit
+
+    def _get_adaptive_image_size_details(
             self,
             model_name: str,
             image_bytes_list: List[bytes],
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Optional[Tuple[str, str, bool]]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         normalized_resolution = str(resolution or "").strip().upper()
         if (
@@ -1119,13 +1409,47 @@ class FigurineProPlugin(Star):
             aspect_ratio=aspect_ratio,
             force_resolution_limit=bool(parameters.get("force_resolution_limit")),
         )
+        auto_upgraded_to_2k = (
+            normalized_resolution == "1K"
+            and parameters.get("auto_upgrade_1k_adaptive_resolution")
+            and self._adaptive_size_exceeds_long_edge(
+                size,
+                self.ADAPTIVE_RESOLUTION_LONG_EDGES["1K"],
+            )
+        )
+        effective_resolution = "2K" if auto_upgraded_to_2k else normalized_resolution
+        if auto_upgraded_to_2k:
+            size = self._calculate_adaptive_image_size(
+                source_width,
+                source_height,
+                effective_resolution,
+                aspect_ratio=aspect_ratio,
+                force_resolution_limit=bool(parameters.get("force_resolution_limit")),
+            )
 
         logger.info(
             f"自适应比例参数: model={model_name}, source={source_width}x{source_height}, "
-            f"resolution={normalized_resolution}, aspect_ratio={aspect_ratio or 'source'}, "
+            f"requested_resolution={normalized_resolution}, resolution={effective_resolution}, "
+            f"auto_upgraded_to_2k={auto_upgraded_to_2k}, "
+            f"aspect_ratio={aspect_ratio or 'source'}, "
             f"force_resolution_limit={bool(parameters.get('force_resolution_limit'))}, size={size}"
         )
-        return size
+        return size, effective_resolution, auto_upgraded_to_2k
+
+    def _get_adaptive_image_size(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            resolution: Optional[str],
+            aspect_ratio: Optional[str] = None,
+    ) -> Optional[str]:
+        details = self._get_adaptive_image_size_details(
+            model_name,
+            image_bytes_list,
+            resolution,
+            aspect_ratio,
+        )
+        return details[0] if details else None
 
     def _get_image_request_parameters(
             self,
@@ -1135,7 +1459,7 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
     ) -> Dict[str, str]:
         model_parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        if not model_parameters or not model_parameters.get("enable_gpt_parameters"):
+        if not model_parameters:
             return {}
 
         parameters = self._get_model_parameters(model_name)
@@ -1147,7 +1471,7 @@ class FigurineProPlugin(Star):
         )
         if adaptive_size:
             parameters["size"] = adaptive_size
-        else:
+        elif model_parameters.get("send_default_size"):
             parameters["size"] = model_parameters["default_resolution"]
         return parameters
 
@@ -1494,11 +1818,17 @@ class FigurineProPlugin(Star):
         else:
             yield event.plain_result(f"❌ 序号无效。")
 
-    async def _get_pool_api_key(self, mode: str) -> str | None:
+    async def _get_pool_api_key(self, mode: str, allow_generic_fallback: bool = False) -> str | None:
         keys = []
         async with self.key_lock:
             if mode == "gemini":
                 keys = self.conf.get("gemini_api_keys", [])
+                if not keys and allow_generic_fallback:
+                    keys = self.conf.get("generic_api_keys", [])
+                    if keys:
+                        key = keys[self.generic_key_index]
+                        self.generic_key_index = (self.generic_key_index + 1) % len(keys)
+                        return key
             else:
                 keys = self.conf.get("generic_api_keys", [])
 
@@ -1639,6 +1969,29 @@ class FigurineProPlugin(Star):
     def _is_generic_base_url(url: str) -> bool:
         path = urlparse(url).path.rstrip("/").lower()
         return not path or path.endswith("/v1")
+
+    @staticmethod
+    def _is_generic_service_root(url: str) -> bool:
+        parsed = urlparse(url)
+        return bool(parsed.scheme and parsed.netloc and not parsed.path.rstrip("/"))
+
+    def _get_api_base_url(self, api_mode: str) -> Tuple[str, bool]:
+        """Return the configured base URL and whether Gemini reuses the Generic service."""
+        generic_url = str(
+            self.conf.get("generic_api_url", self.DEFAULT_GENERIC_API_URL) or ""
+        ).strip()
+        if api_mode != "gemini":
+            return generic_url, False
+
+        # A Generic service root can expose both OpenAI and Gemini-compatible APIs.
+        # Keep the legacy Gemini URL for users who configured a full OpenAI endpoint.
+        if self._is_generic_service_root(generic_url):
+            return generic_url, True
+
+        gemini_url = str(
+            self.conf.get("gemini_api_url", self.DEFAULT_GEMINI_API_URL) or ""
+        ).strip()
+        return gemini_url, False
 
     def _resolve_generic_endpoint_url(self, url: str, endpoint_type: str) -> str:
         target_path = self.GENERIC_ENDPOINT_PATHS.get(
@@ -1855,40 +2208,32 @@ class FigurineProPlugin(Star):
 
         return msg
 
-    def _get_effective_resolution(
-            self,
-            model_name: str,
-            resolution: Optional[str],
-            has_images: bool,
-    ) -> Optional[str]:
-        if not has_images:
-            return None
-
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        if (
-                not parameters
-                or not parameters.get("enable_gpt_parameters")
-                or not parameters.get("adaptive_aspect_ratio")
-        ):
-            return None
-        if self._get_api_route_for_model(model_name) != "generic":
-            return None
-
-        endpoint_type = self._get_generic_endpoint_type_for_model(model_name, has_images=True)
-        if endpoint_type not in {"images_generations", "images_edits"}:
-            return None
-
-        normalized_resolution = str(resolution or "").strip().upper()
-        if normalized_resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
-            normalized_resolution = str(parameters.get("adaptive_resolution") or "1K").upper()
-        return normalized_resolution
-
     def _get_required_invocation_cost(
             self,
             model_name: str = "",
             resolution: Optional[str] = None,
             has_images: bool = False,
+            image_bytes_list: Optional[List[bytes]] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> int:
+        if image_bytes_list and self._get_api_route_for_model(model_name) == "generic":
+            endpoint_type = self._get_generic_endpoint_type_for_model(
+                model_name,
+                has_images=True,
+            )
+            if endpoint_type in {"images_generations", "images_edits"}:
+                adaptive_details = self._get_adaptive_image_size_details(
+                    model_name,
+                    image_bytes_list,
+                    resolution,
+                    aspect_ratio,
+                )
+                if adaptive_details and adaptive_details[2]:
+                    return _normalize_positive_int(
+                        self.conf.get("resolution_2k_cost", 2),
+                        2,
+                    )
+
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
 
@@ -1916,9 +2261,22 @@ class FigurineProPlugin(Star):
     def _should_deduct_generation_result(self, result: Any, http_status: int) -> bool:
         if isinstance(result, bytes):
             return True
-        if not self.conf.get("enable_failure_deduction_status_codes", True):
-            return True
-        return http_status in self._get_failure_deduction_status_codes()
+        if http_status not in self._get_failure_deduction_status_codes():
+            return False
+        configured_value = self.conf.get("deduct_on_failure_status_codes", None)
+        if configured_value is None:
+            configured_value = self.conf.get("deduct_on_content_policy_violation", True)
+        return bool(configured_value)
+
+    def _should_send_content_policy_warning(self, http_status: int, result: Any = None) -> bool:
+        return (
+            self._is_content_policy_violation(result)
+            or http_status in self._get_failure_deduction_status_codes()
+        )
+
+    def _should_stop_model_failover(self, http_status: int, result: Any = None) -> bool:
+        """违规或命中错误码时，直接返回警告而非继续热备请求。"""
+        return self._should_send_content_policy_warning(http_status, result)
 
     async def _deduct_generation_cost(
             self,
@@ -1931,6 +2289,22 @@ class FigurineProPlugin(Star):
             await self._decrease_group_count(group_id, amount)
         elif deduction_source == "user":
             await self._decrease_user_count(sender_id, amount)
+
+    def _get_remaining_count_text(
+            self,
+            deduction_source: Optional[str],
+            sender_id: str,
+            group_id: Optional[str],
+    ) -> str:
+        if deduction_source == "free":
+            return "∞"
+
+        remaining_parts = []
+        if self.conf.get("enable_user_limit", True):
+            remaining_parts.append(str(self._get_user_count(sender_id)))
+        if group_id and self.conf.get("enable_group_limit", False):
+            remaining_parts.append(f"群{self._get_group_count(group_id)}")
+        return "/".join(remaining_parts) if remaining_parts else "∞"
 
     def _resolve_generation_access(
         self,
@@ -2014,6 +2388,156 @@ class FigurineProPlugin(Star):
         if max_length and len(text) > max_length:
             text = text[:max_length].rstrip() + "..."
         return text
+
+    @staticmethod
+    def _contains_content_policy_violation_text(text: Any) -> bool:
+        normalized = str(text or "").lower()
+        markers = (
+            "content_policy_violation",
+            "content policy violation",
+            "content policy",
+            "content filter",
+            "content_filter",
+            "safety block",
+            "safety_block",
+            "safety filter",
+            "safety system",
+            "policy violation",
+            "content moderation",
+            "moderation block",
+            "blocked content",
+            "unsafe content",
+            "违规内容",
+            "内容违规",
+            "安全拦截",
+            "安全策略",
+            "内容审核",
+            "敏感内容",
+            "不当内容",
+        )
+        return any(marker in normalized for marker in markers)
+
+    def _is_content_policy_violation(self, result: Any) -> bool:
+        """识别上游返回的内容安全拦截。"""
+        if not isinstance(result, dict):
+            return False
+
+        error_type = str(result.get("error_type") or "").strip().lower()
+        if error_type in {
+            "safety_block",
+            "content_policy_violation",
+            "content_filter",
+            "moderation_block",
+            "policy_violation",
+        }:
+            return True
+
+        return self._contains_content_policy_violation_text(
+            " ".join(
+                str(result.get(key) or "")
+                for key in (
+                    "provider_code",
+                    "provider_type",
+                    "provider_message",
+                    "message",
+                    "detail",
+                )
+            )
+        )
+
+    def _get_content_policy_warning_reason(self, result: Any) -> str:
+        max_reason_length = _normalize_positive_int(
+            self.conf.get("error_detail_max_length", 800),
+            800,
+            80,
+        )
+        if isinstance(result, dict):
+            candidates = (
+                result.get("provider_message"),
+                result.get("message"),
+                result.get("detail"),
+            )
+        else:
+            candidates = (result,)
+
+        for candidate in candidates:
+            reason = self._safe_error_text(candidate, max_reason_length)
+            if reason:
+                return reason
+        return ""
+
+    def _get_content_policy_warning_message(
+            self,
+            *,
+            model: str = "",
+            label: str = "",
+            image_count: int = 0,
+            elapsed: float = 0.0,
+            remaining: str = "∞",
+            prompt: str = "",
+            reason: str = "",
+            batch_count: Optional[int] = None,
+            batch_index: Optional[int] = None,
+            max_batch_concurrency: Optional[int] = None,
+    ) -> str:
+        message = str(
+            self.conf.get(
+                "content_policy_warning_message",
+                self.DEFAULT_CONTENT_POLICY_WARNING_MESSAGE,
+            ) or ""
+        ).strip()
+        variables: Dict[str, Any] = {
+            "model": model,
+            "label": label,
+            "image_count": image_count,
+            "elapsed": f"{elapsed:.2f}",
+            "remaining": remaining,
+            "prompt": prompt[:50],
+            "reason": reason,
+        }
+        if batch_count is not None:
+            variables.update(
+                {
+                    "batch_count": batch_count,
+                    "batch_index": batch_index,
+                    "max_batch_concurrency": max_batch_concurrency,
+                }
+            )
+        return self._format_template(
+            message or self.DEFAULT_CONTENT_POLICY_WARNING_MESSAGE,
+            variables,
+        )
+
+    @staticmethod
+    def _get_content_policy_response_reason(data: Any) -> str:
+        """提取 HTTP 200 响应中未以 error 字段返回的安全完成原因。"""
+        if not isinstance(data, dict):
+            return ""
+
+        prompt_feedback = data.get("promptFeedback")
+        if isinstance(prompt_feedback, dict) and prompt_feedback.get("blockReason"):
+            return str(prompt_feedback["blockReason"])
+
+        safety_finish_reasons = {
+            "SAFETY",
+            "IMAGE_SAFETY",
+            "CONTENT_FILTER",
+            "CONTENT_POLICY_VIOLATION",
+            "PROHIBITED_CONTENT",
+            "BLOCKED",
+            "BLOCKLIST",
+        }
+        for candidate in data.get("candidates") or []:
+            if isinstance(candidate, dict):
+                finish_reason = str(candidate.get("finishReason") or "").upper()
+                if finish_reason in safety_finish_reasons:
+                    return finish_reason
+        for choice in data.get("choices") or []:
+            if isinstance(choice, dict):
+                finish_reason = str(choice.get("finish_reason") or "").upper()
+                if finish_reason in safety_finish_reasons:
+                    return finish_reason
+        return ""
 
     @staticmethod
     def _build_api_error(error_type: str, message: str, **kwargs: Any) -> Dict[str, Any]:
@@ -2192,6 +2716,67 @@ class FigurineProPlugin(Star):
             override_model: str | None = None,
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            return_actual_model: bool = False,
+    ) -> Any:
+        """按模型映射顺序调用接口，失败时切换到下一个热备模型。"""
+        source_model = str(
+            override_model or self.conf.get("model", "nano-banana") or "nano-banana"
+        ).strip() or "nano-banana"
+        candidate_models = self._get_model_failover_candidates(source_model)
+        last_result: bytes | str | Dict[str, Any] = self._build_api_error(
+            "config_error",
+            "未找到可调用模型。",
+            model=source_model,
+        )
+        last_status = 0
+        actual_model = source_model
+
+        for index, candidate_model in enumerate(candidate_models):
+            actual_model = candidate_model
+            result, http_status = await self._call_api_once(
+                image_bytes_list,
+                prompt,
+                override_model=candidate_model,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+            )
+            if isinstance(result, bytes):
+                if index > 0:
+                    logger.info(
+                        f"模型热备切换成功: source={source_model}, model={candidate_model}, "
+                        f"attempt={index + 1}/{len(candidate_models)}"
+                    )
+                if return_actual_model:
+                    return result, http_status, candidate_model
+                return result, http_status
+
+            last_result, last_status = result, http_status
+            if self._should_stop_model_failover(http_status, result):
+                logger.warning(
+                    f"模型调用失败，命中违规内容或配置错误码并停止热备切换: "
+                    f"source={source_model}, failed_model={candidate_model}, "
+                    f"status={http_status}"
+                )
+                break
+            if index + 1 < len(candidate_models):
+                error_type = result.get("error_type", "unknown") if isinstance(result, dict) else "unknown"
+                logger.warning(
+                    f"模型调用失败，切换热备模型: source={source_model}, "
+                    f"failed_model={candidate_model}, status={http_status}, "
+                    f"error_type={error_type}, next_model={candidate_models[index + 1]}"
+                )
+
+        if return_actual_model:
+            return last_result, last_status, actual_model
+        return last_result, last_status
+
+    async def _call_api_once(
+            self,
+            image_bytes_list: List[bytes],
+            prompt: str,
+            override_model: str | None = None,
+            resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> Tuple[bytes | str | Dict[str, Any], int]:
         """
         调用API生成图片
@@ -2220,18 +2805,19 @@ class FigurineProPlugin(Star):
                 status,
             )
 
-        if api_mode == "gemini":
-            base_url = self.conf.get("gemini_api_url", "https://generativelanguage.googleapis.com")
-        else:
-            base_url = self.conf.get("generic_api_url", "https://api.bltcy.ai/v1/chat/completions")
+        base_url, gemini_uses_generic_service = self._get_api_base_url(api_mode)
 
         if not base_url:
             base_url = ""
             return make_error("config_error", "API URL 未配置", 0)
 
-        api_key = await self._get_pool_api_key(api_mode)
+        api_key = await self._get_pool_api_key(
+            api_mode,
+            allow_generic_fallback=gemini_uses_generic_service,
+        )
         if not api_key:
-            return make_error("config_error", f"无可用 API Key (请在 {api_mode} 池中添加Key)", 0)
+            key_pool_name = "gemini 或 generic" if gemini_uses_generic_service else api_mode
+            return make_error("config_error", f"无可用 API Key (请在 {key_pool_name} 池中添加Key)", 0)
 
         # --- 构造最终 Prompt (支持按模型指定预设提示词模板) ---
         final_prompt = self._build_final_prompt(prompt, model_name, len(image_bytes_list))
@@ -2283,10 +2869,17 @@ class FigurineProPlugin(Star):
                     }
                 }
             }
+            generation_config: Dict[str, Any] = {}
             if max_output_tokens := self._get_max_output_tokens(model_name):
-                payload["generationConfig"] = {"maxOutputTokens": max_output_tokens}
-            if operations := self._get_gemini_image_operations(model_name):
-                payload["operations"] = operations
+                generation_config["maxOutputTokens"] = max_output_tokens
+            if image_config := self._get_gemini_image_config(
+                    model_name,
+                    image_bytes_list,
+                    aspect_ratio,
+            ):
+                generation_config["imageConfig"] = image_config
+            if generation_config:
+                payload["generationConfig"] = generation_config
 
         else:
             headers["Authorization"] = f"Bearer {api_key}"
@@ -2519,8 +3112,13 @@ class FigurineProPlugin(Star):
                             data["error"],
                             ensure_ascii=False,
                         )
+                        error_type = (
+                            "content_policy_violation"
+                            if self._is_content_policy_violation(provider_fields)
+                            else "upstream_error"
+                        )
                         return make_error(
-                            "upstream_error",
+                            error_type,
                             provider_message,
                             http_status,
                             detail=data["error"],
@@ -2528,17 +3126,15 @@ class FigurineProPlugin(Star):
                             **provider_fields,
                         )
 
-                    if isinstance(data, dict) and "promptFeedback" in data:
-                        pf = data["promptFeedback"]
-                        if pf.get("blockReason"):
-                            return make_error(
-                                "safety_block",
-                                f"Gemini 安全拦截: {pf['blockReason']}",
-                                http_status,
-                                detail=pf,
-                                provider_message=str(pf.get("blockReason") or ""),
-                                request_id=request_id,
-                            )
+                    if safety_reason := self._get_content_policy_response_reason(data):
+                        return make_error(
+                            "safety_block",
+                            f"上游安全拦截: {safety_reason}",
+                            http_status,
+                            detail={"safety_reason": safety_reason},
+                            provider_message=safety_reason,
+                            request_id=request_id,
+                        )
 
                     url_or_b64 = self._extract_image_url_from_response(data)
 
@@ -2779,17 +3375,18 @@ class FigurineProPlugin(Star):
         display_label = display_cmd
         base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
-        effective_resolution = self._get_effective_resolution(
-            model_in_use,
-            requested_resolution,
-            has_images=bool(images_to_process),
+        candidate_models = self._get_model_failover_candidates(model_in_use)
+        initial_actual_model = candidate_models[0]
+        max_per_invocation_cost = max(
+            self._get_required_invocation_cost(
+                candidate_model,
+                requested_resolution,
+                image_bytes_list=images_to_process,
+                aspect_ratio=requested_aspect_ratio,
+            )
+            for candidate_model in candidate_models
         )
-        per_invocation_cost = self._get_required_invocation_cost(
-            model_in_use,
-            effective_resolution,
-            has_images=bool(images_to_process),
-        )
-        required_cost = per_invocation_cost * batch_count
+        required_cost = max_per_invocation_cost * batch_count
         allowed, deduction_source, deny_message = self._resolve_generation_access(
             event,
             sender_id,
@@ -2805,7 +3402,7 @@ class FigurineProPlugin(Star):
             yield self._reply_plain_result(event, f"⚠️ 本次倍率最高为 {batch_count}，已按 {batch_count} 次并发生成。")
 
         endpoint_display = self._get_endpoint_display_for_request(
-            model_in_use,
+            initial_actual_model,
             has_images=bool(images_to_process),
         )
         show_model_info = self.conf.get("show_model_info", False)
@@ -2862,8 +3459,9 @@ class FigurineProPlugin(Star):
                         images_to_process,
                         user_prompt,
                         override_model=override_model_name,
-                        resolution=effective_resolution,
+                        resolution=requested_resolution,
                         aspect_ratio=requested_aspect_ratio,
+                        return_actual_model=True,
                     )
                 except Exception as exc:
                     result = exc
@@ -2877,9 +3475,12 @@ class FigurineProPlugin(Star):
         ]
 
         success_count = 0
-        failed_deduction_count = 0
+        failed_deduction_amount = 0
+        content_policy_violation_detected = False
+        content_policy_warning_context: Optional[Dict[str, Any]] = None
         first_error = None
         first_error_status = 0
+        first_error_model = initial_actual_model
 
         for completed_task in asyncio.as_completed(tasks):
             index, result, elapsed = await completed_task
@@ -2894,22 +3495,42 @@ class FigurineProPlugin(Star):
                     first_error_status = 0
                 continue
 
-            res, http_status = result
+            res, http_status, actual_model = result
+            invocation_cost = self._get_required_invocation_cost(
+                actual_model,
+                requested_resolution,
+                image_bytes_list=images_to_process,
+                aspect_ratio=requested_aspect_ratio,
+            )
             should_deduct = self._should_deduct_generation_result(res, http_status)
+            should_send_content_policy_warning = self._should_send_content_policy_warning(
+                http_status,
+                res,
+            )
             if should_deduct:
                 await self._deduct_generation_cost(
                     deduction_source,
                     sender_id,
                     group_id,
-                    per_invocation_cost,
+                    invocation_cost,
                 )
 
             if not isinstance(res, bytes):
+                if should_send_content_policy_warning:
+                    content_policy_violation_detected = True
+                    if content_policy_warning_context is None:
+                        content_policy_warning_context = {
+                            "model": actual_model,
+                            "elapsed": elapsed,
+                            "batch_index": index,
+                            "reason": self._get_content_policy_warning_reason(res),
+                        }
                 if should_deduct:
-                    failed_deduction_count += 1
+                    failed_deduction_amount += invocation_cost
                 if first_error is None:
                     first_error = res
                     first_error_status = http_status
+                    first_error_model = actual_model
                 continue
 
             success_count += 1
@@ -2921,19 +3542,14 @@ class FigurineProPlugin(Star):
             # 检查是否有自定义成功消息模板
             custom_success_template = self.conf.get("custom_success_message", "").strip()
             if custom_success_template:
-                # 计算剩余次数
-                if deduction_source == 'free':
-                    remaining_text = "∞"
-                else:
-                    remaining_parts = []
-                    if self.conf.get("enable_user_limit", True):
-                        remaining_parts.append(str(self._get_user_count(sender_id)))
-                    if group_id and self.conf.get("enable_group_limit", False):
-                        remaining_parts.append(f"群{self._get_group_count(group_id)}")
-                    remaining_text = "/".join(remaining_parts) if remaining_parts else "∞"
+                remaining_text = self._get_remaining_count_text(
+                    deduction_source,
+                    sender_id,
+                    group_id,
+                )
                 
                 # 替换占位符
-                message_text = custom_success_template.replace("{model}", model_in_use).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency))
+                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency))
             else:
                 # 使用默认消息格式
                 status_text = "生成成功"
@@ -2950,43 +3566,62 @@ class FigurineProPlugin(Star):
                         caption_parts.append(f"用户剩余: {self._get_user_count(sender_id)}")
 
                 if show_model_info:
-                    caption_parts.append(f"模型: {model_in_use}")
+                    caption_parts.append(f"模型: {actual_model}")
 
                 message_text = " | ".join(caption_parts)
 
             yield self._reply_chain_result(event, [Image.fromBytes(res), Plain(message_text)])
 
         total_elapsed = (datetime.now() - start_time).total_seconds()
-        if success_count == 0:
+        if content_policy_violation_detected:
+            warning_context = content_policy_warning_context or {}
+            yield self._reply_plain_result(
+                event,
+                self._get_content_policy_warning_message(
+                    model=str(warning_context.get("model") or initial_actual_model),
+                    label=display_label,
+                    image_count=len(images_to_process),
+                    elapsed=float(warning_context.get("elapsed") or total_elapsed),
+                    remaining=self._get_remaining_count_text(
+                        deduction_source,
+                        sender_id,
+                        group_id,
+                    ),
+                    prompt=user_prompt,
+                    reason=str(warning_context.get("reason") or ""),
+                    batch_count=batch_count,
+                    batch_index=warning_context.get("batch_index"),
+                    max_batch_concurrency=max_batch_concurrency,
+                ),
+            )
+        elif success_count == 0:
             status_text = "生成失败"
             msg = self._format_error_message(
                 status_text,
                 total_elapsed,
                 first_error,
                 first_error_status,
-                model=model_in_use,
-                api_mode=self._get_api_route_for_model(model_in_use),
+                model=first_error_model,
+                api_mode=self._get_api_route_for_model(first_error_model),
                 prompt=user_prompt,
                 image_count=len(images_to_process),
             )
-            if failed_deduction_count and deduction_source in ["group", "user"]:
-                deducted_amount = failed_deduction_count * per_invocation_cost
-                msg += f"\n(失败状态码命中扣次设置，已扣除 {deducted_amount} 次)"
+            if failed_deduction_amount and deduction_source in ["group", "user"]:
+                msg += f"\n(失败状态码命中扣次设置，已扣除 {failed_deduction_amount} 次)"
             if show_model_info:
-                msg += f"\n模型: {model_in_use}"
+                msg += f"\n模型: {first_error_model}"
             yield self._reply_plain_result(event, msg)
         elif success_count < batch_count:
             summary = f"⚠️ 批量生成完成：成功 {success_count}/{batch_count}，失败 {batch_count - success_count} 次。"
-            if failed_deduction_count and deduction_source in ["group", "user"]:
-                deducted_amount = failed_deduction_count * per_invocation_cost
-                summary += f"\n其中失败请求按错误码设置扣除 {deducted_amount} 次。"
+            if failed_deduction_amount and deduction_source in ["group", "user"]:
+                summary += f"\n其中失败请求按错误码设置扣除 {failed_deduction_amount} 次。"
             yield self._reply_plain_result(event, summary)
 
         event.stop_event()
 
     def _get_help_result(self, event: AstrMessageEvent):
         """生成合并转发帮助消息对象"""
-        help_text = self.conf.get("help_text", "帮助文档未配置")
+        help_text = self._render_help_text()
 
         bot_uin = "2854196310"
         try:
@@ -3040,7 +3675,12 @@ class FigurineProPlugin(Star):
 
         base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
-        required_cost = self._get_required_invocation_cost(model_in_use)
+        candidate_models = self._get_model_failover_candidates(model_in_use)
+        initial_actual_model = candidate_models[0]
+        required_cost = max(
+            self._get_required_invocation_cost(candidate_model)
+            for candidate_model in candidate_models
+        )
         allowed, deduction_source, deny_message = self._resolve_generation_access(
             event,
             sender_id,
@@ -3055,7 +3695,7 @@ class FigurineProPlugin(Star):
         display_prompt = prompt[:10] + "..." if len(prompt) > 10 else prompt
         mode_prefix = ""
         
-        endpoint_display = self._get_endpoint_display_for_request(model_in_use, has_images=False)
+        endpoint_display = self._get_endpoint_display_for_request(initial_actual_model, has_images=False)
         show_model_info = self.conf.get("show_model_info", False)
         
         # 检查是否有自定义文生图开始消息模板
@@ -3077,15 +3717,25 @@ class FigurineProPlugin(Star):
         yield self._reply_plain_result(event, info_str)
 
         start_time = datetime.now()
-        res, http_status = await self._call_api([], prompt, override_model=override_model_name)
+        res, http_status, actual_model = await self._call_api(
+            [],
+            prompt,
+            override_model=override_model_name,
+            return_actual_model=True,
+        )
         elapsed = (datetime.now() - start_time).total_seconds()
+        invocation_cost = self._get_required_invocation_cost(actual_model)
         should_deduct = self._should_deduct_generation_result(res, http_status)
+        should_send_content_policy_warning = self._should_send_content_policy_warning(
+            http_status,
+            res,
+        )
         if should_deduct:
             await self._deduct_generation_cost(
                 deduction_source,
                 sender_id,
                 group_id,
-                required_cost,
+                invocation_cost,
             )
 
         if isinstance(res, bytes):
@@ -3094,19 +3744,14 @@ class FigurineProPlugin(Star):
             # 检查是否有自定义成功消息模板
             custom_success_template = self.conf.get("custom_success_message", "").strip()
             if custom_success_template:
-                # 计算剩余次数
-                if deduction_source == 'free':
-                    remaining_text = "∞"
-                else:
-                    remaining_parts = []
-                    if self.conf.get("enable_user_limit", True):
-                        remaining_parts.append(str(self._get_user_count(sender_id)))
-                    if group_id and self.conf.get("enable_group_limit", False):
-                        remaining_parts.append(f"群{self._get_group_count(group_id)}")
-                    remaining_text = "/".join(remaining_parts) if remaining_parts else "∞"
+                remaining_text = self._get_remaining_count_text(
+                    deduction_source,
+                    sender_id,
+                    group_id,
+                )
                 
                 # 替换占位符（文生图没有携带图片，image_count为0）
-                message_text = custom_success_template.replace("{model}", model_in_use).replace("{label}", display_prompt).replace("{image_count}", "0").replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{prompt}", prompt[:50])
+                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_prompt).replace("{image_count}", "0").replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{prompt}", prompt[:50])
             else:
                 # 使用默认消息格式
                 status_text = "生成成功"
@@ -3119,27 +3764,42 @@ class FigurineProPlugin(Star):
                     if self.conf.get("enable_user_limit", True):
                         caption_parts.append(f"用户剩余: {self._get_user_count(sender_id)}")
                 if show_model_info:
-                    caption_parts.append(f"模型: {model_in_use}")
+                    caption_parts.append(f"模型: {actual_model}")
 
                 message_text = " | ".join(caption_parts)
 
             yield self._reply_chain_result(event, [Image.fromBytes(res), Plain(message_text)])
         else:
-            status_text = "生成失败"
-            msg = self._format_error_message(
-                status_text,
-                elapsed,
-                res,
-                http_status,
-                model=model_in_use,
-                api_mode=self._get_api_route_for_model(model_in_use),
-                prompt=prompt,
-                image_count=0,
-            )
-            if show_model_info:
-                msg += f"\n模型: {model_in_use}"
-            if should_deduct and deduction_source in ["group", "user"]:
-                msg += f"\n(失败状态码命中扣次设置，已扣除 {required_cost} 次)"
+            if should_send_content_policy_warning:
+                msg = self._get_content_policy_warning_message(
+                    model=actual_model,
+                    label=display_prompt,
+                    image_count=0,
+                    elapsed=elapsed,
+                    remaining=self._get_remaining_count_text(
+                        deduction_source,
+                        sender_id,
+                        group_id,
+                    ),
+                    prompt=prompt,
+                    reason=self._get_content_policy_warning_reason(res),
+                )
+            else:
+                status_text = "生成失败"
+                msg = self._format_error_message(
+                    status_text,
+                    elapsed,
+                    res,
+                    http_status,
+                    model=actual_model,
+                    api_mode=self._get_api_route_for_model(actual_model),
+                    prompt=prompt,
+                    image_count=0,
+                )
+                if show_model_info:
+                    msg += f"\n模型: {actual_model}"
+                if should_deduct and deduction_source in ["group", "user"]:
+                    msg += f"\n(失败状态码命中扣次设置，已扣除 {invocation_cost} 次)"
             yield self._reply_plain_result(event, msg)
 
         event.stop_event()

@@ -1,6 +1,6 @@
 name: astrbot_plugin_shoubanhua
-desc: 支持第三方OpenAI绘图格式和Gemini模型路由，文生图/图生图插件
+desc: 支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件
 help:  # 插件的帮助信息
-version: v1.7.7 # 插件版本号。格式：v1.1.1 或者 v1.1
+version: v1.8.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: shskjw
 repo: https://github.com/misaka-link/astrbot_plugin_shoubanhua

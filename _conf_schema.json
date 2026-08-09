@@ -29,7 +29,7 @@
     "model_prompt_template_list": {
         "description": "【通用】预设提示词列表",
         "type": "template_list",
-        "hint": "按模型指定最终发送给绘图接口的提示词模板。每项包含两个参数：模型、提示词模板。命中模型后会用模板替换插件默认的英文包装提示词；未命中则保持原逻辑。支持变量：{prompt}=用户输入或预设展开后的提示词内容，{model}=本次实际调用模型，{mode}=生成模式（文生图/图生图），{image_count}=输入图片数量，{default_prompt}=插件原本默认包装后的完整提示词。",
+        "hint": "按模型指定最终发送给绘图接口的提示词模板。每项包含两个参数：模型、提示词模板。模型名填写 ALL（必须全大写）时作为所有模型的兜底模板；同时配置具体模型时，具体模型优先于 ALL。未命中时直接发送用户或预设提示词，不再添加默认包装。支持变量：{prompt}=用户输入或预设展开后的提示词内容，{model}=本次实际调用模型，{mode}=生成模式（文生图/图生图），{image_count}=输入图片数量，{default_prompt}=未套用模板时的原始提示词。",
         "default": [],
         "templates": {
             "model_prompt_template": {
@@ -47,7 +47,7 @@
                         "label": "提示词模板",
                         "type": "text",
                         "default": "",
-                        "hint": "最终发送给模型的提示词模板。可用变量：{prompt}=用户输入或预设展开后的提示词内容；{model}=本次实际调用模型；{mode}=文生图或图生图；{image_count}=输入图片数量；{default_prompt}=插件原本默认包装后的完整提示词。示例：请根据以下内容直接生成图片，不要解释：{prompt}"
+                        "hint": "最终发送给模型的提示词模板。模型名可填写 ALL（必须全大写）作为所有模型的兜底；具体模型配置优先于 ALL。可用变量：{prompt}=用户输入或预设展开后的提示词内容；{model}=本次实际调用模型；{mode}=文生图或图生图；{image_count}=输入图片数量；{default_prompt}=未套用模板时的原始提示词。示例：请根据以下内容直接生成图片，不要解释：{prompt}"
                     }
                 }
             }
@@ -56,19 +56,27 @@
     "model_parameter_list": {
         "description": "【通用】模型参数设置",
         "type": "template_list",
-        "hint": "按模型设置扣除次数、最大输出/思考 Token、GPT 图片参数和 Gemini 图片参数。GPT/Gemini 参数开关关闭时，其下方参数不会发送到上游；未配置模型时默认每次扣除 1 次。",
+        "hint": "按模型设置参考图数量、扣除次数、违规失败扣次、最大输出/思考 Token、GPT、Gemini 和 Seedream 图片参数。对应参数开关关闭时，其下方专属参数不会发送到上游；未配置模型时默认每次扣除 1 次。",
         "default": [],
         "templates": {
             "model_parameters": {
                 "name": "模型参数设置",
                 "item_label": "模型参数设置",
-                "hint": "模型名、扣除次数和最大输出/思考 Token 始终生效；GPT 与 Gemini 的其余参数分别由对应开关控制。",
+                "hint": "模型名、参考图数量限制、扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；GPT、Gemini 与 Seedream 的其余参数分别由对应开关控制。",
                 "items": {
                     "model": {
                         "label": "模型",
                         "type": "string",
                         "default": "",
                         "hint": "填写 model_list、gemini_model_list 或端点模型列表中的模型名。"
+                    },
+                    "reference_image_limit": {
+                        "label": "参考图数量限制",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 14,
+                        "hint": "本模型单次请求最多传递的参考图数量。填 0（默认）时继承全局“最大图片数量”；填正数时按较小值截取。实际热备模型的设置优先，GPT/Gemini/Seedream 参数开关不影响本项。"
                     },
                     "deduction_count": {
                         "label": "该模型扣除次数",
@@ -77,6 +85,12 @@
                         "min": 1,
                         "max": 100,
                         "hint": "该模型每次生成扣除多少次，不受 GPT/Gemini 参数开关影响；批量生成还会乘以实际生成倍率。"
+                    },
+                    "deduct_on_violation": {
+                        "label": "违规是否扣次数",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "该模型发生内容安全/政策违规，或 HTTP 状态码命中“失败扣除次数的错误码设置列表”时，是否按本模型的“该模型扣除次数”扣次。模型单独设置优先于全局“错误码是否扣除次数”；未配置本模型时才使用全局设置。"
                     },
                     "max_output_tokens": {
                         "label": "最大输出/思考 Token",
@@ -103,6 +117,12 @@
                         "type": "bool",
                         "default": false,
                         "hint": "开启后才会发送下方质量、审核和分辨率相关的 Generic 图片参数；关闭时下方参数即使已填写也不生效。"
+                    },
+                    "omit_n_parameter": {
+                        "label": "不传递 n 参数",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 GPT参数设置开启且模型走 Images Generations / Edits 路由时生效。开启后不向上游发送 n 参数；关闭时发送 n=1。不影响 *2 等批量生成行为。"
                     },
                     "quality": {
                         "label": "质量",
@@ -201,6 +221,77 @@
                         ],
                         "default": "auto",
                         "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。选择 auto 时不发送 imageConfig.aspectRatio：有参考图时由上游按参考图决定，无参考图时由模型使用默认比例；选择其他值时发送对应比例。开启 Gemini自适应比例且读取到首图时，本项会被自适应结果覆盖。不同 Gemini 模型支持的比例可能不同。"
+                    },
+                    "enable_seedream_parameters": {
+                        "label": "Seedream参数设置",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅模型走 Images Generations 路由时生效。开启后按 Seedream JSON 格式发送下方参数，并省略 Generic 的 n、quality、moderation 和 images 多图字段。带图时请将模型加入 Images Generations；即使也配置了 Edits，Seedream 会优先走 Generations。"
+                    },
+                    "seedream_web_search": {
+                        "label": "Seedream联网搜索",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启时发送 tools=[{type:web_search}]。是否支持由实际接入的上游模型决定，插件不再按模型名过滤。"
+                    },
+                    "seedream_send_output_format": {
+                        "label": "Seedream传递输出格式",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启时生效。默认关闭，不向上游发送 output_format；只有实际网关支持该字段时才开启。"
+                    },
+                    "seedream_output_format": {
+                        "label": "Seedream输出格式",
+                        "type": "string",
+                        "options": [
+                            "png",
+                            "jpeg"
+                        ],
+                        "default": "png",
+                        "hint": "仅在 Seedream参数设置和“Seedream传递输出格式”均开启时发送为 output_format。可选 png、jpeg；支持情况由实际接入的上游模型决定，插件不按模型名过滤。"
+                    },
+                    "seedream_watermark": {
+                        "label": "Seedream添加水印",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启时发送 watermark。默认关闭；开启后由上游在右下角添加 AI 生成标识。"
+                    },
+                    "seedream_resolution": {
+                        "label": "Seedream分辨率",
+                        "type": "string",
+                        "options": [
+                            "1K",
+                            "1.5K",
+                            "2K",
+                            "3K",
+                            "4K"
+                        ],
+                        "default": "2K",
+                        "hint": "仅 Seedream参数设置开启时生效。关闭自适应比例时直接发送 size；各 Seedream 模型支持的档位不同，请按上游模型能力配置。"
+                    },
+                    "seedream_pixel_limit": {
+                        "label": "Seedream像素数上限 (K)",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 16384,
+                        "hint": "仅 Seedream参数设置开启时生效。0（默认）表示不限制；大于 0 时限制自适应 size 的总像素数，单位 K（1000 像素），与价格表一致。例如 2360 表示 2,360,000 像素。最终尺寸不超过所选分辨率的目标像素数。"
+                    },
+                    "seedream_adaptive_aspect_ratio": {
+                        "label": "Seedream自适应比例",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启时生效。开启后，带图请求按第一张参考图比例选择固定尺寸表中的显式 size；命令 =宽:高 优先覆盖首图比例。固定表支持 1:1、4:3、3:4、16:9、9:16、3:2、2:3、21:9，其他比例选择最接近项，并受 Seedream像素数上限限制。关闭后不读取参考图比例，直接传递“Seedream分辨率”。"
+                    },
+                    "seedream_optimize_prompt_mode": {
+                        "label": "Seedream提示词优化模式",
+                        "type": "string",
+                        "options": [
+                            "standard",
+                            "fast"
+                        ],
+                        "default": "standard",
+                        "hint": "仅 Seedream参数设置开启时发送 optimize_prompt_options.mode。standard 为标准优化；fast 生成更快但可能影响效果；支持情况由实际接入的上游模型决定，插件不再按模型名过滤。"
                     }
                 }
             }
@@ -209,13 +300,13 @@
     "model_mapping_list": {
         "description": "【通用】模型映射列表",
         "type": "template_list",
-        "hint": "为源模型按从上到下的顺序配置实际调用模型。只要源模型存在映射项，插件会直接请求第一条映射模型；失败后再依次尝试其余映射模型。每次尝试都使用实际调用模型自身的路由、提示词模板和模型参数设置。",
+        "hint": "为源模型配置实际调用模型和优先权重。权重越大越先调用，同权重按列表顺序；权重为 -1 时不参与调度。只要源模型存在可调度的映射项，插件会直接请求权重最高的映射模型；失败后再依次尝试其余映射模型。每次尝试都使用实际调用模型自身的路由、提示词模板和模型参数设置。",
         "default": [],
         "templates": {
             "model_mapping": {
                 "name": "模型映射",
                 "item_label": "模型映射",
-                "hint": "同一源模型可添加多个映射模型，列表最上方的项为首选模型，其余项依次作为热备。",
+                "hint": "同一源模型可添加多个映射模型。按优先权重从大到小调用，同权重按列表顺序；权重为 -1 的项不会参与调度。",
                 "items": {
                     "model": {
                         "label": "源模型",
@@ -227,14 +318,14 @@
                         "label": "映射模型",
                         "type": "string",
                         "default": "",
-                        "hint": "实际请求的模型名。列表中的第一条会直接请求，后续条目在前一条失败后尝试；该模型可在“模型参数设置”中单独配置，调用时遵循它自己的参数。"
+                        "hint": "实际请求的模型名。按优先权重排序后，第一条会直接请求，后续条目在前一条失败后尝试；该模型可在“模型参数设置”中单独配置，调用时遵循它自己的参数。权重为 -1 时不会请求本模型。"
                     },
                     "priority": {
                         "label": "优先权重",
                         "type": "int",
                         "default": 0,
-                        "min": 0,
-                        "hint": "可选，数值越大越优先；同一源模型的权重相同时按列表中的先后顺序调用。未填写或无效时按 0 处理。"
+                        "min": -1,
+                        "hint": "可选，数值越大越优先；同一源模型的权重相同时按列表中的先后顺序调用。填写 -1 时该映射模型不参与调度；未填写或无效时按 0 处理。"
                     }
                 }
             }
@@ -249,7 +340,7 @@
     "generic_api_keys": {
         "description": "【Generic】API Key 池",
         "type": "list",
-        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。API地址填写服务根地址且模型走 Gemini 路由时，Gemini Key 池为空会自动复用本池。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。添加/删除可用 #手办化添加key generic、#手办化删除key generic 管理。",
+        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。API地址填写服务根地址且模型走 Gemini 路由时，Gemini Key 池为空会自动复用本池。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。请在后台配置 Key 列表。",
         "items": {
             "type": "string",
             "description": "Generic API Key，通常形如 sk-..."
@@ -323,10 +414,22 @@
         },
         "default": []
     },
+    "chat_completions_system_prompt_enabled": {
+        "description": "【Generic路由】Chat Completions系统提示词开关",
+        "type": "bool",
+        "hint": "仅 `/v1/chat/completions` 端点生效。开启后会在请求 messages 中发送下方 system 提示词；关闭后不发送 system 消息。",
+        "default": true
+    },
+    "chat_completions_system_prompt": {
+        "description": "【Generic路由】Chat Completions系统提示词",
+        "type": "text",
+        "hint": "仅 `/v1/chat/completions` 端点生效。开启系统提示词后，将把这里的内容作为 messages 的 system 消息发送；留空时不发送空的 system 消息。",
+        "default": "You are an expert AI artist tool. Your ONLY job is to generate images based on user inputs. Do NOT describe the image. Do NOT ask questions. Do NOT start a conversation. Directly output the generated image url or data."
+    },
     "images_generations_model_list": {
         "description": "【Generic路由】Images Generations模型列表",
         "type": "list",
-        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 包含 model、prompt、n；使用模型热备时要填写映射模型名，不能只填写源模型。如果模型同时也在 Images Edits 模型列表中，文生图走此端点，图生图优先走 Images Edits。",
+        "hint": "仅 Generic 模式生效。把需要按图片生成接口调用的模型 ID 填在这里，请求会发送到 `/v1/images/generations`，payload 默认包含 model、prompt、n；启用模型参数中的“不传递 n 参数”时会省略 n。使用模型热备时要填写映射模型名，不能只填写源模型。如果模型同时也在 Images Edits 模型列表中，文生图走此端点，图生图优先走 Images Edits。",
         "items": {
             "type": "string",
             "description": "走 images/generations 的模型 ID"
@@ -473,6 +576,22 @@
         "hint": "开启后，只有带 AstrBot 指令前缀（例如 #）或 @/唤醒机器人时才处理本插件命令；关闭后，消息开头直接写“手办化”“bnn”等也会尝试触发，容易与普通聊天误触。",
         "default": true
     },
+    "enable_llm_tools": {
+        "description": "【基础】启用 LLM 生图工具",
+        "type": "bool",
+        "hint": "默认关闭。开启后向 AstrBot 对话模型注册文生图和图生图工具，LLM 可按用户意图调用。工具调用不检查或扣除用户/群组次数，但会记录日生成统计；分辨率始终遵循实际热备模型的后台参数，LLM 仅可按需指定图片比例（如 1:1、16:9、9:16）。需要 AstrBot 支持原生 LLM 工具。",
+        "default": false
+    },
+    "llm_image_generation_model_list": {
+        "description": "【基础】LLM 生图模型列表",
+        "type": "list",
+        "hint": "仅供 LLM 生图工具报告和选择的源模型 ID 白名单。启用 LLM 生图工具时至少填写一个；LLM 仅能调用此列表中的模型。该列表不影响普通指令、默认模型、切换模型、端点路由或热备映射。修改后请重载插件以重新注册工具。",
+        "items": {
+            "type": "string",
+            "description": "允许 LLM 调用的源模型 ID"
+        },
+        "default": []
+    },
     "maintenance_mode": {
         "description": "【基础】维护模式",
         "type": "bool",
@@ -489,7 +608,7 @@
     },
     "extra_prefix": {
         "description": "【基础】自定义提示词前缀",
-        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图。可添加多个入口前缀。",
+        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图；还支持 `#bnn 预设名` 或 `#bnn 预设名%追加内容` 调用【预设】提示词列表中的自定义预设。可添加多个入口前缀。",
         "type": "template_list",
         "default": [
             {
@@ -636,7 +755,7 @@
         "hint": "用户发送配置的帮助菜单命令时展示的内容，支持 Markdown 文本。变量 {custom_command_model_bindings} 会自动替换为“自定义提示词前缀 -> 模型”列表；未绑定的前缀显示默认模型，每行一项且自动去重，箭头按最长触发词自动对齐。这里还可以写实际命令、倍率符号、模型说明、次数规则等。",
         "editor_mode": true,
         "editor_language": "markdown",
-        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#手办化列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key [generic|gemini] <key> - 添加Key\n#手办化key列表 - 查看Key池\n#切换模型 - 查看或切换模型\n\n📌 自定义触发词模型：\n{custom_command_model_bindings}\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)\n5. #bnn*2 <提示词> (并发生成2次，倍率符号可在后台配置)"
+        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#手办化列表 - 查看所有可用预设\n#手办化预设查看 <关键词> - 查看预设提示词\n#手办化预设增加 <关键词>:<提示词> - 添加/修改预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#切换模型 - 查看或切换模型\n\n📌 自定义触发词模型：\n{custom_command_model_bindings}\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)\n5. #bnn*2 <提示词> (并发生成2次，倍率符号可在后台配置)"
     },
     "user_whitelist": {
         "description": "【权限】用户白名单",
@@ -711,7 +830,7 @@
     "failure_deduction_status_codes": {
         "description": "【次数】失败扣除次数的错误码设置列表",
         "type": "list",
-        "hint": "生成失败时，HTTP 状态码命中本列表会触发违规内容警告，并停止模型热备切换，不再请求后续映射模型。是否扣次由“错误码是否扣除次数”控制。默认仅 400；留空时错误码失败不扣次且不会因错误码停止热备。生成成功始终正常扣次。",
+        "hint": "生成失败时，HTTP 状态码命中本列表会触发违规内容警告，并停止模型热备切换，不再请求后续映射模型。模型参数设置中已配置实际调用模型时，是否扣次由该模型的“违规是否扣次数”控制；未配置模型参数项时回退到“错误码是否扣除次数”。默认仅 400；留空时错误码失败不扣次且不会因错误码停止热备。生成成功始终正常扣次。",
         "items": {
             "type": "int",
             "description": "失败仍扣次的 HTTP 状态码"
@@ -723,7 +842,7 @@
     "deduct_on_failure_status_codes": {
         "description": "【次数】错误码是否扣除次数",
         "type": "bool",
-        "hint": "开启后，HTTP 状态码命中“失败扣除次数的错误码设置列表”时扣除对应模型/分辨率的次数；关闭后不扣次。无论开关状态，命中错误码都会单独发送违规内容警告并停止模型热备切换。默认开启。",
+        "hint": "仅在实际调用模型未配置“模型参数设置”时生效。开启后，HTTP 状态码命中“失败扣除次数的错误码设置列表”或上游识别为内容安全违规时扣除对应模型的次数；关闭后不扣次。无论开关状态，命中错误码或内容安全违规都会单独发送违规内容警告并停止模型热备切换。默认开启。",
         "default": true
     },
     "enable_group_limit": {
@@ -759,14 +878,14 @@
     "max_images_count": {
         "description": "【图片处理】最大图片数量",
         "type": "int",
-        "hint": "单次图生图最多取用多少张输入图片，包括当前消息图片、引用消息图片、@用户头像、预设内图片链接等。超过上限会截取前 N 张，避免请求体太大或上游拒绝。",
+        "hint": "单次图生图最多取用多少张输入图片，包括当前消息图片、引用消息图片、@用户头像、预设内图片链接等。超过上限会截取前 N 张，避免请求体太大或上游拒绝。模型参数设置的“参考图数量限制”为正数时，会以实际调用模型的更小上限覆盖本项；填 0 时继承本项。",
         "default": 10,
         "min": 1,
         "max": 10
     },
     "prompt_list": {
         "description": "【预设】提示词列表",
-        "hint": "自定义快捷预设。按列表对象填写指令和提示词；触发指令可直接作为命令使用，如 #贴纸化。也兼容旧格式 `触发词:提示词`，并可用 #lm添加 管理。",
+        "hint": "自定义快捷预设。按列表对象填写指令和提示词；触发指令可直接作为命令使用，如 #贴纸化。也兼容旧格式 `触发词:提示词`，并可用 #手办化预设增加 管理。",
         "type": "template_list",
         "default": [],
         "templates": {

@@ -8,6 +8,7 @@ import math
 import random
 import re
 import unicodedata
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -22,6 +23,114 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Reply, Plain, Node, Nodes
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+try:
+    from pydantic import Field
+    from pydantic.dataclasses import dataclass as pydantic_dataclass
+    from astrbot.core.agent.tool import FunctionTool
+    from astrbot.core.agent.run_context import ContextWrapper
+    from astrbot.core.astr_agent_context import AstrAgentContext
+
+    LLM_TOOL_API_AVAILABLE = True
+except ImportError:
+    Field = None
+    FunctionTool = None
+    ContextWrapper = Any
+    AstrAgentContext = Any
+    LLM_TOOL_API_AVAILABLE = False
+
+
+if LLM_TOOL_API_AVAILABLE:
+    @pydantic_dataclass
+    class TextToImageTool(FunctionTool[AstrAgentContext]):
+        plugin: Any = dataclass_field(default=None, repr=False, compare=False)
+        name: str = "generate_text_to_image"
+        description: str = (
+            "Generate a new image from a text prompt. Use aspect_ratio when the user explicitly "
+            "requests a composition such as a square, landscape, portrait, poster, or wallpaper."
+        )
+        parameters: dict = Field(default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Detailed description of the image to generate.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model from the configured LLM image generation model list. "
+                                   "Normally omit this parameter to use that list's default model.",
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Optional output aspect ratio, such as 1:1, 16:9, 9:16, 4:3, or 3:4. Use it when the user specifies the composition.",
+                },
+                "batch_count": {
+                    "type": "number",
+                    "description": "Optional number of images to generate. Leave empty for one image.",
+                },
+            },
+            "required": ["prompt"],
+        })
+
+        async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
+            return await self.plugin._run_llm_image_tool(
+                context.context.event,
+                prompt=kwargs.get("prompt"),
+                model=kwargs.get("model"),
+                aspect_ratio=kwargs.get("aspect_ratio"),
+                batch_count=kwargs.get("batch_count"),
+            )
+
+
+    @pydantic_dataclass
+    class ImageToImageTool(FunctionTool[AstrAgentContext]):
+        plugin: Any = dataclass_field(default=None, repr=False, compare=False)
+        name: str = "generate_image_to_image"
+        description: str = (
+            "Transform one or more reference images according to a text prompt. Prefer reference_images "
+            "when image URLs are available; otherwise the tool uses images from the current or replied message. "
+            "Use aspect_ratio when the user explicitly requests a composition."
+        )
+        parameters: dict = Field(default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "prompt": {
+                    "type": "string",
+                    "description": "Instructions for transforming the reference image.",
+                },
+                "reference_images": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional public image URLs, data URLs, or base64:// image strings. Do not pass local file paths.",
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model from the configured LLM image generation model list. "
+                                   "Normally omit this parameter to use that list's default model.",
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "description": "Optional output aspect ratio, such as 1:1, 16:9, 9:16, 4:3, or 3:4. Use it when the user specifies the composition.",
+                },
+                "batch_count": {
+                    "type": "number",
+                    "description": "Optional number of images to generate. Leave empty for one image.",
+                },
+            },
+            "required": ["prompt"],
+        })
+
+        async def call(self, context: ContextWrapper[AstrAgentContext], **kwargs) -> str:
+            return await self.plugin._run_llm_image_tool(
+                context.context.event,
+                prompt=kwargs.get("prompt"),
+                reference_images=kwargs.get("reference_images"),
+                model=kwargs.get("model"),
+                aspect_ratio=kwargs.get("aspect_ratio"),
+                batch_count=kwargs.get("batch_count"),
+                require_images=True,
+            )
 
 
 def _normalize_timeout(value: Any, default: int = 120, minimum: int = 5) -> int:
@@ -65,8 +174,8 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
 @register(
     "astrbot_plugin_shoubanhua",
     "shskjw",
-    "支持第三方OpenAI绘图格式和Gemini模型路由，文生图/图生图插件",
-    "1.7.7",
+    "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件",
+    "1.8.0",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -109,6 +218,50 @@ class FigurineProPlugin(Star):
 
     IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+    SEEDREAM_RESOLUTION_OPTIONS = {"1K", "1.5K", "2K", "3K", "4K"}
+    SEEDREAM_RESOLUTION_PIXELS = {
+        "1K": 1_048_576,
+        "1.5K": 2_359_296,
+        "2K": 4_194_304,
+        "3K": 9_437_184,
+        "4K": 16_777_216,
+    }
+    SEEDREAM_RESOLUTION_ORDER = ("1K", "1.5K", "2K")
+    SEEDREAM_SIZE_OPTIONS = {
+        "1K": {
+            "1:1": "1024x1024",
+            "4:3": "1152x864",
+            "3:4": "864x1152",
+            "16:9": "1424x800",
+            "9:16": "800x1424",
+            "3:2": "1248x832",
+            "2:3": "832x1248",
+            "21:9": "1568x672",
+        },
+        "1.5K": {
+            "1:1": "1536x1536",
+            "4:3": "1792x1344",
+            "3:4": "1344x1792",
+            "16:9": "2048x1152",
+            "9:16": "1152x2048",
+            "3:2": "1872x1248",
+            "2:3": "1248x1872",
+            "21:9": "2352x1008",
+        },
+        "2K": {
+            "1:1": "2048x2048",
+            "4:3": "2368x1776",
+            "3:4": "1776x2368",
+            "16:9": "2816x1584",
+            "9:16": "1584x2816",
+            "3:2": "2496x1664",
+            "2:3": "1664x2496",
+            "21:9": "3136x1344",
+        },
+    }
+    SEEDREAM_ASPECT_RATIO_ORDER = (
+        "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9",
+    )
     ADAPTIVE_RESOLUTION_LONG_EDGES = {
         "1K": 1024,
         "2K": 2048,
@@ -129,6 +282,11 @@ class FigurineProPlugin(Star):
     DEFAULT_REQUEST_USER_AGENT = (
         "Codex Desktop/0.145.0-alpha.30 (Ubuntu 22.4.0; x86_64) "
         "xterm-256color (Codex Desktop; 26.715.72359)"
+    )
+    DEFAULT_CHAT_COMPLETIONS_SYSTEM_PROMPT = (
+        "You are an expert AI artist tool. Your ONLY job is to generate images based on user inputs. "
+        "Do NOT describe the image. Do NOT ask questions. Do NOT start a conversation. "
+        "Directly output the generated image url or data."
     )
 
     PRESET_LIST_RENDER_OPTIONS = {
@@ -414,6 +572,7 @@ class FigurineProPlugin(Star):
         self.key_lock = asyncio.Lock()
 
         self.iwf: Optional[FigurineProPlugin.ImageWorkflow] = None
+        self.llm_tools_registered = False
 
     async def initialize(self):
         use_proxy = self.conf.get("use_proxy", False)
@@ -451,6 +610,7 @@ class FigurineProPlugin(Star):
         await self._migrate_prompt_list_config()
         await self._load_prompt_map()
         await self._load_preset_images()
+        self._register_llm_tools()
 
         # 创建预设图片目录
         if not self.preset_images_dir.exists():
@@ -463,6 +623,304 @@ class FigurineProPlugin(Star):
 
         if not g_keys and not o_keys:
             logger.warning("FigurinePro: 未配置任何 API Key")
+
+    def _register_llm_tools(self):
+        if not self.conf.get("enable_llm_tools", False):
+            logger.info("FigurinePro LLM 工具未启用")
+            return
+        if not LLM_TOOL_API_AVAILABLE:
+            logger.warning("FigurinePro LLM 工具未注册：当前 AstrBot 版本不支持 FunctionTool")
+            return
+        if self.llm_tools_registered:
+            return
+        if not self._get_llm_tool_models():
+            logger.warning(
+                "FigurinePro LLM 工具未注册：请在 llm_image_generation_model_list 配置至少一个模型"
+            )
+            return
+
+        try:
+            tools = (
+                TextToImageTool(plugin=self),
+                ImageToImageTool(plugin=self),
+            )
+            for tool in tools:
+                self._configure_llm_tool_model_parameter(tool)
+            self.context.add_llm_tools(*tools)
+            self.llm_tools_registered = True
+            logger.info("FigurinePro LLM 工具已注册：generate_text_to_image, generate_image_to_image")
+        except Exception as exc:
+            logger.error(f"FigurinePro LLM 工具注册失败: {exc}")
+
+    def _get_llm_tool_models(self) -> List[str]:
+        return self._dedupe_preserve_order(
+            self._normalize_model_list(
+                self.conf.get("llm_image_generation_model_list", [])
+            )
+        )
+
+    def _get_llm_tool_default_model(self) -> Optional[str]:
+        available_models = self._get_llm_tool_models()
+        if not available_models:
+            return None
+
+        default_model = str(self.conf.get("model", "nano-banana") or "nano-banana").strip()
+        if default_model in available_models:
+            return default_model
+        return available_models[0]
+
+    def _configure_llm_tool_model_parameter(self, tool: Any):
+        parameters = tool.parameters
+        if not isinstance(parameters, dict):
+            return
+        model_parameter = parameters.get("properties", {}).get("model")
+        if not isinstance(model_parameter, dict):
+            return
+
+        available_models = self._get_llm_tool_models()
+        if available_models:
+            model_parameter["enum"] = available_models
+        default_model = self._get_llm_tool_default_model()
+        if default_model:
+            model_parameter["default"] = default_model
+
+    def _get_llm_tool_model(self, requested_model: Any) -> Tuple[Optional[str], Optional[str]]:
+        available_models = self._get_llm_tool_models()
+        if not available_models:
+            return None, "LLM 生图模型列表为空，请配置 llm_image_generation_model_list。"
+
+        requested_name = str(requested_model or "").strip()
+        if requested_name:
+            if requested_name not in available_models:
+                return None, f"模型 '{requested_name}' 未在 LLM 生图模型列表中启用。"
+            return requested_name, None
+
+        model_name = self._get_llm_tool_default_model()
+        if not model_name:
+            return None, "未配置可用模型。"
+        return model_name, None
+
+    def _get_llm_tool_aspect_ratio(self, value: Any) -> Tuple[Optional[str], Optional[str]]:
+        aspect_ratio = str(value or "").strip()
+        if not aspect_ratio:
+            return None, None
+        if not self._parse_aspect_ratio(aspect_ratio):
+            return None, "图片比例必须是宽:高格式，例如 1:1、16:9 或 9:16。"
+        return aspect_ratio.replace("：", ":"), None
+
+    def _get_llm_tool_batch_count(self, value: Any) -> Tuple[Optional[int], Optional[str]]:
+        if value in (None, ""):
+            return 1, None
+        if isinstance(value, bool):
+            return None, "batch_count 必须是正整数。"
+        try:
+            batch_count = int(value)
+        except (TypeError, ValueError):
+            return None, "batch_count 必须是正整数。"
+        if isinstance(value, float) and not value.is_integer():
+            return None, "batch_count 必须是正整数。"
+        if batch_count < 1:
+            return None, "batch_count 必须大于 0。"
+        max_batch = _normalize_positive_int(self.conf.get("max_batch_multiplier", 4), 4)
+        return min(batch_count, max_batch), None
+
+    @staticmethod
+    def _is_llm_tool_image_reference(value: str) -> bool:
+        if value.startswith(("data:image/", "base64://")):
+            return True
+        return urlparse(value).scheme.lower() in {"http", "https"}
+
+    async def _load_llm_tool_reference_images(
+            self,
+            reference_images: Any,
+    ) -> Tuple[List[bytes], Optional[str]]:
+        if reference_images is None:
+            return [], None
+        if isinstance(reference_images, str):
+            sources = [reference_images]
+        elif isinstance(reference_images, list):
+            sources = reference_images
+        else:
+            return [], "reference_images 必须是图片 URL、data URL 或 base64:// 图片字符串列表。"
+
+        if not self.iwf:
+            return [], "图片工作流未初始化。"
+
+        max_images = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+        images: List[bytes] = []
+        invalid_count = 0
+        for source in sources:
+            if len(images) >= max_images:
+                break
+            image_ref = str(source or "").strip()
+            if not image_ref or not self._is_llm_tool_image_reference(image_ref):
+                invalid_count += 1
+                continue
+            if len(image_ref) > self.max_download_bytes * 2:
+                invalid_count += 1
+                continue
+            image_bytes = await self.iwf._load_bytes(image_ref)
+            if not image_bytes or len(image_bytes) > self.max_download_bytes:
+                invalid_count += 1
+                continue
+            images.append(image_bytes)
+
+        if sources and not images:
+            return [], (
+                "未能读取任何参考图。请传入可访问的 http(s) 图片 URL、data URL 或 base64:// 图片，"
+                "不要传入本地路径或 file:// URL。"
+            )
+        if invalid_count:
+            logger.warning(f"LLM 图生图工具忽略了 {invalid_count} 个无效参考图")
+        return images, None
+
+    def _build_llm_tool_result(self, **payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    async def _run_llm_image_tool(
+            self,
+            event: AstrMessageEvent,
+            *,
+            prompt: Any,
+            model: Any = None,
+            aspect_ratio: Any = None,
+            batch_count: Any = None,
+            reference_images: Any = None,
+            require_images: bool = False,
+    ) -> str:
+        if maintenance_message := self._get_maintenance_message():
+            return self._build_llm_tool_result(
+                ok=False,
+                error_type="maintenance",
+                message=maintenance_message,
+            )
+
+        user_prompt = str(prompt or "").strip()
+        if not user_prompt:
+            return self._build_llm_tool_result(
+                ok=False,
+                error_type="invalid_prompt",
+                message="prompt 不能为空。",
+            )
+
+        model_name, model_error = self._get_llm_tool_model(model)
+        if model_error:
+            return self._build_llm_tool_result(
+                ok=False,
+                error_type="invalid_model",
+                message=model_error,
+            )
+
+        normalized_aspect_ratio, aspect_ratio_error = self._get_llm_tool_aspect_ratio(aspect_ratio)
+        if aspect_ratio_error:
+            return self._build_llm_tool_result(
+                ok=False,
+                error_type="invalid_aspect_ratio",
+                message=aspect_ratio_error,
+            )
+
+        normalized_batch_count, batch_error = self._get_llm_tool_batch_count(batch_count)
+        if batch_error:
+            return self._build_llm_tool_result(
+                ok=False,
+                error_type="invalid_batch_count",
+                message=batch_error,
+            )
+
+        image_bytes_list: List[bytes] = []
+        if require_images:
+            image_bytes_list, image_error = await self._load_llm_tool_reference_images(reference_images)
+            if image_error:
+                return self._build_llm_tool_result(
+                    ok=False,
+                    error_type="invalid_reference_images",
+                    message=image_error,
+                )
+            if not image_bytes_list and self.iwf:
+                image_bytes_list = await self.iwf.get_images(event)
+            max_images = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+            image_bytes_list = self._limit_reference_images(model_name, image_bytes_list)
+            if not image_bytes_list:
+                return self._build_llm_tool_result(
+                    ok=False,
+                    error_type="missing_reference_image",
+                    message="图生图需要参考图。请提供 reference_images，或在当前/回复消息中附带图片。",
+                )
+
+        max_concurrency = min(
+            normalized_batch_count,
+            _normalize_positive_int(self.conf.get("max_batch_concurrency", 4), 4),
+            20,
+        )
+        batch_semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def call_generation(batch_index: int):
+            async with batch_semaphore:
+                try:
+                    result = await self._call_api(
+                        image_bytes_list,
+                        user_prompt,
+                        override_model=model_name,
+                        aspect_ratio=normalized_aspect_ratio,
+                        force_aspect_ratio=bool(normalized_aspect_ratio),
+                        return_actual_model=True,
+                    )
+                except Exception as exc:
+                    return batch_index, exc
+                return batch_index, result
+
+        tasks = [
+            asyncio.create_task(call_generation(index))
+            for index in range(1, normalized_batch_count + 1)
+        ]
+        successful_models: List[str] = []
+        failures: List[Dict[str, Any]] = []
+
+        for completed_task in asyncio.as_completed(tasks):
+            batch_index, result = await completed_task
+            if isinstance(result, Exception):
+                failures.append({
+                    "batch_index": batch_index,
+                    "error_type": "system_error",
+                    "message": self._safe_error_text(str(result), 300),
+                })
+                continue
+
+            generated_image, http_status, actual_model = result
+            if not isinstance(generated_image, bytes):
+                error_data = generated_image if isinstance(generated_image, dict) else {}
+                failures.append({
+                    "batch_index": batch_index,
+                    "error_type": str(error_data.get("error_type") or "generation_failed"),
+                    "http_status": http_status,
+                    "message": self._safe_error_text(
+                        error_data.get("message") or generated_image,
+                        300,
+                    ),
+                    "model": actual_model,
+                })
+                continue
+
+            successful_models.append(actual_model)
+            sender_id = self._norm_id(event.get_sender_id())
+            group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
+            await self._record_daily_usage(sender_id, group_id)
+            await event.send(self._reply_chain_result(event, [
+                Image.fromBytes(generated_image),
+                Plain(f"LLM 工具生成完成 {batch_index}/{normalized_batch_count} | 模型: {actual_model}"),
+            ]))
+
+        result_payload: Dict[str, Any] = {
+            "ok": bool(successful_models),
+            "mode": "image_to_image" if require_images else "text_to_image",
+            "generated": len(successful_models),
+            "requested": normalized_batch_count,
+            "models": self._dedupe_preserve_order(successful_models),
+            "aspect_ratio": normalized_aspect_ratio or "default",
+        }
+        if failures:
+            result_payload["failures"] = failures
+        return self._build_llm_tool_result(**result_payload)
 
     async def _migrate_failure_deduction_config(self):
         legacy_key = "deduct_on_content_policy_violation"
@@ -680,6 +1138,34 @@ class FigurineProPlugin(Star):
                     k, v = item.split(":", 1)
                     self.prompt_map[k.strip()] = v.strip()
 
+    def _get_custom_preset_prompt(self, preset_name: str) -> Optional[str]:
+        prompt = self.prompt_map.get((preset_name or "").strip())
+        if prompt and prompt != "[内置预设]":
+            return prompt
+        return None
+
+    def _resolve_bnn_prompt(
+            self,
+            raw_prompt: str,
+            allow_append: bool,
+            separator: str,
+    ) -> Tuple[str, str]:
+        """展开 bnn 后的自定义预设，返回（最终提示词，命中的预设名）。"""
+        raw_prompt = str(raw_prompt or "").strip()
+        if not raw_prompt:
+            return "", ""
+
+        if allow_append and separator and separator in raw_prompt:
+            candidate_name, candidate_append = raw_prompt.split(separator, 1)
+            candidate_prompt = self._get_custom_preset_prompt(candidate_name)
+            if candidate_prompt is not None:
+                return candidate_prompt + candidate_append.strip(), candidate_name.strip()
+
+        preset_prompt = self._get_custom_preset_prompt(raw_prompt)
+        if preset_prompt is not None:
+            return preset_prompt, raw_prompt
+        return raw_prompt, ""
+
     @staticmethod
     def _normalize_model_list(raw_list: Any) -> List[str]:
         models = []
@@ -812,7 +1298,13 @@ class FigurineProPlugin(Star):
             if not source_name:
                 return
 
-            normalized_priority = _normalize_nonnegative_int(priority, 0)
+            try:
+                normalized_priority = int(priority)
+            except (TypeError, ValueError):
+                normalized_priority = 0
+            if normalized_priority == -1:
+                return
+            normalized_priority = max(0, normalized_priority)
             if isinstance(mapped, (list, tuple, set)):
                 for item in mapped:
                     add_item(source_name, item, normalized_priority)
@@ -931,7 +1423,10 @@ class FigurineProPlugin(Star):
         return mapping
 
     def _get_model_prompt_template(self, model_name: str) -> Optional[str]:
-        return self._get_model_prompt_template_map().get((model_name or "").strip())
+        mapping = self._get_model_prompt_template_map()
+        normalized_model = (model_name or "").strip()
+        # 精确模型配置优先；ALL（必须全大写）作为所有模型的兜底配置。
+        return mapping.get(normalized_model) or mapping.get("ALL")
 
     def _get_model_parameter_map(self) -> Dict[str, Dict[str, Any]]:
         mapping: Dict[str, Dict[str, Any]] = {}
@@ -966,6 +1461,18 @@ class FigurineProPlugin(Star):
                 return "auto"
             return normalized if normalized in self.GEMINI_ASPECT_RATIO_OPTIONS else "auto"
 
+        def normalize_seedream_resolution(value: Any) -> str:
+            normalized = str(value or "2K").strip().upper()
+            return normalized if normalized in self.SEEDREAM_RESOLUTION_OPTIONS else "2K"
+
+        def normalize_seedream_output_format(value: Any) -> str:
+            normalized = str(value or "png").strip().lower()
+            return normalized if normalized in {"png", "jpeg"} else "png"
+
+        def normalize_seedream_prompt_optimization(value: Any) -> str:
+            normalized = str(value or "standard").strip().lower()
+            return normalized if normalized in {"standard", "fast"} else "standard"
+
         def normalize_default_resolution(value: Any) -> str:
             return str(value or "auto").strip() or "auto"
 
@@ -986,12 +1493,24 @@ class FigurineProPlugin(Star):
                 send_default_size: Any = False,
                 max_output_tokens: Any = 0,
                 deduction_count: Any = 1,
+                deduct_on_violation: Any = False,
                 force_resolution_limit: Any = False,
                 enable_gpt_parameters: Any = False,
+                omit_n_parameter: Any = False,
                 enable_gemini_parameters: Any = False,
                 gemini_resolution: Any = "auto",
                 gemini_adaptive_aspect_ratio: Any = False,
                 gemini_aspect_ratio: Any = "auto",
+                reference_image_limit: Any = 0,
+                enable_seedream_parameters: Any = False,
+                seedream_web_search: Any = False,
+                seedream_send_output_format: Any = False,
+                seedream_output_format: Any = "png",
+                seedream_watermark: Any = False,
+                seedream_resolution: Any = "2K",
+                seedream_pixel_limit: Any = 0,
+                seedream_adaptive_aspect_ratio: Any = False,
+                seedream_optimize_prompt_mode: Any = "standard",
         ):
             model_name = str(model or "").strip()
             if not model_name:
@@ -1007,14 +1526,26 @@ class FigurineProPlugin(Star):
                 "send_default_size": normalize_bool(send_default_size),
                 "max_output_tokens": _normalize_nonnegative_int(max_output_tokens),
                 "deduction_count": _normalize_positive_int(deduction_count, 1),
+                "deduct_on_violation": normalize_bool(deduct_on_violation),
                 "force_resolution_limit": (
                     normalize_bool(force_resolution_limit) and not auto_upgrade_1k
                 ),
                 "enable_gpt_parameters": normalize_bool(enable_gpt_parameters),
+                "omit_n_parameter": normalize_bool(omit_n_parameter),
                 "enable_gemini_parameters": normalize_bool(enable_gemini_parameters),
                 "gemini_resolution": normalize_gemini_resolution(gemini_resolution),
                 "gemini_adaptive_aspect_ratio": normalize_bool(gemini_adaptive_aspect_ratio),
                 "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
+                "reference_image_limit": _normalize_nonnegative_int(reference_image_limit),
+                "enable_seedream_parameters": normalize_bool(enable_seedream_parameters),
+                "seedream_web_search": normalize_bool(seedream_web_search),
+                "seedream_send_output_format": normalize_bool(seedream_send_output_format),
+                "seedream_output_format": normalize_seedream_output_format(seedream_output_format),
+                "seedream_watermark": normalize_bool(seedream_watermark),
+                "seedream_resolution": normalize_seedream_resolution(seedream_resolution),
+                "seedream_pixel_limit": _normalize_nonnegative_int(seedream_pixel_limit),
+                "seedream_adaptive_aspect_ratio": normalize_bool(seedream_adaptive_aspect_ratio),
+                "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
             }
 
         if isinstance(raw_list, dict):
@@ -1051,6 +1582,13 @@ class FigurineProPlugin(Star):
                         get_value(parameters, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
                         get_value(
                             parameters,
+                            "deduct_on_violation",
+                            "违规是否扣次数",
+                            "违规扣次",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
                             "force_resolution_limit",
                             "强制限制分辨率",
                             default=False,
@@ -1060,6 +1598,12 @@ class FigurineProPlugin(Star):
                             "enable_gpt_parameters",
                             "gpt_parameters",
                             "GPT参数设置",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "omit_n_parameter",
+                            "不传递 n 参数",
                             default=False,
                         ),
                         get_value(
@@ -1086,6 +1630,37 @@ class FigurineProPlugin(Star):
                             "gemini_aspect_ratio",
                             "Gemini图片比例",
                             default="auto",
+                        ),
+                        get_value(parameters, "reference_image_limit", "参考图数量限制", default=0),
+                        get_value(
+                            parameters,
+                            "enable_seedream_parameters",
+                            "seedream_parameters",
+                            "Seedream参数设置",
+                            default=False,
+                        ),
+                        get_value(parameters, "seedream_web_search", "Seedream联网搜索", default=False),
+                        get_value(
+                            parameters,
+                            "seedream_send_output_format",
+                            "Seedream传递输出格式",
+                            default=False,
+                        ),
+                        get_value(parameters, "seedream_output_format", "Seedream输出格式", default="png"),
+                        get_value(parameters, "seedream_watermark", "Seedream添加水印", default=False),
+                        get_value(parameters, "seedream_resolution", "Seedream分辨率", default="2K"),
+                        get_value(parameters, "seedream_pixel_limit", "Seedream像素数上限", default=0),
+                        get_value(
+                            parameters,
+                            "seedream_adaptive_aspect_ratio",
+                            "Seedream自适应比例",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "seedream_optimize_prompt_mode",
+                            "Seedream提示词优化模式",
+                            default="standard",
                         ),
                     )
             return mapping
@@ -1127,6 +1702,13 @@ class FigurineProPlugin(Star):
                 get_value(item, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
                 get_value(
                     item,
+                    "deduct_on_violation",
+                    "违规是否扣次数",
+                    "违规扣次",
+                    default=False,
+                ),
+                get_value(
+                    item,
                     "force_resolution_limit",
                     "强制限制分辨率",
                     default=False,
@@ -1136,6 +1718,12 @@ class FigurineProPlugin(Star):
                     "enable_gpt_parameters",
                     "gpt_parameters",
                     "GPT参数设置",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "omit_n_parameter",
+                    "不传递 n 参数",
                     default=False,
                 ),
                 get_value(
@@ -1157,11 +1745,42 @@ class FigurineProPlugin(Star):
                     "Gemini自适应比例",
                     default=False,
                 ),
-                get_value(
+                    get_value(
                     item,
                     "gemini_aspect_ratio",
                     "Gemini图片比例",
                     default="auto",
+                ),
+                get_value(item, "reference_image_limit", "参考图数量限制", default=0),
+                get_value(
+                    item,
+                    "enable_seedream_parameters",
+                    "seedream_parameters",
+                    "Seedream参数设置",
+                    default=False,
+                ),
+                get_value(item, "seedream_web_search", "Seedream联网搜索", default=False),
+                get_value(
+                    item,
+                    "seedream_send_output_format",
+                    "Seedream传递输出格式",
+                    default=False,
+                ),
+                get_value(item, "seedream_output_format", "Seedream输出格式", default="png"),
+                get_value(item, "seedream_watermark", "Seedream添加水印", default=False),
+                get_value(item, "seedream_resolution", "Seedream分辨率", default="2K"),
+                get_value(item, "seedream_pixel_limit", "Seedream像素数上限", default=0),
+                get_value(
+                    item,
+                    "seedream_adaptive_aspect_ratio",
+                    "Seedream自适应比例",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "seedream_optimize_prompt_mode",
+                    "Seedream提示词优化模式",
+                    default="standard",
                 ),
             )
 
@@ -1184,6 +1803,21 @@ class FigurineProPlugin(Star):
         return _normalize_nonnegative_int(
             self.conf.get("max_output_tokens", self.conf.get("gemini_max_output_tokens", 0))
         )
+
+    def _get_seedream_parameters(self, model_name: str) -> Optional[Dict[str, Any]]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not parameters or not parameters.get("enable_seedream_parameters"):
+            return None
+        return parameters
+
+    def _get_reference_image_limit(self, model_name: str) -> int:
+        global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        model_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
+        return min(model_limit, global_limit) if model_limit else global_limit
+
+    def _limit_reference_images(self, model_name: str, image_bytes_list: List[bytes]) -> List[bytes]:
+        return image_bytes_list[:self._get_reference_image_limit(model_name)]
 
     @classmethod
     def _get_nearest_gemini_aspect_ratio(
@@ -1246,6 +1880,7 @@ class FigurineProPlugin(Star):
             model_name: str,
             image_bytes_list: Optional[List[bytes]] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Dict[str, str]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         if not parameters or not parameters.get("enable_gemini_parameters"):
@@ -1255,16 +1890,23 @@ class FigurineProPlugin(Star):
         if resolution := parameters.get("gemini_resolution"):
             if resolution in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
                 image_config["imageSize"] = resolution
-        adaptive_aspect_ratio = self._get_gemini_adaptive_aspect_ratio(
-            model_name,
-            image_bytes_list or [],
-            aspect_ratio,
-        )
-        if adaptive_aspect_ratio:
-            image_config["aspectRatio"] = adaptive_aspect_ratio
-        elif configured_aspect_ratio := parameters.get("gemini_aspect_ratio"):
-            if configured_aspect_ratio in self.GEMINI_ASPECT_RATIO_OPTIONS:
-                image_config["aspectRatio"] = configured_aspect_ratio
+
+        parsed_aspect_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if force_aspect_ratio and parsed_aspect_ratio:
+            selected_aspect_ratio = self._get_nearest_gemini_aspect_ratio(*parsed_aspect_ratio)
+            if selected_aspect_ratio:
+                image_config["aspectRatio"] = selected_aspect_ratio
+        else:
+            adaptive_aspect_ratio = self._get_gemini_adaptive_aspect_ratio(
+                model_name,
+                image_bytes_list or [],
+                aspect_ratio,
+            )
+            if adaptive_aspect_ratio:
+                image_config["aspectRatio"] = adaptive_aspect_ratio
+            elif configured_aspect_ratio := parameters.get("gemini_aspect_ratio"):
+                if configured_aspect_ratio in self.GEMINI_ASPECT_RATIO_OPTIONS:
+                    image_config["aspectRatio"] = configured_aspect_ratio
 
         return image_config
 
@@ -1377,6 +2019,7 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Optional[Tuple[str, str, bool]]:
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         normalized_resolution = str(resolution or "").strip().upper()
@@ -1384,23 +2027,26 @@ class FigurineProPlugin(Star):
                 not parameters
                 or not parameters.get("enable_gpt_parameters")
                 or not parameters.get("adaptive_aspect_ratio")
-                or not image_bytes_list
+                or (not image_bytes_list and not (force_aspect_ratio and self._parse_aspect_ratio(aspect_ratio)))
         ):
             return None
 
         if normalized_resolution not in self.ADAPTIVE_RESOLUTION_LONG_EDGES:
             normalized_resolution = str(parameters.get("adaptive_resolution") or "1K").upper()
 
-        try:
-            with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
-                source_width, source_height = image.size
-        except Exception as e:
-            logger.warning(f"读取首图尺寸失败，跳过自适应比例参数: {e}")
-            return None
+        source_width = 1
+        source_height = 1
+        if not (force_aspect_ratio and self._parse_aspect_ratio(aspect_ratio)):
+            try:
+                with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
+                    source_width, source_height = image.size
+            except Exception as e:
+                logger.warning(f"读取首图尺寸失败，跳过自适应比例参数: {e}")
+                return None
 
-        if source_width <= 0 or source_height <= 0:
-            logger.warning("首图宽高无效，跳过自适应比例参数")
-            return None
+            if source_width <= 0 or source_height <= 0:
+                logger.warning("首图宽高无效，跳过自适应比例参数")
+                return None
 
         size = self._calculate_adaptive_image_size(
             source_width,
@@ -1427,8 +2073,9 @@ class FigurineProPlugin(Star):
                 force_resolution_limit=bool(parameters.get("force_resolution_limit")),
             )
 
+        source_label = aspect_ratio if force_aspect_ratio and aspect_ratio else f"{source_width}x{source_height}"
         logger.info(
-            f"自适应比例参数: model={model_name}, source={source_width}x{source_height}, "
+            f"自适应比例参数: model={model_name}, source={source_label}, "
             f"requested_resolution={normalized_resolution}, resolution={effective_resolution}, "
             f"auto_upgraded_to_2k={auto_upgraded_to_2k}, "
             f"aspect_ratio={aspect_ratio or 'source'}, "
@@ -1442,14 +2089,124 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Optional[str]:
         details = self._get_adaptive_image_size_details(
             model_name,
             image_bytes_list,
             resolution,
             aspect_ratio,
+            force_aspect_ratio,
         )
         return details[0] if details else None
+
+    def _should_omit_n_parameter(self, model_name: str) -> bool:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        return bool(
+            parameters
+            and parameters.get("enable_gpt_parameters")
+            and parameters.get("omit_n_parameter")
+        )
+
+    def _get_seedream_source_aspect_ratio(
+            self,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+    ) -> float:
+        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if parsed_ratio:
+            return parsed_ratio[0] / parsed_ratio[1]
+        if image_bytes_list:
+            try:
+                with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
+                    return image.width / image.height
+            except Exception as exc:
+                logger.warning(f"读取 Seedream 首图尺寸失败，使用 1:1: {exc}")
+        return 1.0
+
+    @classmethod
+    def _get_nearest_seedream_aspect_ratio(cls, source_ratio: float) -> str:
+        def distance(candidate: str) -> float:
+            width, height = cls._parse_aspect_ratio(candidate) or (1.0, 1.0)
+            return abs(math.log(source_ratio / (width / height)))
+
+        return min(cls.SEEDREAM_ASPECT_RATIO_ORDER, key=distance)
+
+    def _build_seedream_adaptive_size(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+    ) -> str:
+        parameters = self._get_seedream_parameters(model_name) or {}
+        requested_resolution = str(parameters.get("seedream_resolution") or "2K").upper()
+        if requested_resolution not in self.SEEDREAM_RESOLUTION_ORDER:
+            logger.warning(
+                f"Seedream 自适应尺寸表不支持 {requested_resolution}，已按 2K 生成"
+            )
+            requested_resolution = "2K"
+
+        source_ratio = self._get_seedream_source_aspect_ratio(image_bytes_list, aspect_ratio)
+        selected_ratio = self._get_nearest_seedream_aspect_ratio(source_ratio)
+        # Seedream 价格表的 K px 使用十进制换算，例如 2360K = 2,360,000 px。
+        pixel_limit = _normalize_nonnegative_int(parameters.get("seedream_pixel_limit", 0)) * 1000
+        available_resolutions = self.SEEDREAM_RESOLUTION_ORDER
+        requested_index = available_resolutions.index(requested_resolution)
+        allowed_resolutions = available_resolutions[:requested_index + 1]
+        if pixel_limit:
+            fitting_resolutions = []
+            for resolution in allowed_resolutions:
+                width, height = (
+                    int(dimension)
+                    for dimension in self.SEEDREAM_SIZE_OPTIONS[resolution][selected_ratio].split("x", 1)
+                )
+                if width * height <= pixel_limit:
+                    fitting_resolutions.append(resolution)
+            if fitting_resolutions:
+                requested_resolution = fitting_resolutions[-1]
+            else:
+                logger.warning(
+                    f"Seedream 像素数上限 {pixel_limit // 1000}K 低于 1K 的 {selected_ratio} 尺寸，已使用 1K"
+                )
+                requested_resolution = "1K"
+
+        size = self.SEEDREAM_SIZE_OPTIONS[requested_resolution][selected_ratio]
+        logger.info(
+            f"Seedream 自适应尺寸: model={model_name}, source_ratio={source_ratio:.4f}, "
+            f"resolution={requested_resolution}, aspect_ratio={selected_ratio}, size={size}"
+        )
+        return size
+
+    def _get_seedream_request_parameters(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+            force_aspect_ratio: bool,
+    ) -> Dict[str, Any]:
+        parameters = self._get_seedream_parameters(model_name)
+        if not parameters:
+            return {}
+
+        request: Dict[str, Any] = {
+            "watermark": parameters["seedream_watermark"],
+        }
+        if parameters["seedream_send_output_format"]:
+            request["output_format"] = parameters["seedream_output_format"]
+        request["optimize_prompt_options"] = {
+            "mode": parameters["seedream_optimize_prompt_mode"],
+        }
+        if parameters["seedream_web_search"]:
+            request["tools"] = [{"type": "web_search"}]
+        if parameters["seedream_adaptive_aspect_ratio"] and (image_bytes_list or force_aspect_ratio):
+            request["size"] = self._build_seedream_adaptive_size(
+                model_name,
+                image_bytes_list,
+                aspect_ratio,
+            )
+        else:
+            request["size"] = parameters["seedream_resolution"]
+        return request
 
     def _get_image_request_parameters(
             self,
@@ -1457,6 +2214,7 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Dict[str, str]:
         model_parameters = self._get_model_parameter_map().get((model_name or "").strip())
         if not model_parameters:
@@ -1468,6 +2226,7 @@ class FigurineProPlugin(Star):
             image_bytes_list,
             resolution,
             aspect_ratio,
+            force_aspect_ratio,
         )
         if adaptive_size:
             parameters["size"] = adaptive_size
@@ -1488,10 +2247,8 @@ class FigurineProPlugin(Star):
     def _build_final_prompt(self, prompt: str, model_name: str, image_count: int) -> str:
         user_prompt = str(prompt or "")
         has_images = image_count > 0
-        if has_images:
-            default_prompt = f"Re-imagine the attached image with the following style/description: {user_prompt}. Draw it directly. Do not analyze."
-        else:
-            default_prompt = f"Generate a high quality image based on this description: {user_prompt}"
+        # 未配置模板时直接发送用户/预设提示词，不再添加内置英文包装。
+        default_prompt = user_prompt
 
         prompt_template = self._get_model_prompt_template(model_name)
         if not prompt_template:
@@ -1508,6 +2265,17 @@ class FigurineProPlugin(Star):
             },
         ).strip()
         return rendered_prompt or default_prompt
+
+    def _get_chat_completions_system_prompt(self) -> str:
+        if not self.conf.get("chat_completions_system_prompt_enabled", True):
+            return ""
+        return str(
+            self.conf.get(
+                "chat_completions_system_prompt",
+                self.DEFAULT_CHAT_COMPLETIONS_SYSTEM_PROMPT,
+            )
+            or ""
+        ).strip()
 
     async def _migrate_command_model_list_config(self):
         raw_list = self.conf.get("command_model_list", [])
@@ -1634,7 +2402,10 @@ class FigurineProPlugin(Star):
             return "chat_completions"
 
         if has_images:
-            endpoint_order = ("images_edits", "images_generations", "chat_completions")
+            if self._get_seedream_parameters(normalized_model) and normalized_model in self._get_endpoint_models("images_generations"):
+                endpoint_order = ("images_generations", "images_edits", "chat_completions")
+            else:
+                endpoint_order = ("images_edits", "images_generations", "chat_completions")
         else:
             endpoint_order = ("images_generations", "chat_completions")
 
@@ -1745,22 +2516,6 @@ class FigurineProPlugin(Star):
         command = str(self.conf.get("help_command", "手办化帮助") or "").strip()
         command = command.lstrip("#").strip()
         return command or "手办化帮助"
-
-    @filter.command("切换API模式", aliases={"SwitchApi"}, prefix_optional=True)
-    async def on_switch_api_mode(self, event: AstrMessageEvent):
-        if maintenance_message := self._get_maintenance_message():
-            yield self._reply_plain_result(event, maintenance_message)
-            event.stop_event()
-            return
-
-        if not self.is_global_admin(event):
-            yield event.plain_result("❌ 只有管理员可以执行此操作。")
-            return
-
-        msg = "ℹ️ API 模式切换已移除。\n"
-        msg += "现在按模型自动路由：模型在后台 `gemini_model_list` 中就走 Gemini 端点，否则走 Generic 端点。\n"
-        msg += "可用 `#切换模型 <序号>` 修改默认模型。"
-        yield event.plain_result(msg)
 
     @filter.command("切换模型", aliases={"SwitchModel", "模型列表"}, prefix_optional=True)
     async def on_switch_model(self, event: AstrMessageEvent):
@@ -2111,17 +2866,20 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Dict[str, Any]:
         parameters: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
-            "n": "1",
         }
+        if not self._should_omit_n_parameter(model_name):
+            parameters["n"] = "1"
         parameters.update(self._get_image_request_parameters(
             model_name,
             image_bytes_list,
             resolution,
             aspect_ratio,
+            force_aspect_ratio,
         ))
         parameters["image"] = "<image omitted>"
         return parameters
@@ -2143,22 +2901,36 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
-            "n": 1,
         }
-        payload.update(self._get_image_request_parameters(
-            model_name,
-            image_bytes_list,
-            resolution,
-            aspect_ratio,
-        ))
+        seedream_parameters = self._get_seedream_parameters(model_name)
+        if seedream_parameters:
+            payload.update(self._get_seedream_request_parameters(
+                model_name,
+                image_bytes_list,
+                aspect_ratio,
+                force_aspect_ratio,
+            ))
+        else:
+            if not self._should_omit_n_parameter(model_name):
+                payload["n"] = 1
+            payload.update(self._get_image_request_parameters(
+                model_name,
+                image_bytes_list,
+                resolution,
+                aspect_ratio,
+                force_aspect_ratio,
+            ))
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
-            if len(image_inputs) == 1:
+            if seedream_parameters:
+                payload["image"] = image_inputs[0] if len(image_inputs) == 1 else image_inputs
+            elif len(image_inputs) == 1:
                 payload["image"] = image_inputs[0]
             else:
                 payload["images"] = image_inputs
@@ -2172,16 +2944,19 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> aiohttp.FormData:
         form = aiohttp.FormData()
         form.add_field("model", model_name)
         form.add_field("prompt", final_prompt)
-        form.add_field("n", "1")
+        if not self._should_omit_n_parameter(model_name):
+            form.add_field("n", "1")
         for field_name, value in self._get_image_request_parameters(
                 model_name,
                 image_bytes_list,
                 resolution,
                 aspect_ratio,
+                force_aspect_ratio,
         ).items():
             form.add_field(field_name, value)
 
@@ -2237,6 +3012,11 @@ class FigurineProPlugin(Star):
         parameters = self._get_model_parameter_map().get((model_name or "").strip())
         return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
 
+    def _get_violation_deduction_cost(self, model_name: str) -> int:
+        """违规失败固定按实际调用模型的基础扣次结算。"""
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
+
     def _get_failure_deduction_status_codes(self) -> set[int]:
         raw_codes = self.conf.get("failure_deduction_status_codes", [400])
         if isinstance(raw_codes, str):
@@ -2258,11 +3038,21 @@ class FigurineProPlugin(Star):
                 status_codes.add(status_code)
         return status_codes
 
-    def _should_deduct_generation_result(self, result: Any, http_status: int) -> bool:
+    def _should_deduct_generation_result(
+            self,
+            result: Any,
+            http_status: int,
+            model_name: str,
+    ) -> bool:
         if isinstance(result, bytes):
             return True
-        if http_status not in self._get_failure_deduction_status_codes():
+        if not self._should_send_content_policy_warning(http_status, result):
             return False
+
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if parameters is not None:
+            return bool(parameters.get("deduct_on_violation"))
+
         configured_value = self.conf.get("deduct_on_failure_status_codes", None)
         if configured_value is None:
             configured_value = self.conf.get("deduct_on_content_policy_violation", True)
@@ -2716,6 +3506,7 @@ class FigurineProPlugin(Star):
             override_model: str | None = None,
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
             return_actual_model: bool = False,
     ) -> Any:
         """按模型映射顺序调用接口，失败时切换到下一个热备模型。"""
@@ -2733,12 +3524,14 @@ class FigurineProPlugin(Star):
 
         for index, candidate_model in enumerate(candidate_models):
             actual_model = candidate_model
+            candidate_images = self._limit_reference_images(candidate_model, image_bytes_list)
             result, http_status = await self._call_api_once(
-                image_bytes_list,
+                candidate_images,
                 prompt,
                 override_model=candidate_model,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
+                force_aspect_ratio=force_aspect_ratio,
             )
             if isinstance(result, bytes):
                 if index > 0:
@@ -2777,6 +3570,7 @@ class FigurineProPlugin(Star):
             override_model: str | None = None,
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
     ) -> Tuple[bytes | str | Dict[str, Any], int]:
         """
         调用API生成图片
@@ -2876,6 +3670,7 @@ class FigurineProPlugin(Star):
                     model_name,
                     image_bytes_list,
                     aspect_ratio,
+                    force_aspect_ratio,
             ):
                 generation_config["imageConfig"] = image_config
             if generation_config:
@@ -2906,6 +3701,7 @@ class FigurineProPlugin(Star):
                     image_bytes_list,
                     resolution,
                     aspect_ratio,
+                    force_aspect_ratio,
                 )
             elif generic_endpoint_type == "images_generations":
                 headers["Content-Type"] = "application/json"
@@ -2915,17 +3711,13 @@ class FigurineProPlugin(Star):
                     image_bytes_list,
                     resolution,
                     aspect_ratio,
+                    force_aspect_ratio,
                 )
             else:
                 headers["Content-Type"] = "application/json"
                 messages = []
-                # 优化 System Prompt，极度严格地禁止聊天，强制画图模式
-                system_instruction = (
-                    "You are an expert AI artist tool. Your ONLY job is to generate images based on user inputs. "
-                    "Do NOT describe the image. Do NOT ask questions. Do NOT start a conversation. "
-                    "Directly output the generated image url or data."
-                )
-                messages.append({"role": "system", "content": system_instruction})
+                if system_instruction := self._get_chat_completions_system_prompt():
+                    messages.append({"role": "system", "content": system_instruction})
 
                 if len(image_bytes_list) > 0:
                     # 包含图片的 Vision 请求结构
@@ -2963,6 +3755,7 @@ class FigurineProPlugin(Star):
                 image_bytes_list,
                 resolution,
                 aspect_ratio,
+                force_aspect_ratio,
             )
         else:
             body_type = "application/json"
@@ -3238,6 +4031,7 @@ class FigurineProPlugin(Star):
         matched_extra_prefix = extra_prefixes[0]
         user_prompt = ""
         is_bnn = False
+        bnn_preset_name = ""
 
         base_cmd = cmd
         append_text = ""
@@ -3264,8 +4058,17 @@ class FigurineProPlugin(Star):
         if base_cmd in extra_prefixes:
             matched_extra_prefix = base_cmd
             remaining_tokens = tokens[consumed_tokens:]
-            user_prompt = " ".join(remaining_tokens).strip()
+            user_prompt, bnn_preset_name = self._resolve_bnn_prompt(
+                " ".join(remaining_tokens),
+                allow_append,
+                separator,
+            )
             is_bnn = True
+            if bnn_preset_name:
+                logger.info(
+                    f"自定义提示词命中预设: prefix='{matched_extra_prefix}', "
+                    f"preset='{bnn_preset_name}'"
+                )
 
         elif base_cmd in self.prompt_map:
             val = self.prompt_map.get(base_cmd)
@@ -3350,7 +4153,7 @@ class FigurineProPlugin(Star):
                     images_to_process = images_to_process[:MAX_IMAGES]
                     yield self._reply_plain_result(event, f"🎨 检测到 {len(img_bytes_list)} 张图片，已选取前 {MAX_IMAGES} 张…")
 
-            display_cmd = user_prompt[:10] + '...' if len(user_prompt) > 10 else user_prompt
+            display_cmd = bnn_preset_name or (user_prompt[:10] + '...' if len(user_prompt) > 10 else user_prompt)
         elif len(images_to_process) > 0:
             MAX_FIGURINE_IMAGES = self.conf.get("max_images_count", 10)
             if len(images_to_process) > MAX_FIGURINE_IMAGES:
@@ -3502,7 +4305,16 @@ class FigurineProPlugin(Star):
                 image_bytes_list=images_to_process,
                 aspect_ratio=requested_aspect_ratio,
             )
-            should_deduct = self._should_deduct_generation_result(res, http_status)
+            should_deduct = self._should_deduct_generation_result(
+                res,
+                http_status,
+                actual_model,
+            )
+            deduction_amount = (
+                invocation_cost
+                if isinstance(res, bytes)
+                else self._get_violation_deduction_cost(actual_model)
+            )
             should_send_content_policy_warning = self._should_send_content_policy_warning(
                 http_status,
                 res,
@@ -3512,7 +4324,7 @@ class FigurineProPlugin(Star):
                     deduction_source,
                     sender_id,
                     group_id,
-                    invocation_cost,
+                    deduction_amount,
                 )
 
             if not isinstance(res, bytes):
@@ -3526,7 +4338,7 @@ class FigurineProPlugin(Star):
                             "reason": self._get_content_policy_warning_reason(res),
                         }
                 if should_deduct:
-                    failed_deduction_amount += invocation_cost
+                    failed_deduction_amount += deduction_amount
                 if first_error is None:
                     first_error = res
                     first_error_status = http_status
@@ -3725,7 +4537,16 @@ class FigurineProPlugin(Star):
         )
         elapsed = (datetime.now() - start_time).total_seconds()
         invocation_cost = self._get_required_invocation_cost(actual_model)
-        should_deduct = self._should_deduct_generation_result(res, http_status)
+        should_deduct = self._should_deduct_generation_result(
+            res,
+            http_status,
+            actual_model,
+        )
+        deduction_amount = (
+            invocation_cost
+            if isinstance(res, bytes)
+            else self._get_violation_deduction_cost(actual_model)
+        )
         should_send_content_policy_warning = self._should_send_content_policy_warning(
             http_status,
             res,
@@ -3735,7 +4556,7 @@ class FigurineProPlugin(Star):
                 deduction_source,
                 sender_id,
                 group_id,
-                invocation_cost,
+                deduction_amount,
             )
 
         if isinstance(res, bytes):
@@ -3799,13 +4620,13 @@ class FigurineProPlugin(Star):
                 if show_model_info:
                     msg += f"\n模型: {actual_model}"
                 if should_deduct and deduction_source in ["group", "user"]:
-                    msg += f"\n(失败状态码命中扣次设置，已扣除 {invocation_cost} 次)"
+                    msg += f"\n(失败状态码命中扣次设置，已扣除 {deduction_amount} 次)"
             yield self._reply_plain_result(event, msg)
 
         event.stop_event()
 
-    @filter.command("lm添加", aliases={"lma"}, prefix_optional=True)
-    async def add_lm_prompt(self, event: AstrMessageEvent):
+    @filter.command("手办化预设增加", prefix_optional=True)
+    async def add_preset_prompt(self, event: AstrMessageEvent):
         if maintenance_message := self._get_maintenance_message():
             yield self._reply_plain_result(event, maintenance_message)
             event.stop_event()
@@ -3814,20 +4635,14 @@ class FigurineProPlugin(Star):
         if not self.is_global_admin(event):
             return
 
-        full_msg = event.message_str or ""
-        clean_msg = full_msg.strip()
+        cmd_prefix = "手办化预设增加"
+        clean_msg = (event.message_str or "").strip().lstrip("#/ ").strip()
 
-        cmd_prefix = "lm添加"
-        if "lma" in clean_msg.lower() and not clean_msg.startswith(cmd_prefix):
-            cmd_prefix = "lma"
-
-        if clean_msg.lower().startswith(cmd_prefix.lower()):
+        if clean_msg.startswith(cmd_prefix):
             clean_msg = clean_msg[len(cmd_prefix):].strip()
 
-        clean_msg = clean_msg.lstrip("#/ ")
-
         if ":" not in clean_msg:
-            yield event.plain_result('格式错误, 示例: #lm添加 触发词:提示词')
+            yield event.plain_result('格式错误, 示例: #手办化预设增加 触发词:提示词')
             return
 
         key, new_value = map(str.strip, clean_msg.split(":", 1))
@@ -3862,8 +4677,8 @@ class FigurineProPlugin(Star):
         await self._load_prompt_map()
         yield event.plain_result(f"✅ 已保存预设:\n{key}:{new_value}")
 
-    @filter.command("lm查看", aliases={"lmv", "lm预览"}, prefix_optional=True)
-    async def lm_preview_prompt(self, event: AstrMessageEvent):
+    @filter.command("手办化预设查看", prefix_optional=True)
+    async def preview_preset_prompt(self, event: AstrMessageEvent):
         if maintenance_message := self._get_maintenance_message():
             yield self._reply_plain_result(event, maintenance_message)
             event.stop_event()
@@ -3872,7 +4687,7 @@ class FigurineProPlugin(Star):
         raw = event.message_str.strip()
         parts = raw.split()
         if len(parts) < 2:
-            yield event.plain_result("用法: #lm查看 <关键词>")
+            yield event.plain_result("用法: #手办化预设查看 <关键词>")
             return
 
         keyword = parts[1].strip()
@@ -4480,119 +5295,6 @@ class FigurineProPlugin(Star):
             msg += f"\n👥 本群剩余: {self._get_group_count(self._norm_id(gid))}"
 
         yield event.plain_result(msg)
-
-    @filter.command("手办化添加key", prefix_optional=True)
-    async def on_add_key(self, event: AstrMessageEvent):
-        if maintenance_message := self._get_maintenance_message():
-            yield self._reply_plain_result(event, maintenance_message)
-            event.stop_event()
-            return
-
-        if not self.is_global_admin(event):
-            return
-
-        new_keys = event.message_str.strip().split()[1:]
-        if not new_keys:
-            yield event.plain_result("格式错误。用法: #手办化添加key [generic|gemini] <key1> ...")
-            return
-
-        target_mode = "generic"
-        if new_keys[0].lower() in {"gemini", "g"}:
-            target_mode = "gemini"
-            new_keys = new_keys[1:]
-        elif new_keys[0].lower() in {"generic", "openai", "o"}:
-            new_keys = new_keys[1:]
-        elif new_keys[0].lower() in ["power", "强力", "p"]:
-            yield event.plain_result("⚠️ 强力模式已移除。请使用 generic 或 gemini Key 池。")
-            return
-
-        if not new_keys:
-            yield event.plain_result("格式错误。用法: #手办化添加key [generic|gemini] <key1> ...")
-            return
-
-        target_field = "gemini_api_keys" if target_mode == "gemini" else "generic_api_keys"
-        mode_desc = f"【{target_mode}】"
-
-        keys = self.conf.get(target_field, [])
-        added = [k for k in new_keys if k not in keys]
-        keys.extend(added)
-        self.conf[target_field] = keys
-
-        if hasattr(self.conf, "save"):
-            self.conf.save()
-
-        yield event.plain_result(f"✅ 已向 {mode_desc} 模式添加 {len(added)} 个Key。")
-
-    @filter.command("手办化key列表", prefix_optional=True)
-    async def on_list_keys(self, event: AstrMessageEvent):
-        if maintenance_message := self._get_maintenance_message():
-            yield self._reply_plain_result(event, maintenance_message)
-            event.stop_event()
-            return
-
-        if not self.is_global_admin(event):
-            return
-
-        generic_keys = self.conf.get("generic_api_keys", [])
-        gemini_keys = self.conf.get("gemini_api_keys", [])
-
-        msg = "🔑 Key池列表\n\n"
-        msg += f"📌 Generic ({len(generic_keys)}个):\n"
-        msg += ("\n".join([f"{i + 1}. {k[:6]}..." for i, k in enumerate(generic_keys)]) if generic_keys else "(空)")
-        msg += f"\n\n📌 Gemini ({len(gemini_keys)}个):\n"
-        msg += ("\n".join([f"{i + 1}. {k[:6]}..." for i, k in enumerate(gemini_keys)]) if gemini_keys else "(空)")
-
-        yield event.plain_result(msg)
-
-    @filter.command("手办化删除key", prefix_optional=True)
-    async def on_delete_key(self, event: AstrMessageEvent):
-        if maintenance_message := self._get_maintenance_message():
-            yield self._reply_plain_result(event, maintenance_message)
-            event.stop_event()
-            return
-
-        if not self.is_global_admin(event):
-            return
-
-        parts = event.message_str.strip().split()
-        if len(parts) < 2:
-            yield event.plain_result("格式: #手办化删除key <序号|all>")
-            return
-
-        target_mode = "generic"
-        param_index = 1
-        if parts[1].lower() in {"gemini", "g"}:
-            target_mode = "gemini"
-            param_index = 2
-        elif parts[1].lower() in {"generic", "openai", "o"}:
-            param_index = 2
-
-        if len(parts) <= param_index:
-            yield event.plain_result("格式: #手办化删除key [generic|gemini] <序号|all>")
-            return
-
-        param = parts[param_index]
-        if param.lower() in ["power", "强力", "p"]:
-            yield event.plain_result("⚠️ 强力模式已移除。请使用 generic 或 gemini Key 池。")
-            return
-
-        target_field = "gemini_api_keys" if target_mode == "gemini" else "generic_api_keys"
-        mode_desc = f"【{target_mode}】"
-
-        keys = self.conf.get(target_field, [])
-
-        if param == "all":
-            self.conf[target_field] = []
-        elif param.isdigit():
-            idx = int(param) - 1
-            if 0 <= idx < len(keys):
-                keys.pop(idx)
-                self.conf[target_field] = keys
-
-        if hasattr(self.conf, "save"):
-            self.conf.save()
-
-        yield event.plain_result(f"✅ 已从 {mode_desc} 模式删除Key。")
 
     async def terminate(self):
         if self.iwf:

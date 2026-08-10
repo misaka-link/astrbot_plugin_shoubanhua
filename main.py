@@ -218,15 +218,14 @@ class FigurineProPlugin(Star):
 
     IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
-    SEEDREAM_RESOLUTION_OPTIONS = {"1K", "1.5K", "2K", "3K", "4K"}
+    SEEDREAM_RESOLUTION_OPTIONS = {"1K", "1.5K", "2K"}
     SEEDREAM_RESOLUTION_PIXELS = {
         "1K": 1_048_576,
         "1.5K": 2_359_296,
         "2K": 4_194_304,
-        "3K": 9_437_184,
-        "4K": 16_777_216,
     }
     SEEDREAM_RESOLUTION_ORDER = ("1K", "1.5K", "2K")
+    SEEDREAM_ADAPTIVE_MAX_SIDE = 2000
     SEEDREAM_SIZE_OPTIONS = {
         "1K": {
             "1:1": "1024x1024",
@@ -1462,8 +1461,8 @@ class FigurineProPlugin(Star):
             return normalized if normalized in self.GEMINI_ASPECT_RATIO_OPTIONS else "auto"
 
         def normalize_seedream_resolution(value: Any) -> str:
-            normalized = str(value or "2K").strip().upper()
-            return normalized if normalized in self.SEEDREAM_RESOLUTION_OPTIONS else "2K"
+            normalized = str(value or "1.5K").strip().upper()
+            return normalized if normalized in self.SEEDREAM_RESOLUTION_OPTIONS else "1.5K"
 
         def normalize_seedream_output_format(value: Any) -> str:
             normalized = str(value or "png").strip().lower()
@@ -1507,9 +1506,12 @@ class FigurineProPlugin(Star):
                 seedream_send_output_format: Any = False,
                 seedream_output_format: Any = "png",
                 seedream_watermark: Any = False,
-                seedream_resolution: Any = "2K",
+                seedream_resolution: Any = "1.5K",
+                seedream_send_aspect_ratio: Any = False,
+                seedream_send_detailed_resolution: Any = False,
                 seedream_pixel_limit: Any = 0,
                 seedream_adaptive_aspect_ratio: Any = False,
+                seedream_max_side_2000: Any = True,
                 seedream_optimize_prompt_mode: Any = "standard",
         ):
             model_name = str(model or "").strip()
@@ -1543,8 +1545,11 @@ class FigurineProPlugin(Star):
                 "seedream_output_format": normalize_seedream_output_format(seedream_output_format),
                 "seedream_watermark": normalize_bool(seedream_watermark),
                 "seedream_resolution": normalize_seedream_resolution(seedream_resolution),
+                "seedream_send_aspect_ratio": normalize_bool(seedream_send_aspect_ratio),
+                "seedream_send_detailed_resolution": normalize_bool(seedream_send_detailed_resolution),
                 "seedream_pixel_limit": _normalize_nonnegative_int(seedream_pixel_limit),
                 "seedream_adaptive_aspect_ratio": normalize_bool(seedream_adaptive_aspect_ratio),
+                "seedream_max_side_2000": normalize_bool(seedream_max_side_2000),
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
             }
 
@@ -1648,13 +1653,32 @@ class FigurineProPlugin(Star):
                         ),
                         get_value(parameters, "seedream_output_format", "Seedream输出格式", default="png"),
                         get_value(parameters, "seedream_watermark", "Seedream添加水印", default=False),
-                        get_value(parameters, "seedream_resolution", "Seedream分辨率", default="2K"),
+                        get_value(parameters, "seedream_resolution", "Seedream分辨率", default="1.5K"),
+                        get_value(
+                            parameters,
+                            "seedream_send_aspect_ratio",
+                            "Seedream传递比例",
+                            default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "seedream_send_detailed_resolution",
+                            "Seedream传递详细分辨率",
+                            default=False,
+                        ),
                         get_value(parameters, "seedream_pixel_limit", "Seedream像素数上限", default=0),
                         get_value(
                             parameters,
                             "seedream_adaptive_aspect_ratio",
                             "Seedream自适应比例",
                             default=False,
+                        ),
+                        get_value(
+                            parameters,
+                            "seedream_max_side_2000",
+                            "Seedream宽高均不超过2000",
+                            "Seedream最大边长不超过2000",
+                            default=True,
                         ),
                         get_value(
                             parameters,
@@ -1768,13 +1792,32 @@ class FigurineProPlugin(Star):
                 ),
                 get_value(item, "seedream_output_format", "Seedream输出格式", default="png"),
                 get_value(item, "seedream_watermark", "Seedream添加水印", default=False),
-                get_value(item, "seedream_resolution", "Seedream分辨率", default="2K"),
+                get_value(item, "seedream_resolution", "Seedream分辨率", default="1.5K"),
+                get_value(
+                    item,
+                    "seedream_send_aspect_ratio",
+                    "Seedream传递比例",
+                    default=False,
+                ),
+                get_value(
+                    item,
+                    "seedream_send_detailed_resolution",
+                    "Seedream传递详细分辨率",
+                    default=False,
+                ),
                 get_value(item, "seedream_pixel_limit", "Seedream像素数上限", default=0),
                 get_value(
                     item,
                     "seedream_adaptive_aspect_ratio",
                     "Seedream自适应比例",
                     default=False,
+                ),
+                get_value(
+                    item,
+                    "seedream_max_side_2000",
+                    "Seedream宽高均不超过2000",
+                    "Seedream最大边长不超过2000",
+                    default=True,
                 ),
                 get_value(
                     item,
@@ -2112,7 +2155,8 @@ class FigurineProPlugin(Star):
             self,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
-    ) -> float:
+            fallback_to_square: bool = True,
+    ) -> Optional[float]:
         parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
         if parsed_ratio:
             return parsed_ratio[0] / parsed_ratio[1]
@@ -2121,8 +2165,9 @@ class FigurineProPlugin(Star):
                 with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
                     return image.width / image.height
             except Exception as exc:
-                logger.warning(f"读取 Seedream 首图尺寸失败，使用 1:1: {exc}")
-        return 1.0
+                fallback = "使用 1:1" if fallback_to_square else "不传递比例"
+                logger.warning(f"读取 Seedream 首图尺寸失败，{fallback}: {exc}")
+        return 1.0 if fallback_to_square else None
 
     @classmethod
     def _get_nearest_seedream_aspect_ratio(cls, source_ratio: float) -> str:
@@ -2132,6 +2177,20 @@ class FigurineProPlugin(Star):
 
         return min(cls.SEEDREAM_ASPECT_RATIO_ORDER, key=distance)
 
+    def _get_seedream_selected_aspect_ratio(
+            self,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+    ) -> Optional[str]:
+        source_ratio = self._get_seedream_source_aspect_ratio(
+            image_bytes_list,
+            aspect_ratio,
+            fallback_to_square=False,
+        )
+        if source_ratio is None:
+            return None
+        return self._get_nearest_seedream_aspect_ratio(source_ratio)
+
     def _build_seedream_adaptive_size(
             self,
             model_name: str,
@@ -2139,36 +2198,58 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str],
     ) -> str:
         parameters = self._get_seedream_parameters(model_name) or {}
-        requested_resolution = str(parameters.get("seedream_resolution") or "2K").upper()
+        requested_resolution = str(parameters.get("seedream_resolution") or "1.5K").upper()
         if requested_resolution not in self.SEEDREAM_RESOLUTION_ORDER:
             logger.warning(
-                f"Seedream 自适应尺寸表不支持 {requested_resolution}，已按 2K 生成"
+                f"Seedream 自适应尺寸表不支持 {requested_resolution}，已按 1.5K 生成"
             )
-            requested_resolution = "2K"
+            requested_resolution = "1.5K"
 
         source_ratio = self._get_seedream_source_aspect_ratio(image_bytes_list, aspect_ratio)
         selected_ratio = self._get_nearest_seedream_aspect_ratio(source_ratio)
         # Seedream 价格表的 K px 使用十进制换算，例如 2360K = 2,360,000 px。
         pixel_limit = _normalize_nonnegative_int(parameters.get("seedream_pixel_limit", 0)) * 1000
+        max_side_limit = (
+            self.SEEDREAM_ADAPTIVE_MAX_SIDE
+            if parameters.get("seedream_max_side_2000", True)
+            else 0
+        )
         available_resolutions = self.SEEDREAM_RESOLUTION_ORDER
         requested_index = available_resolutions.index(requested_resolution)
         allowed_resolutions = available_resolutions[:requested_index + 1]
-        if pixel_limit:
+        if pixel_limit or max_side_limit:
             fitting_resolutions = []
+            max_side_limited_resolutions = []
             for resolution in allowed_resolutions:
                 width, height = (
                     int(dimension)
                     for dimension in self.SEEDREAM_SIZE_OPTIONS[resolution][selected_ratio].split("x", 1)
                 )
-                if width * height <= pixel_limit:
+                exceeds_max_side = bool(max_side_limit and max(width, height) > max_side_limit)
+                if exceeds_max_side:
+                    max_side_limited_resolutions.append(resolution)
+                if (
+                        (not pixel_limit or width * height <= pixel_limit)
+                        and not exceeds_max_side
+                ):
                     fitting_resolutions.append(resolution)
             if fitting_resolutions:
                 requested_resolution = fitting_resolutions[-1]
             else:
+                limits = []
+                if pixel_limit:
+                    limits.append(f"像素数上限 {pixel_limit // 1000}K")
+                if max_side_limit:
+                    limits.append(f"宽高上限 {max_side_limit} px")
                 logger.warning(
-                    f"Seedream 像素数上限 {pixel_limit // 1000}K 低于 1K 的 {selected_ratio} 尺寸，已使用 1K"
+                    f"Seedream {'、'.join(limits)} 下没有符合 {selected_ratio} 的候选尺寸，已使用 1K"
                 )
                 requested_resolution = "1K"
+            if max_side_limited_resolutions:
+                logger.info(
+                    f"Seedream 宽高上限 {max_side_limit} px 排除了 {selected_ratio} 的 "
+                    f"{', '.join(max_side_limited_resolutions)} 档位"
+                )
 
         size = self.SEEDREAM_SIZE_OPTIONS[requested_resolution][selected_ratio]
         logger.info(
@@ -2198,7 +2279,19 @@ class FigurineProPlugin(Star):
         }
         if parameters["seedream_web_search"]:
             request["tools"] = [{"type": "web_search"}]
-        if parameters["seedream_adaptive_aspect_ratio"] and (image_bytes_list or force_aspect_ratio):
+
+        selected_aspect_ratio = self._get_seedream_selected_aspect_ratio(
+            image_bytes_list,
+            aspect_ratio,
+        )
+        if parameters["seedream_send_aspect_ratio"] and selected_aspect_ratio:
+            request["aspect_ratio"] = selected_aspect_ratio
+
+        use_detailed_resolution = (
+            parameters["seedream_send_detailed_resolution"]
+            and selected_aspect_ratio
+        )
+        if use_detailed_resolution:
             request["size"] = self._build_seedream_adaptive_size(
                 model_name,
                 image_bytes_list,
@@ -4387,24 +4480,27 @@ class FigurineProPlugin(Star):
         total_elapsed = (datetime.now() - start_time).total_seconds()
         if content_policy_violation_detected:
             warning_context = content_policy_warning_context or {}
+            warning_message = self._get_content_policy_warning_message(
+                model=str(warning_context.get("model") or initial_actual_model),
+                label=display_label,
+                image_count=len(images_to_process),
+                elapsed=float(warning_context.get("elapsed") or total_elapsed),
+                remaining=self._get_remaining_count_text(
+                    deduction_source,
+                    sender_id,
+                    group_id,
+                ),
+                prompt=user_prompt,
+                reason=str(warning_context.get("reason") or ""),
+                batch_count=batch_count,
+                batch_index=warning_context.get("batch_index"),
+                max_batch_concurrency=max_batch_concurrency,
+            )
+            if failed_deduction_amount and deduction_source in ["group", "user"]:
+                warning_message += f"\n本次违规已扣除次数：{failed_deduction_amount} 次"
             yield self._reply_plain_result(
                 event,
-                self._get_content_policy_warning_message(
-                    model=str(warning_context.get("model") or initial_actual_model),
-                    label=display_label,
-                    image_count=len(images_to_process),
-                    elapsed=float(warning_context.get("elapsed") or total_elapsed),
-                    remaining=self._get_remaining_count_text(
-                        deduction_source,
-                        sender_id,
-                        group_id,
-                    ),
-                    prompt=user_prompt,
-                    reason=str(warning_context.get("reason") or ""),
-                    batch_count=batch_count,
-                    batch_index=warning_context.get("batch_index"),
-                    max_batch_concurrency=max_batch_concurrency,
-                ),
+                warning_message,
             )
         elif success_count == 0:
             status_text = "生成失败"
@@ -4605,6 +4701,8 @@ class FigurineProPlugin(Star):
                     prompt=prompt,
                     reason=self._get_content_policy_warning_reason(res),
                 )
+                if should_deduct and deduction_source in ["group", "user"]:
+                    msg += f"\n本次违规已扣除次数：{deduction_amount} 次"
             else:
                 status_text = "生成失败"
                 msg = self._format_error_message(

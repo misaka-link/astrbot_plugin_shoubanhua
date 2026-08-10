@@ -1,4 +1,30 @@
 {
+    "extra_prefix": {
+        "description": "【基础】自定义提示词前缀",
+        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图；还支持 `#bnn 预设名` 或 `#bnn 预设名%追加内容` 调用【预设】提示词列表中的自定义预设。可添加多个入口前缀。",
+        "type": "template_list",
+        "default": [
+            {
+                "__template_key": "prefix",
+                "prefix": "bnn"
+            }
+        ],
+        "templates": {
+            "prefix": {
+                "name": "前缀条目",
+                "item_label": "提示词前缀",
+                "hint": "配置一个自定义 Prompt 入口命令。",
+                "items": {
+                    "prefix": {
+                        "label": "前缀",
+                        "type": "string",
+                        "default": "bnn",
+                        "hint": "例如：bnn、画图、生图。使用时不需要在这里填写 #。"
+                    }
+                }
+            }
+        }
+    },
     "command_model_list": {
         "description": "【通用】触发指令模型绑定",
         "type": "template_list",
@@ -62,7 +88,7 @@
             "model_parameters": {
                 "name": "模型参数设置",
                 "item_label": "模型参数设置",
-                "hint": "模型名、参考图数量限制、扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；GPT、Gemini 与 Seedream 的其余参数分别由对应开关控制。",
+                "hint": "模型名、参考图、扣次及 Token 始终生效；其余参数由对应开关控制。",
                 "items": {
                     "model": {
                         "label": "模型",
@@ -262,12 +288,22 @@
                         "options": [
                             "1K",
                             "1.5K",
-                            "2K",
-                            "3K",
-                            "4K"
+                            "2K"
                         ],
-                        "default": "2K",
-                        "hint": "仅 Seedream参数设置开启时生效。关闭自适应比例时直接发送 size；各 Seedream 模型支持的档位不同，请按上游模型能力配置。"
+                        "default": "1.5K",
+                        "hint": "仅 Seedream参数设置开启时生效。直接将该档位字符串（如 1.5K）作为 size 发送；开启“Seedream传递详细分辨率”且有比例来源时，才按 Seedream 5.0 Pro 官方比例尺寸表传递精确 size。各 Seedream 模型支持的档位不同，请按上游模型能力配置。"
+                    },
+                    "seedream_send_aspect_ratio": {
+                        "label": "Seedream传递比例",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启且模型走 Images Generations 路由时生效。默认关闭；开启后，有命令 =宽:高 时优先使用该比例，否则读取第一张参考图比例，映射为 Seedream 官方支持的最接近 aspect_ratio 后发送。没有命令比例或参考图时不发送该参数。"
+                    },
+                    "seedream_send_detailed_resolution": {
+                        "label": "Seedream传递详细分辨率",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Seedream参数设置开启且模型走 Images Generations 路由时生效。默认关闭；开启后，有命令 =宽:高 或参考图时，按比例表发送 size=宽x高（如 800x1424），并应用像素数上限和宽高限制。关闭或没有比例来源时，继续发送“Seedream分辨率”的档位值（如 1K）。"
                     },
                     "seedream_pixel_limit": {
                         "label": "Seedream像素数上限 (K)",
@@ -275,13 +311,19 @@
                         "default": 0,
                         "min": 0,
                         "max": 16384,
-                        "hint": "仅 Seedream参数设置开启时生效。0（默认）表示不限制；大于 0 时限制自适应 size 的总像素数，单位 K（1000 像素），与价格表一致。例如 2360 表示 2,360,000 像素。最终尺寸不超过所选分辨率的目标像素数。"
+                        "hint": "仅 Seedream参数设置开启时生效。0（默认）表示不限制；大于 0 时限制“Seedream传递详细分辨率”生成的 size 总像素数，单位 K（1000 像素），与价格表一致。例如 2360 表示 2,360,000 像素。最终尺寸不超过所选分辨率的目标像素数。"
                     },
                     "seedream_adaptive_aspect_ratio": {
                         "label": "Seedream自适应比例",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 Seedream参数设置开启时生效。开启后，带图请求按第一张参考图比例选择固定尺寸表中的显式 size；命令 =宽:高 优先覆盖首图比例。固定表支持 1:1、4:3、3:4、16:9、9:16、3:2、2:3、21:9，其他比例选择最接近项，并受 Seedream像素数上限限制。关闭后不读取参考图比例，直接传递“Seedream分辨率”。"
+                        "hint": "仅 Seedream参数设置开启时生效。保留比例自适应配置：有命令 =宽:高 时优先使用该比例，否则读取第一张参考图，并映射到 Seedream 5.0 Pro 官方比例表。仅当“Seedream传递详细分辨率”开启时，才会将自适应结果用于发送 size=宽x高；关闭该开关时仍发送“Seedream分辨率”的档位值。"
+                    },
+                    "seedream_max_side_2000": {
+                        "label": "Seedream宽高均不超过2000",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "仅 Seedream参数设置和“Seedream传递详细分辨率”均开启时参与固定尺寸表筛选。默认开启：官方固定尺寸表中宽或高任一边超过 2000 px 的候选档位会被排除，并向下选择同一比例的合法档位。关闭后仅按“Seedream像素数上限 (K)”筛选。"
                     },
                     "seedream_optimize_prompt_mode": {
                         "label": "Seedream提示词优化模式",
@@ -605,32 +647,6 @@
         "editor_mode": true,
         "editor_language": "markdown",
         "default": "插件当前正在维护中，请稍后再试。"
-    },
-    "extra_prefix": {
-        "description": "【基础】自定义提示词前缀",
-        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图；还支持 `#bnn 预设名` 或 `#bnn 预设名%追加内容` 调用【预设】提示词列表中的自定义预设。可添加多个入口前缀。",
-        "type": "template_list",
-        "default": [
-            {
-                "__template_key": "prefix",
-                "prefix": "bnn"
-            }
-        ],
-        "templates": {
-            "prefix": {
-                "name": "前缀条目",
-                "item_label": "提示词前缀",
-                "hint": "配置一个自定义 Prompt 入口命令。",
-                "items": {
-                    "prefix": {
-                        "label": "前缀",
-                        "type": "string",
-                        "default": "bnn",
-                        "hint": "例如：bnn、画图、生图。使用时不需要在这里填写 #。"
-                    }
-                }
-            }
-        }
     },
     "preset_list_command": {
         "description": "【基础】提示词列表触发指令",

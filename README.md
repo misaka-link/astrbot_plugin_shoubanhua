@@ -180,9 +180,12 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `Seedream传递输出格式`：默认关闭。关闭时不发送 `output_format`，用于兼容不支持该字段的网关；只有上游确认支持时才开启。
 - `Seedream输出格式`：可选 `png`、`jpeg`，默认 `png`。仅“Seedream参数设置”和“Seedream传递输出格式”都开启时，才发送为 `output_format`；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 - `Seedream添加水印`：默认关闭，发送为布尔 `watermark`；开启后由上游添加 AI 生成标识。
-- `Seedream分辨率`：可选 `1K`、`1.5K`、`2K`、`3K`、`4K`，默认 `2K`。关闭“Seedream自适应比例”时直接发送为 `size`；可用档位由实际接入的上游模型决定。
-- `Seedream像素数上限 (K)`：默认 `0`，即不限制。仅自适应比例生效时使用，按价格表以十进制 `1000` 像素为一 K 限制总像素。例如 `2360` 表示 `2,360,000 px`，且不会超过固定尺寸表所选档位的像素数。
-- `Seedream自适应比例`：默认关闭，是使用固定比例尺寸表的唯一开关。开启后，优先使用命令 `=宽:高`，否则读取第一张参考图比例，并严格映射到 `1:1`、`4:3`、`3:4`、`16:9`、`9:16`、`3:2`、`2:3`、`21:9` 的精确尺寸；不在表中的比例会选择最接近项。像素数上限只会向下选择同一比例的合法 `1K`、`1.5K`、`2K` 档位，不会构造未列出的尺寸。关闭时不读取比例，直接传递“Seedream分辨率”。
+- `Seedream分辨率`：可选 `1K`、`1.5K`、`2K`，默认 `1.5K`。默认直接发送为 `size`；仅开启“Seedream传递详细分辨率”且存在比例来源时，才按 Seedream 5.0 Pro 官方尺寸表发送对应像素值；可用档位由实际接入的上游模型决定。
+- `Seedream传递比例`：默认关闭，仅“Seedream参数设置”开启且模型走 Images Generations JSON 路由时生效。开启后，命令 `=宽:高` 优先；未指定时读取第一张参考图比例，并映射为 Seedream 官方支持的最接近 `aspect_ratio` 后发送。没有命令比例或参考图时不发送该字段。
+- `Seedream传递详细分辨率`：默认关闭，仅“Seedream参数设置”开启且模型走 Images Generations JSON 路由时生效。开启且存在命令比例或参考图时，按官方比例表发送具体 `size`，例如 `800x1424`，并继续应用像素数上限和宽高限制；关闭或没有比例来源时，保持发送“Seedream分辨率”的档位值，例如 `1K`。
+- `Seedream像素数上限 (K)`：默认 `0`，即不限制。仅“Seedream传递详细分辨率”开启时使用，按价格表以十进制 `1000` 像素为一 K 限制总像素。例如 `2360` 表示 `2,360,000 px`，且不会超过固定尺寸表所选档位的像素数。
+- `Seedream自适应比例`：默认关闭，保留命令 `=宽:高` 优先、首张参考图兜底及最近官方比例表映射的自适应配置。仅“Seedream传递详细分辨率”开启时，该自适应结果才用于传递 `size=宽x高`；关闭详细分辨率后仍传递“Seedream分辨率”的档位值。
+- `Seedream宽高均不超过2000`：默认开启，仅在“Seedream传递详细分辨率”开启后参与固定尺寸表筛选。官方候选尺寸中宽或高任一边超过 `2000 px` 都会被排除，并向下选择同一比例的合法档位；关闭后恢复为仅按“Seedream像素数上限 (K)”筛选。
 - `Seedream提示词优化模式`：可选 `standard`、`fast`，默认 `standard`，发送为 `optimize_prompt_options.mode`。`fast` 更快但可能影响效果；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 
 Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig.imageConfig`：
@@ -202,7 +205,7 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；若开启“1K超限自动转2K”（即使强制限制仍被配置为开启，也会自动失效），会改按 2K 提交 `size=2048x1152` 并按 `resolution_2k_cost` 扣次。单独开启“强制限制分辨率”后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
 
-当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。Seedream 参数不复用 Edits multipart：启用“Seedream参数设置”的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由“Gemini参数设置”独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；仅启用“1K超限自动转2K”并实际升级时，扣次改用 `resolution_2k_cost`。
+当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。Seedream 参数不复用 Edits multipart：启用“Seedream参数设置”的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由“Gemini参数设置”独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；仅启用“1K超限自动转2K”并实际升级时，扣次改用 `resolution_2k_cost`。
 
 每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。仅当“1K超限自动转2K”实际升级时，单次扣除次数改为全局 `resolution_2k_cost`；配额预检和最终成功/失败结算均使用同一规则。
 

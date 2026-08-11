@@ -82,7 +82,7 @@
     "model_parameter_list": {
         "description": "【通用】模型参数设置",
         "type": "template_list",
-        "hint": "按模型设置参考图数量、扣除次数、违规失败扣次、最大输出/思考 Token、GPT、Gemini 和 Seedream 图片参数。对应参数开关关闭时，其下方专属参数不会发送到上游；未配置模型时默认每次扣除 1 次。",
+        "hint": "按模型设置参考图数量、扣除次数、2K/4K扣除次数、违规失败扣次、最大输出/思考 Token、GPT、Gemini、Grok 和 Seedream 图片参数。对应参数开关关闭时，其下方专属参数不会发送到上游；未配置模型时默认每次扣除 1 次。",
         "default": [],
         "templates": {
             "model_parameters": {
@@ -104,6 +104,14 @@
                         "max": 14,
                         "hint": "本模型单次请求最多传递的参考图数量。填 0（默认）时继承全局“最大图片数量”；填正数时按较小值截取。实际热备模型的设置优先，GPT/Gemini/Seedream 参数开关不影响本项。"
                     },
+                    "extra_reference_image_quota": {
+                        "label": "超限参考图阶梯额度",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 14,
+                        "hint": "当“参考图数量限制”>0 且本项>0 时启用：超出限制的参考图仍会发送（不超过全局“最大图片数量”），并按阶梯额外扣次。每超出本项数量=1 阶梯（向上取整），每阶梯固定额外扣除 1 次（与“该模型扣除次数”、分辨率无关）。例：限制2、额度2 时，传3/4张=多扣1次，5/6张=多扣2次，以此类推。批量生成时每批次都会叠加；命中违规/失败错误码时同样扣除。本项为0 或“参考图数量限制”为0 时不启用。"
+                    },
                     "deduction_count": {
                         "label": "该模型扣除次数",
                         "type": "int",
@@ -111,6 +119,22 @@
                         "min": 1,
                         "max": 100,
                         "hint": "该模型每次生成扣除多少次，不受 GPT/Gemini 参数开关影响；批量生成还会乘以实际生成倍率。"
+                    },
+                    "deduction_count_2k": {
+                        "label": "2K扣除次数",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100,
+                        "hint": "命中 2K 档位时替换“该模型扣除次数”结算。触发条件（任一满足）：参考图任一边长超过 2000、自适应比例分辨率设置为 2K、命令使用 x2。4K 优先于 2K。填 0（默认）时继承全局“2K 扣除次数”；超限参考图阶梯额外扣次仍独立叠加。"
+                    },
+                    "deduction_count_4k": {
+                        "label": "4K扣除次数",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100,
+                        "hint": "命中 4K 档位时替换“该模型扣除次数”结算。触发条件（任一满足）：自适应比例分辨率设置为 4K、命令使用 x4。暂不按参考图边长检测。填 0（默认）时继承全局“4K 扣除次数”；超限参考图阶梯额外扣次仍独立叠加。"
                     },
                     "deduct_on_violation": {
                         "label": "违规是否扣次数",
@@ -247,6 +271,28 @@
                         ],
                         "default": "auto",
                         "hint": "仅 Gemini参数设置开启且模型走 Gemini 路由时生效。选择 auto 时不发送 imageConfig.aspectRatio：有参考图时由上游按参考图决定，无参考图时由模型使用默认比例；选择其他值时发送对应比例。开启 Gemini自适应比例且读取到首图时，本项会被自适应结果覆盖。不同 Gemini 模型支持的比例可能不同。"
+                    },
+                    "enable_grok_parameters": {
+                        "label": "Grok参数设置",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "开启后，模型走 Images Generations 或 Images Edits 路由时才会发送下方 Grok 分辨率和比例参数。请按实际 Grok 兼容上游支持情况配置。"
+                    },
+                    "grok_resolution": {
+                        "label": "Grok分辨率",
+                        "type": "string",
+                        "options": [
+                            "1k",
+                            "2k"
+                        ],
+                        "default": "2k",
+                        "hint": "仅 Grok参数设置开启时生效，发送为 resolution。可选 1k、2k，默认 2k。"
+                    },
+                    "grok_adaptive_aspect_ratio": {
+                        "label": "Grok自适应比例",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅 Grok参数设置开启时生效。开启后，有命令 =宽:高 时优先使用该比例，否则读取第一张参考图比例，并映射为 Grok 支持的最接近 aspect_ratio；没有有效比例来源时发送 auto。关闭时始终发送 aspect_ratio=auto。"
                     },
                     "enable_seedream_parameters": {
                         "label": "Seedream参数设置",

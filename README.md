@@ -46,7 +46,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
-| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、扣次、违规失败扣次和最大输出/思考 Token 始终生效；GPT/Gemini/Seedream 图片参数必须开启各自开关后才会发送 |
+| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、扣次、2K/4K扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；GPT/Gemini/Grok/Seedream 图片参数必须开启各自开关后才会发送 |
 | `model_mapping_list` | 模型热备映射列表；选择源模型后按映射项的优先权重从高到低请求实际模型，同权重按列表顺序 |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `chat_completions_system_prompt_enabled` | 是否在 `/v1/chat/completions` 请求中发送 system 系统提示词，默认开启 |
@@ -147,7 +147,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 任何未成功生成图片的结果，包括上游 HTTP 错误、超时、响应无图片或图片下载失败，都会继续切换到下一条热备模型；但上游判定内容违规/安全拦截，或 HTTP 状态码命中 `failure_deduction_status_codes` 时会立即停止热备，并单独发送违规内容警告，不再请求后续模型。全部模型失败后才向用户返回最后一次失败结果；中间失败不会单独扣次。
 
-每次尝试均以实际调用模型为准：其 `model_prompt_template_list`、Gemini/Generic 路由、端点列表和 `model_parameter_list` 都会重新计算。因此映射模型在“模型参数设置”中配置了扣次、Token、GPT 图片参数或 Gemini 图片参数时，切换后严格遵循映射模型自身的设置。成功、最终失败和失败扣次也按照实际调用模型结算；配额预检会按所有候选模型中的最高单次扣次检查，避免备用模型扣次更高时超额。
+每次尝试均以实际调用模型为准：其 `model_prompt_template_list`、Gemini/Generic 路由、端点列表和 `model_parameter_list` 都会重新计算。因此映射模型在“模型参数设置”中配置了扣次、Token、GPT、Gemini、Grok 或 Seedream 图片参数时，切换后严格遵循映射模型自身的设置。成功、最终失败和失败扣次也按照实际调用模型结算；配额预检会按所有候选模型中的最高单次扣次检查，避免备用模型扣次更高时超额。
 
 端点路由列表同样必须填写实际调用的映射模型名：例如 `model-1 -> model-2` 且 `model-2` 应走 Images Edits 时，`images_edits_model_list` 必须填写 `model-2`，不能只填写 `model-1`。Images Generations、Chat Completions 与 Gemini 路由列表也遵循同一规则；只有未配置映射项的源模型才需要自行配置实际路由。
 
@@ -157,8 +157,11 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 - `模型`：填写模型列表或端点模型列表中的模型名。
 - `参考图数量限制`：默认 `0`，继承全局 `max_images_count`；填写正数时，会按实际热备模型和全局设置的较小值截取参考图。普通命令和 LLM 图生图工具共用此规则。
+- `超限参考图阶梯额度`：默认 `0`。当 `参考图数量限制` 为正且本项也为正时启用：超出软限的参考图不再被截断，而是发送到全局 `max_images_count` 硬上限，并按阶梯额外扣次。每超出本项数量 = 1 个阶梯（向上取整），每阶梯固定额外扣除 **1 次**（与 `该模型扣除次数`、分辨率升级均无关）。例：限制 `2`、额度 `2` 时，传 `3/4` 张 = 多扣 `1` 次，`5/6` 张 = 多扣 `2` 次，`7` 张 = 多扣 `3` 次。批量生成时每批次都会叠加该额外扣次；命中违规或失败错误码时同样扣除。本项为 `0` 或 `参考图数量限制` 为 `0` 时不启用，维持原有截断行为。
 - `该模型扣除次数`：每次生成扣除多少次，默认 `1`；不受 GPT/Gemini 参数开关影响，批量生成还会乘以实际生成倍率。
-- `违规是否扣次数`：默认关闭。该模型发生内容安全/政策违规，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，是否按该模型的 `该模型扣除次数` 扣次。模型单独设置优先于全局 `deduct_on_failure_status_codes`；未配置该模型参数项时才回退到全局开关。
+- `2K扣除次数`：默认 `0`。命中 2K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：参考图任一边长超过 `2000`（取所有参考图最大边长，读取失败跳过）、`自适应比例分辨率` 设置为 `2K`、命令使用 `x2`。填 `0` 时继承全局“2K 扣除次数”（`resolution_2k_cost`，默认 `2`）。超限参考图阶梯额外扣次仍独立叠加。
+- `4K扣除次数`：默认 `0`。命中 4K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：`自适应比例分辨率` 设置为 `4K`、命令使用 `x4`。暂不按参考图边长检测。填 `0` 时继承全局“4K 扣除次数”（`resolution_4k_cost`，默认 `4`）。4K 优先于 2K；超限参考图阶梯额外扣次仍独立叠加。
+- `违规是否扣次数`：默认关闭。该模型发生内容安全/政策违规，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，是否按该模型实际命中的扣次档位（基础/2K/4K）扣次。模型单独设置优先于全局 `deduct_on_failure_status_codes`；未配置该模型参数项时才回退到全局开关。
 - `最大输出/思考 Token`：仅 Gemini 和 Generic Chat Completions 路由生效。大于 `0` 时覆盖全局 `max_output_tokens`；填 `0` 时继承全局设置。全局也为 `0`（默认）时不发送限制参数，即不限制。Gemini 使用 `maxOutputTokens`，Generic Chat Completions 使用 `max_tokens`；不受 GPT/Gemini 参数开关影响。
 - `默认分辨率`：独立设置，启用“默认传递 size”后，在自适应比例未启动或未生成有效尺寸时发送的 `size` 参数，默认 `auto`；可填写供应商支持的其他 `size` 值。
 - `默认传递 size`：独立设置，默认关闭。开启后，Images Generations / Edits 请求在未生成自适应尺寸时发送“默认分辨率”（默认 `size=auto`）；关闭时不传递兜底 `size`。不受 GPT/Gemini 参数开关影响。
@@ -175,6 +178,9 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `Gemini分辨率`：可选 `auto`、`1K`、`2K`、`4K`，默认 `auto`。选择 `auto` 时不发送 `imageSize`，由上游使用默认值；选择 `1K`、`2K` 或 `4K` 时发送对应值。
 - `Gemini自适应比例`：默认关闭。开启后，带图请求会读取第一张图片比例，或使用命令 `=宽:高` 指定的比例，并按比例距离映射为 Gemini 官方 `ImageConfig.aspectRatio` 枚举中最接近的一项后发送。它只控制比例，不会修改 Gemini 分辨率；优先级高于“Gemini图片比例”。
 - `Gemini图片比例`：可选 `auto`、`1:1`、`1:4`、`4:1`、`1:8`、`8:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`，默认 `auto`。选择 `auto` 时不发送 `aspectRatio`，官方端点会在有参考图时依据参考图决定比例，无参考图时使用模型默认比例；选择其他值时发送对应比例。开启“Gemini自适应比例”且读取到首图时，本项会被自适应结果覆盖。不同 Gemini 模型支持的比例可能不同。
+- `Grok参数设置`：默认关闭，仅适用于 Generic 的 Images Generations / Edits 路由。开启后请求会发送 Grok 格式的 `resolution` 和 `aspect_ratio`，不复用 Generic/GPT 的 `size` 字段；实际网关必须支持这两个字段。
+- `Grok分辨率`：可选 `1k`、`2k`，默认 `2k`，开启 Grok 参数设置后发送为 `resolution`。
+- `Grok自适应比例`：默认关闭。关闭时始终发送 `aspect_ratio=auto`；开启后命令 `=宽:高` 优先，否则读取第一张参考图，并在 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`2:1`、`1:2`、`19.5:9`、`9:19.5`、`20:9`、`9:20` 中选择最接近的比例。没有参考图、读取失败或无法确定比例时仍发送 `auto`。
 - `Seedream参数设置`：默认关闭，仅适用于 Generic 的 Images Generations 路由。启用后请求会按 Seedream JSON 参数发送，且不发送 Generic/GPT 的 `n`、`quality`、`moderation`。模型必须加入 `images_generations_model_list`；带参考图时即使同时在 `images_edits_model_list`，也优先走 generations JSON 端点。
 - `Seedream联网搜索`：默认关闭。开启后发送 `tools: [{"type":"web_search"}]`；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 - `Seedream传递输出格式`：默认关闭。关闭时不发送 `output_format`，用于兼容不支持该字段的网关；只有上游确认支持时才开启。
@@ -203,13 +209,13 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 自适应尺寸默认遵守以下规则：宽高都是 16 的倍数、最长边不超过 3840、长短边比例不超过 3:1，总像素不少于 655,360 且不超过 8,294,400。`1K` 和 `2K` 分别以 1024、2048 为目标最长边，`4K` 以 3840 为目标最长边；若目标尺寸超出总像素范围，会等比放大或缩小后再对齐到 16。开启“强制限制分辨率”后，最长边限制与最小总像素规则同时生效；比例无法同时满足时会调整短边。
 
-例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；若开启“1K超限自动转2K”（即使强制限制仍被配置为开启，也会自动失效），会改按 2K 提交 `size=2048x1152` 并按 `resolution_2k_cost` 扣次。单独开启“强制限制分辨率”后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
+例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；若开启“1K超限自动转2K”（即使强制限制仍被配置为开启，也会自动失效），会改按 2K 提交 `size=2048x1152`。单独开启“强制限制分辨率”后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
 
-当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。Seedream 参数不复用 Edits multipart：启用“Seedream参数设置”的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由“Gemini参数设置”独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；仅启用“1K超限自动转2K”并实际升级时，扣次改用 `resolution_2k_cost`。
+当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。开启“Grok参数设置”后，两个 Images 路由都会发送 `resolution`（默认 `2k`）和 `aspect_ratio`；关闭 Grok 自适应比例时固定发送 `auto`，开启后使用命令 `=宽:高` 或首张参考图映射出的最近 Grok 比例。Grok 不使用或替换 Generic 的 `size`。Seedream 参数不复用 Edits multipart：启用“Seedream参数设置”的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由“Gemini参数设置”独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；扣次档位由参考图边长、`自适应比例分辨率` 设置与命令 `x2/x4` 决定（见上方计费规则）。
 
-每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。仅当“1K超限自动转2K”实际升级时，单次扣除次数改为全局 `resolution_2k_cost`；配额预检和最终成功/失败结算均使用同一规则。
+每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。命中 2K/4K 档位时，单次扣除次数改为该模型“2K/4K扣除次数”（填 `0` 时回退全局 `resolution_2k_cost` / `resolution_4k_cost`）；2K 档触发条件为参考图任一边长超过 `2000`、`自适应比例分辨率` 为 `2K` 或命令 `x2`，4K 档触发条件为 `自适应比例分辨率` 为 `4K` 或命令 `x4`，4K 优先于 2K。配额预检和最终成功/失败结算均使用同一规则。
 
-次数按每个请求的实际结果结算：生成成功正常扣次。上游判定内容违规或触发安全拦截时，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，均会单独发送 `content_policy_warning_message`。模型参数中的 `违规是否扣次数` 优先决定是否扣次；未配置该模型参数项时才使用 `deduct_on_failure_status_codes`（旧配置 `deduct_on_content_policy_violation` 仍兼容）。违规/错误码失败若扣次，固定按实际调用模型的 `deduction_count` 扣除，不使用分辨率档位成本；关闭后仍会警告但不扣次。未命中错误码的普通失败不扣次，并继续模型热备切换。批量生成逐个结果结算。
+次数按每个请求的实际结果结算：生成成功正常扣次。上游判定内容违规或触发安全拦截时，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，均会单独发送 `content_policy_warning_message`。模型参数中的 `违规是否扣次数` 优先决定是否扣次；未配置该模型参数项时才使用 `deduct_on_failure_status_codes`（旧配置 `deduct_on_content_policy_violation` 仍兼容）。违规/错误码失败若扣次，按实际调用模型命中的扣次档位（基础/2K/4K）结算，与成功请求使用同一规则；关闭后仍会警告但不扣次。未命中错误码的普通失败不扣次，并继续模型热备切换。批量生成逐个结果结算。
 
 `content_policy_warning_message` 支持与 `custom_success_message` 相同的通用变量：`{model}`、`{label}`、`{image_count}`、`{elapsed}`、`{remaining}`、`{prompt}`；另有 `{reason}`，会替换为上游返回的主要错误原因（例如安全拦截说明）。批量、预设和 `#bnn` 入口还支持 `{batch_count}`、`{batch_index}`、`{max_batch_concurrency}`。独立 `#文生图` 保持成功模板的现有行为，不替换这三个批量变量。默认警告会提示更换模型、提示词或参考图，并显示实际模型与任务序号。
 

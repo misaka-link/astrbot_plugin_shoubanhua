@@ -218,6 +218,11 @@ class FigurineProPlugin(Star):
 
     IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+    GROK_RESOLUTION_OPTIONS = {"1k", "2k"}
+    GROK_ASPECT_RATIO_ORDER = (
+        "1:2", "9:20", "9:19.5", "9:16", "2:3", "3:4", "1:1",
+        "4:3", "3:2", "16:9", "19.5:9", "20:9", "2:1",
+    )
     SEEDREAM_RESOLUTION_OPTIONS = {"1K", "1.5K", "2K"}
     SEEDREAM_RESOLUTION_PIXELS = {
         "1K": 1_048_576,
@@ -1460,6 +1465,10 @@ class FigurineProPlugin(Star):
                 return "auto"
             return normalized if normalized in self.GEMINI_ASPECT_RATIO_OPTIONS else "auto"
 
+        def normalize_grok_resolution(value: Any) -> str:
+            normalized = str(value or "2k").strip().lower()
+            return normalized if normalized in self.GROK_RESOLUTION_OPTIONS else "2k"
+
         def normalize_seedream_resolution(value: Any) -> str:
             normalized = str(value or "1.5K").strip().upper()
             return normalized if normalized in self.SEEDREAM_RESOLUTION_OPTIONS else "1.5K"
@@ -1492,6 +1501,8 @@ class FigurineProPlugin(Star):
                 send_default_size: Any = False,
                 max_output_tokens: Any = 0,
                 deduction_count: Any = 1,
+                deduction_count_2k: Any = 0,
+                deduction_count_4k: Any = 0,
                 deduct_on_violation: Any = False,
                 force_resolution_limit: Any = False,
                 enable_gpt_parameters: Any = False,
@@ -1501,6 +1512,10 @@ class FigurineProPlugin(Star):
                 gemini_adaptive_aspect_ratio: Any = False,
                 gemini_aspect_ratio: Any = "auto",
                 reference_image_limit: Any = 0,
+                extra_reference_image_quota: Any = 0,
+                enable_grok_parameters: Any = False,
+                grok_resolution: Any = "2k",
+                grok_adaptive_aspect_ratio: Any = False,
                 enable_seedream_parameters: Any = False,
                 seedream_web_search: Any = False,
                 seedream_send_output_format: Any = False,
@@ -1528,6 +1543,8 @@ class FigurineProPlugin(Star):
                 "send_default_size": normalize_bool(send_default_size),
                 "max_output_tokens": _normalize_nonnegative_int(max_output_tokens),
                 "deduction_count": _normalize_positive_int(deduction_count, 1),
+                "deduction_count_2k": _normalize_nonnegative_int(deduction_count_2k),
+                "deduction_count_4k": _normalize_nonnegative_int(deduction_count_4k),
                 "deduct_on_violation": normalize_bool(deduct_on_violation),
                 "force_resolution_limit": (
                     normalize_bool(force_resolution_limit) and not auto_upgrade_1k
@@ -1539,6 +1556,10 @@ class FigurineProPlugin(Star):
                 "gemini_adaptive_aspect_ratio": normalize_bool(gemini_adaptive_aspect_ratio),
                 "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
                 "reference_image_limit": _normalize_nonnegative_int(reference_image_limit),
+                "extra_reference_image_quota": _normalize_nonnegative_int(extra_reference_image_quota),
+                "enable_grok_parameters": normalize_bool(enable_grok_parameters),
+                "grok_resolution": normalize_grok_resolution(grok_resolution),
+                "grok_adaptive_aspect_ratio": normalize_bool(grok_adaptive_aspect_ratio),
                 "enable_seedream_parameters": normalize_bool(enable_seedream_parameters),
                 "seedream_web_search": normalize_bool(seedream_web_search),
                 "seedream_send_output_format": normalize_bool(seedream_send_output_format),
@@ -1585,6 +1606,8 @@ class FigurineProPlugin(Star):
                             default=0,
                         ),
                         get_value(parameters, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
+                        get_value(parameters, "deduction_count_2k", "2K扣除次数", "2K扣除", default=0),
+                        get_value(parameters, "deduction_count_4k", "4K扣除次数", "4K扣除", default=0),
                         get_value(
                             parameters,
                             "deduct_on_violation",
@@ -1637,6 +1660,21 @@ class FigurineProPlugin(Star):
                             default="auto",
                         ),
                         get_value(parameters, "reference_image_limit", "参考图数量限制", default=0),
+                        get_value(parameters, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
+                        get_value(
+                            parameters,
+                            "enable_grok_parameters",
+                            "grok_parameters",
+                            "Grok参数设置",
+                            default=False,
+                        ),
+                        get_value(parameters, "grok_resolution", "Grok分辨率", default="2k"),
+                        get_value(
+                            parameters,
+                            "grok_adaptive_aspect_ratio",
+                            "Grok自适应比例",
+                            default=False,
+                        ),
                         get_value(
                             parameters,
                             "enable_seedream_parameters",
@@ -1724,6 +1762,8 @@ class FigurineProPlugin(Star):
                     default=0,
                 ),
                 get_value(item, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
+                get_value(item, "deduction_count_2k", "2K扣除次数", "2K扣除", default=0),
+                get_value(item, "deduction_count_4k", "4K扣除次数", "4K扣除", default=0),
                 get_value(
                     item,
                     "deduct_on_violation",
@@ -1776,6 +1816,21 @@ class FigurineProPlugin(Star):
                     default="auto",
                 ),
                 get_value(item, "reference_image_limit", "参考图数量限制", default=0),
+                get_value(item, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
+                get_value(
+                    item,
+                    "enable_grok_parameters",
+                    "grok_parameters",
+                    "Grok参数设置",
+                    default=False,
+                ),
+                get_value(item, "grok_resolution", "Grok分辨率", default="2k"),
+                get_value(
+                    item,
+                    "grok_adaptive_aspect_ratio",
+                    "Grok自适应比例",
+                    default=False,
+                ),
                 get_value(
                     item,
                     "enable_seedream_parameters",
@@ -1860,7 +1915,103 @@ class FigurineProPlugin(Star):
         return min(model_limit, global_limit) if model_limit else global_limit
 
     def _limit_reference_images(self, model_name: str, image_bytes_list: List[bytes]) -> List[bytes]:
+        global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        configured_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
+        quota = _normalize_nonnegative_int((parameters or {}).get("extra_reference_image_quota", 0))
+        # 超限计费模式：软限不再截断，允许发到全局硬上限，超出软限部分由 _get_extra_reference_image_cost 计费
+        if configured_limit > 0 and quota > 0:
+            return image_bytes_list[:global_limit]
         return image_bytes_list[:self._get_reference_image_limit(model_name)]
+
+    def _get_extra_reference_image_cost(
+            self,
+            model_name: str,
+            image_bytes_list: Optional[List[bytes]],
+    ) -> int:
+        """超限参考图阶梯额外扣次（不含基础扣次）。
+
+        每阶梯固定额外扣除 1 次，与模型 deduction_count、分辨率升级均无关。
+        仅当 reference_image_limit>0 且 extra_reference_image_quota>0 时启用；
+        二者任一为 0 则本功能完全不触发（返回 0）。
+        """
+        if not image_bytes_list:
+            return 0
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not parameters:
+            return 0
+        configured_limit = _normalize_nonnegative_int(parameters.get("reference_image_limit", 0))
+        quota = _normalize_nonnegative_int(parameters.get("extra_reference_image_quota", 0))
+        if configured_limit <= 0 or quota <= 0:
+            return 0
+        global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+        soft_limit = min(configured_limit, global_limit)
+        sent = min(len(image_bytes_list), global_limit)  # 与实际发送数量保持一致
+        excess = sent - soft_limit
+        if excess <= 0:
+            return 0
+        return (excess + quota - 1) // quota  # 阶梯数（向上取整）= 额外扣次
+
+    def _get_max_reference_image_side(self, image_bytes_list: Optional[List[bytes]]) -> int:
+        """遍历所有参考图，返回任一边长的最大值；读取失败跳过；无图返回 0。"""
+        if not image_bytes_list:
+            return 0
+        max_side = 0
+        for image_bytes in image_bytes_list:
+            try:
+                with PILImage.open(io.BytesIO(image_bytes)) as image:
+                    width, height = image.size
+            except Exception as exc:
+                logger.warning(f"读取参考图尺寸失败，跳过边长判定: {exc}")
+                continue
+            if width > 0 and height > 0:
+                max_side = max(max_side, width, height)
+        return max_side
+
+    def _get_resolution_deduction_tier(
+            self,
+            model_name: str,
+            resolution: Optional[str] = None,
+            image_bytes_list: Optional[List[bytes]] = None,
+    ) -> Optional[str]:
+        """判定本次请求应使用的分辨率扣次档位。
+
+        4K > 2K > 无。4K 档由模型分辨率设置或命令 x4 触发（暂不按边长检测）；
+        2K 档由参考图任一边长 > 2000、模型分辨率设置 2K 或命令 x2 触发。
+        任一条件满足即命中对应档位，取最高档。
+        """
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        configured_resolution = str((parameters or {}).get("adaptive_resolution") or "1K").upper()
+        requested_resolution = str(resolution or "").strip().upper()
+
+        if configured_resolution == "4K" or requested_resolution == "4K":
+            return "4K"
+        if (
+                configured_resolution == "2K"
+                or requested_resolution == "2K"
+                or self._get_max_reference_image_side(image_bytes_list) > 2000
+        ):
+            return "2K"
+        return None
+
+    def _get_tiered_deduction_cost(self, model_name: str, tier: Optional[str]) -> int:
+        """按档位返回单次扣次：命中 2K/4K 时替换基础扣次，未命中时为基础扣次。
+
+        模型「2K/4K扣除次数」>0 时使用模型配置，否则回退全局
+        resolution_2k_cost / resolution_4k_cost（默认 2 / 4）。
+        """
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if tier == "4K":
+            model_cost = _normalize_nonnegative_int((parameters or {}).get("deduction_count_4k", 0))
+            if model_cost > 0:
+                return model_cost
+            return _normalize_positive_int(self.conf.get("resolution_4k_cost", 4), 4)
+        if tier == "2K":
+            model_cost = _normalize_nonnegative_int((parameters or {}).get("deduction_count_2k", 0))
+            if model_cost > 0:
+                return model_cost
+            return _normalize_positive_int(self.conf.get("resolution_2k_cost", 2), 2)
+        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
 
     @classmethod
     def _get_nearest_gemini_aspect_ratio(
@@ -2151,6 +2302,61 @@ class FigurineProPlugin(Star):
             and parameters.get("omit_n_parameter")
         )
 
+    @classmethod
+    def _get_nearest_grok_aspect_ratio(cls, width: float, height: float) -> Optional[str]:
+        if width <= 0 or height <= 0:
+            return None
+
+        source_ratio = width / height
+
+        def distance(candidate: str) -> float:
+            candidate_ratio = cls._parse_aspect_ratio(candidate)
+            if not candidate_ratio:
+                return float("inf")
+            candidate_width, candidate_height = candidate_ratio
+            return abs(math.log(source_ratio / (candidate_width / candidate_height)))
+
+        return min(cls.GROK_ASPECT_RATIO_ORDER, key=distance)
+
+    def _get_grok_request_parameters(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
+    ) -> Dict[str, str]:
+        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        if not parameters or not parameters.get("enable_grok_parameters"):
+            return {}
+
+        request = {"resolution": parameters["grok_resolution"], "aspect_ratio": "auto"}
+        if not parameters.get("grok_adaptive_aspect_ratio"):
+            return request
+
+        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if parsed_ratio and (force_aspect_ratio or image_bytes_list):
+            source_width, source_height = parsed_ratio
+            source_label = aspect_ratio
+        elif image_bytes_list:
+            try:
+                with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
+                    source_width, source_height = image.size
+            except Exception as exc:
+                logger.warning(f"读取 Grok 首图尺寸失败，使用 aspect_ratio=auto: {exc}")
+                return request
+            source_label = f"{source_width}:{source_height}"
+        else:
+            return request
+
+        selected_ratio = self._get_nearest_grok_aspect_ratio(source_width, source_height)
+        if selected_ratio:
+            request["aspect_ratio"] = selected_ratio
+            logger.info(
+                f"Grok 自适应比例: model={model_name}, source={source_label}, "
+                f"aspect_ratio={selected_ratio}"
+            )
+        return request
+
     def _get_seedream_source_aspect_ratio(
             self,
             image_bytes_list: List[bytes],
@@ -2325,6 +2531,12 @@ class FigurineProPlugin(Star):
             parameters["size"] = adaptive_size
         elif model_parameters.get("send_default_size"):
             parameters["size"] = model_parameters["default_resolution"]
+        parameters.update(self._get_grok_request_parameters(
+            model_name,
+            image_bytes_list,
+            aspect_ratio,
+            force_aspect_ratio,
+        ))
         return parameters
 
     @staticmethod
@@ -3084,31 +3296,24 @@ class FigurineProPlugin(Star):
             image_bytes_list: Optional[List[bytes]] = None,
             aspect_ratio: Optional[str] = None,
     ) -> int:
-        if image_bytes_list and self._get_api_route_for_model(model_name) == "generic":
-            endpoint_type = self._get_generic_endpoint_type_for_model(
-                model_name,
-                has_images=True,
-            )
-            if endpoint_type in {"images_generations", "images_edits"}:
-                adaptive_details = self._get_adaptive_image_size_details(
-                    model_name,
-                    image_bytes_list,
-                    resolution,
-                    aspect_ratio,
-                )
-                if adaptive_details and adaptive_details[2]:
-                    return _normalize_positive_int(
-                        self.conf.get("resolution_2k_cost", 2),
-                        2,
-                    )
+        tier = self._get_resolution_deduction_tier(model_name, resolution, image_bytes_list)
+        return self._get_tiered_deduction_cost(model_name, tier) + self._get_extra_reference_image_cost(
+            model_name,
+            image_bytes_list,
+        )
 
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
-
-    def _get_violation_deduction_cost(self, model_name: str) -> int:
-        """违规失败固定按实际调用模型的基础扣次结算。"""
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
-        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
+    def _get_violation_deduction_cost(
+            self,
+            model_name: str,
+            resolution: Optional[str] = None,
+            image_bytes_list: Optional[List[bytes]] = None,
+    ) -> int:
+        """违规失败按实际调用模型的扣次档位结算（含超限参考图阶梯额外扣次）。"""
+        tier = self._get_resolution_deduction_tier(model_name, resolution, image_bytes_list)
+        return self._get_tiered_deduction_cost(model_name, tier) + self._get_extra_reference_image_cost(
+            model_name,
+            image_bytes_list,
+        )
 
     def _get_failure_deduction_status_codes(self) -> set[int]:
         raw_codes = self.conf.get("failure_deduction_status_codes", [400])
@@ -4342,7 +4547,23 @@ class FigurineProPlugin(Star):
                 f"🎨 收到{mode_prefix}{action_type}请求{batch_suffix}，正在生成 [{display_label}]...\n"
                 f"端点: {endpoint_display}"
             )
-        
+
+        # 超限参考图阶梯扣次提示（按首个候选模型估算；实际按各批次命中的模型结算）
+        extra_cost_preview = self._get_extra_reference_image_cost(
+            initial_actual_model, images_to_process
+        )
+        if extra_cost_preview > 0:
+            global_limit_preview = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
+            params_preview = self._get_model_parameter_map().get((initial_actual_model or "").strip())
+            soft_preview = min(
+                _normalize_nonnegative_int((params_preview or {}).get("reference_image_limit", 0)),
+                global_limit_preview,
+            )
+            excess_preview = max(0, min(len(images_to_process), global_limit_preview) - soft_preview)
+            info_msg += (
+                f"\n🎨 检测到 {excess_preview} 张参考图超出软限，本次每批次将额外扣除 {extra_cost_preview} 次。"
+            )
+
         yield self._reply_plain_result(event, info_msg)
 
         batch_semaphore = asyncio.Semaphore(max_batch_concurrency)
@@ -4406,7 +4627,11 @@ class FigurineProPlugin(Star):
             deduction_amount = (
                 invocation_cost
                 if isinstance(res, bytes)
-                else self._get_violation_deduction_cost(actual_model)
+                else self._get_violation_deduction_cost(
+                    actual_model,
+                    requested_resolution,
+                    images_to_process,
+                )
             )
             should_send_content_policy_warning = self._should_send_content_policy_warning(
                 http_status,

@@ -1,7 +1,7 @@
 {
     "extra_prefix": {
         "description": "【基础】自定义提示词前缀",
-        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图；还支持 `#bnn 预设名` 或 `#bnn 预设名%追加内容` 调用【预设】提示词列表中的自定义预设。可添加多个入口前缀。",
+        "hint": "自定义 Prompt 入口命令列表。默认 bnn，可用 `#bnn 一只小猫` 文生图，也可携带/引用图片后用 `#bnn 改成赛博朋克风格` 图生图；还支持 `#bnn 预设名` 或 `#bnn 预设名%追加内容` 调用【预设】提示词列表中的自定义预设。可添加多个入口前缀，但不得与文生图、模型管理、预设管理和统计等插件专用命令冲突。",
         "type": "template_list",
         "default": [
             {
@@ -82,13 +82,13 @@
     "model_parameter_list": {
         "description": "【通用】模型参数设置",
         "type": "template_list",
-        "hint": "按模型设置参考图数量、扣除次数、2K/4K扣除次数、违规失败扣次、最大输出/思考 Token、GPT、Gemini、Grok 和 Seedream 图片参数。对应参数开关关闭时，其下方专属参数不会发送到上游；未配置模型时默认每次扣除 1 次。",
+        "hint": "按模型设置参考图数量、扣除次数、2K/4K扣除次数、违规失败扣次、最大输出/思考 Token 和单一厂商参数模式。参数模式只能选择无厂商参数、GPT、Gemini、Grok 或 Seedream 之一；切换模式会保留其他厂商已填写的值，但请求只发送当前模式的参数。热备时，实际模型存在参数条目则整项覆盖源模型；只有实际模型完全没有条目时才继承源模型。未配置模型时默认每次扣除 1 次。",
         "default": [],
         "templates": {
             "model_parameters": {
                 "name": "模型参数设置",
                 "item_label": "模型参数设置",
-                "hint": "模型名、参考图、扣次及 Token 始终生效；其余参数由对应开关控制。",
+                "hint": "模型名、参考图、扣次及 Token 始终生效；厂商字段由“参数模式”唯一决定，切换模式不会丢失已填写的其他厂商值。",
                 "items": {
                     "model": {
                         "label": "模型",
@@ -96,13 +96,26 @@
                         "default": "",
                         "hint": "填写 model_list、gemini_model_list 或端点模型列表中的模型名。"
                     },
+                    "parameter_mode": {
+                        "label": "参数模式",
+                        "type": "string",
+                        "options": [
+                            "none",
+                            "gpt",
+                            "gemini",
+                            "grok",
+                            "seedream"
+                        ],
+                        "default": "none",
+                        "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
+                    },
                     "reference_image_limit": {
                         "label": "参考图数量限制",
                         "type": "int",
                         "default": 0,
                         "min": 0,
                         "max": 14,
-                        "hint": "本模型单次请求最多传递的参考图数量。填 0（默认）时继承全局“最大图片数量”；填正数时按较小值截取。实际热备模型的设置优先，GPT/Gemini/Seedream 参数开关不影响本项。"
+                        "hint": "本模型单次请求最多传递的参考图数量。填 0（默认）时继承全局“最大图片数量”；填正数时按较小值截取。实际热备模型的整项设置优先，参数模式不影响本项。"
                     },
                     "extra_reference_image_quota": {
                         "label": "超限参考图阶梯额度",
@@ -118,7 +131,7 @@
                         "default": 1,
                         "min": 1,
                         "max": 100,
-                        "hint": "该模型每次生成扣除多少次，不受 GPT/Gemini 参数开关影响；批量生成还会乘以实际生成倍率。"
+                        "hint": "该模型每次生成扣除多少次，不受厂商参数模式影响；批量生成还会乘以实际生成倍率。"
                     },
                     "deduction_count_2k": {
                         "label": "2K扣除次数",
@@ -160,19 +173,19 @@
                         "label": "默认传递 size",
                         "type": "bool",
                         "default": false,
-                        "hint": "独立于 GPT/Gemini 参数设置。开启后，Images Generations / Edits 请求在未生成自适应 size 时传递“默认分辨率”（默认 size=auto）；关闭时不传递兜底 size。"
+                        "hint": "独立于厂商参数模式。开启后，Images Generations / Edits 请求在未生成自适应 size 时传递“默认分辨率”（默认 size=auto）；关闭时不传递兜底 size。"
                     },
                     "enable_gpt_parameters": {
                         "label": "GPT参数设置",
                         "type": "bool",
                         "default": false,
-                        "hint": "开启后才会发送下方质量、审核和分辨率相关的 Generic 图片参数；关闭时下方参数即使已填写也不生效。"
+                        "hint": "旧配置兼容字段。Web 配置页会按“参数模式=GPT”自动规范化为开启；其他模式下即使保留了下方值也不会发送。"
                     },
                     "omit_n_parameter": {
                         "label": "不传递 n 参数",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 GPT参数设置开启且模型走 Images Generations / Edits 路由时生效。开启后不向上游发送 n 参数；关闭时发送 n=1。不影响 *2 等批量生成行为。"
+                        "hint": "仅参数模式为 GPT 且模型走 Images Generations / Edits 路由时生效。开启后不向上游发送 n 参数；关闭时发送 n=1。不影响 *2 等批量生成行为。"
                     },
                     "quality": {
                         "label": "质量",
@@ -217,19 +230,19 @@
                         "label": "1K超限自动转2K",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 GPT参数设置和自适应比例开启时生效。有效分辨率为 1K 且初算 size 任一边超过 1024 时，改按 2K 重新计算 size，并按“2K 扣除次数”结算。与“强制限制分辨率”互斥；开启本项后会自动按关闭强制限制处理。"
+                        "hint": "仅参数模式为 GPT 且自适应比例开启时生效。有效分辨率为 1K 且初算 size 任一边超过 1024 时，改按 2K 重新计算 size，并按“2K 扣除次数”结算。与“强制限制分辨率”互斥；开启本项后会自动按关闭强制限制处理。"
                     },
                     "force_resolution_limit": {
                         "label": "强制限制分辨率",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 GPT参数设置开启时生效。开启后按当前分辨率强制限制输出 size 的最长边：1K 不超过 1024、2K 不超过 2048、4K 不超过 3840；宽高仍为 16 的倍数且总像素不少于 655360。原始比例无法同时满足时会增大短边，因此宽屏或竖屏的 1K 图片比例最多为 8:5。与“1K超限自动转2K”互斥，后者开启时本项自动失效。"
+                        "hint": "仅参数模式为 GPT 时生效。开启后按当前分辨率强制限制输出 size 的最长边：1K 不超过 1024、2K 不超过 2048、4K 不超过 3840；宽高仍为 16 的倍数且总像素不少于 655360。原始比例无法同时满足时会增大短边，因此宽屏或竖屏的 1K 图片比例最多为 8:5。与“1K超限自动转2K”互斥，后者开启时本项自动失效。"
                     },
                     "enable_gemini_parameters": {
                         "label": "Gemini参数设置",
                         "type": "bool",
                         "default": false,
-                        "hint": "开启后才会发送下方 Gemini 图片配置；关闭时下方设置即使已选择也不生效。"
+                        "hint": "旧配置兼容字段。Web 配置页会按“参数模式=Gemini”自动规范化为开启；其他模式下即使保留了下方值也不会发送。"
                     },
                     "gemini_resolution": {
                         "label": "Gemini分辨率",
@@ -276,7 +289,7 @@
                         "label": "Grok参数设置",
                         "type": "bool",
                         "default": false,
-                        "hint": "开启后，模型走 Images Generations 或 Images Edits 路由时才会发送下方 Grok 分辨率和比例参数。请按实际 Grok 兼容上游支持情况配置。"
+                        "hint": "旧配置兼容字段。Web 配置页会按“参数模式=Grok”自动规范化为开启；该模式且模型走 Images Generations 或 Images Edits 路由时才会发送下方参数。请按实际 Grok 兼容上游支持情况配置。"
                     },
                     "grok_resolution": {
                         "label": "Grok分辨率",
@@ -298,7 +311,7 @@
                         "label": "Seedream参数设置",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅模型走 Images Generations 路由时生效。开启后按 Seedream JSON 格式发送下方参数，并省略 Generic 的 n、quality、moderation 和 images 多图字段。带图时请将模型加入 Images Generations；即使也配置了 Edits，Seedream 会优先走 Generations。"
+                        "hint": "旧配置兼容字段。Web 配置页会按“参数模式=Seedream”自动规范化为开启；该模式且模型走 Images Generations 路由时按 Seedream JSON 格式发送下方参数，并省略 Generic 的 n、quality、moderation 和 images 多图字段。带图时请将模型加入 Images Generations；即使也配置了 Edits，Seedream 会优先走 Generations。"
                     },
                     "seedream_web_search": {
                         "label": "Seedream联网搜索",
@@ -371,6 +384,12 @@
                         "default": true,
                         "hint": "仅 Seedream参数设置和“Seedream传递详细分辨率”均开启时参与固定尺寸表筛选。默认开启：官方固定尺寸表中宽或高任一边超过 2000 px 的候选档位会被排除，并向下选择同一比例的合法档位。关闭后仅按“Seedream像素数上限 (K)”筛选。"
                     },
+                    "seedream_side_over_2000_auto_2k": {
+                        "label": "边长超2000自动升2K",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "仅 Seedream参数设置和“Seedream传递详细分辨率”均开启且有比例来源（命令 =宽:高 或首张参考图）时生效。默认开启：所选档位尺寸任一边超过 2000 px 时不再向下降档，直接改发该比例的 2K 档官方尺寸（如 21:9 发 3136x1344），并自动按 2K 档扣次计费；若“Seedream像素数上限 (K)”连 2K 档都容纳不下，则保持原降档逻辑（像素数上限优先）。关闭后维持原行为（排除超限档位，必要时回退 1K）。"
+                    },
                     "seedream_optimize_prompt_mode": {
                         "label": "Seedream提示词优化模式",
                         "type": "string",
@@ -428,7 +447,7 @@
     "generic_api_keys": {
         "description": "【Generic】API Key 池",
         "type": "list",
-        "hint": "Generic/OpenAI兼容接口使用的 Key 列表。API地址填写服务根地址且模型走 Gemini 路由时，Gemini Key 池为空会自动复用本池。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时 Generic 路由无法生成。请在后台配置 Key 列表。",
+        "hint": "共享 API Key 列表，Generic/OpenAI 兼容接口与 Gemini 兼容请求都使用本池。插件每次请求会按顺序轮询取用，多个 Key 可分摊额度和限速；留空时无法生成。请在后台配置 Key 列表。旧 Gemini Key 池仅作历史配置兼容兜底。",
         "items": {
             "type": "string",
             "description": "Generic API Key，通常形如 sk-..."
@@ -697,7 +716,7 @@
     "preset_list_command": {
         "description": "【基础】提示词列表触发指令",
         "type": "string",
-        "hint": "自定义预设列表/提示词列表的触发指令。默认 手办化列表；修改后仅配置的命令可触发，不保留旧命令兼容。",
+        "hint": "自定义预设列表/提示词列表的触发指令。默认 手办化列表；修改后仅配置的命令可触发，不保留旧命令兼容。不得与内置、专用、帮助菜单或自定义触发词重名。",
         "default": "手办化列表"
     },
     "preset_list_template": {
@@ -808,7 +827,7 @@
     "help_command": {
         "description": "【帮助】帮助菜单命令",
         "type": "string",
-        "hint": "触发帮助菜单的命令，默认手办化帮助。不需要填写 #，且仅此命令可触发帮助菜单；lmh 和 lm帮助 不再保留。",
+        "hint": "触发帮助菜单的命令，默认手办化帮助。不需要填写 #，且仅此命令可触发帮助菜单；lmh 和 lm帮助 不再保留。不得与内置、专用、提示词列表或自定义触发词重名。",
         "default": "手办化帮助"
     },
     "help_text": {
@@ -947,14 +966,111 @@
     },
     "prompt_list": {
         "description": "【预设】提示词列表",
-        "hint": "自定义快捷预设。按列表对象填写指令和提示词；触发指令可直接作为命令使用，如 #贴纸化。也兼容旧格式 `触发词:提示词`，并可用 #手办化预设增加 管理。",
+        "hint": "配置全部快捷预设，包括默认预设。每项的指令和提示词都可在 WebUI 中改名、编辑或删除；指令可直接使用，如 #贴纸化。默认预设保留隐藏的历史别名，仅用于兼容旧版配置。不得使用文生图、模型管理、预设管理、统计等插件专用命令，也不得与自定义触发词、帮助命令、列表命令或其他预设重名。",
         "type": "template_list",
-        "default": [],
+        "default": [
+            {
+                "__template_key": "preset",
+                "command": "手办化",
+                "prompt": "Your task is to create a photorealistic, masterpiece-quality image of a 1/7 scale commercialized figurine based on the user's character. The final image must be in a realistic style and environment.\n\n**Crucial Instruction on Face & Likeness:** The figurine's face is the most critical element. It must be a perfect, high-fidelity 3D translation of the character from the source image. The sculpt must be sharp, clean, and intricately detailed, accurately capturing the original artwork's facial structure, eye style, expression, and hair. The final result must be immediately recognizable as the same character, elevated to a premium physical product standard. Do NOT generate a generic or abstract face.\n\n**Scene Composition (Strictly follow these details):**\n1. **Figurine & Base:** Place the figure on a computer desk. It must stand on a simple, circular, transparent acrylic base WITHOUT any text or markings.\n2. **Computer Monitor:** In the background, a computer monitor must display 3D modeling software (like ZBrush or Blender) with the digital sculpt of the very same figurine visible on the screen.\n3. **Artwork Display:** Next to the computer screen, include a transparent acrylic board with a wooden base. This board holds a print of the original 2D artwork that the figurine is based on.\n4. **Environment:** The overall setting is a desk, with elements like a keyboard to enhance realism. The lighting should be natural and well-lit, as if in a room.",
+                "legacy_alias": "figurine_1"
+            },
+            {
+                "__template_key": "preset",
+                "command": "手办化2",
+                "prompt": "Use the nano-banana model to create a 1/7 scale commercialized figure of thecharacter in the illustration, in a realistic styie and environment.Place the figure on a computer desk, using a circular transparent acrylic basewithout any text.On the computer screen, display the ZBrush modeling process of the figure.Next to the computer screen, place a BANDAl-style toy packaging box printedwith the original artwork.",
+                "legacy_alias": "figurine_2"
+            },
+            {
+                "__template_key": "preset",
+                "command": "手办化3",
+                "prompt": "Your primary mission is to accurately convert the subject from the user's photo into a photorealistic, masterpiece quality, 1/7 scale PVC figurine, presented in its commercial packaging.\n\n**Crucial First Step: Analyze the image to identify the subject's key attributes (e.g., human male, human female, animal, specific creature) and defining features (hair style, clothing, expression). The generated figurine must strictly adhere to these identified attributes.** This is a mandatory instruction to avoid generating a generic female figure.\n\n**Top Priority - Character Likeness:** The figurine's face MUST maintain a strong likeness to the original character. Your task is to translate the 2D facial features into a 3D sculpt, preserving the identity, expression, and core characteristics. If the source is blurry, interpret the features to create a sharp, well-defined version that is clearly recognizable as the same character.\n\n**Scene Details:**\n1. **Figurine:** The figure version of the photo I gave you, with a clear representation of PVC material, placed on a round plastic base.\n2. **Packaging:** Behind the figure, there should be a partially transparent plastic and paper box, with the character from the photo printed on it.\n3. **Environment:** The entire scene should be in an indoor setting with good lighting.",
+                "legacy_alias": "figurine_3"
+            },
+            {
+                "__template_key": "preset",
+                "command": "手办化4",
+                "prompt": "Please accurately transform the subject in this photo into a realistic, masterpiece-worthy 1/7 scale PVC figurine. This figurine must possess 3D dimensionality, and the PVC texture must be clearly represented. The figurine is placed in a figurine display cabinet made of multi-layered glass; appropriate space should be left between the top of the figurine and the upper shelf, and the figurine must be paired with a transparent base. The indoor scene must be visible through the glass. Different figurines can be placed on other shelves, but they should exhibit a natural depth of field and blurred effect to further enhance the sense of spatial depth and highlight the main figurine. The scene requires a bright main light source, and the display cabinet should be embedded with dim LED strip lights; the overall light and reflections must blend naturally with the scene. The frame angle does not need to be fixed in a specific orientation.\nDetail Specifications: Every part of the figurine must be 3D dimensional, and flat or two-dimensional effects are prohibited; under no circumstances shall contour lines or outlines appear; when repairing missing parts of the figurine, no low-quality content shall appear; if repairing a human figure, it is necessary to ensure normal limb shape, coordinated movements, and reasonable proportions of all parts; if the original photo is not a full-body shot, try to supplement the figurine into a full-body form as much as possible; the expression, movements, and angle of the human figurine must be completely consistent with the original photo, but it must be 3D dimensional; the head of the human figurine must not be too large, the legs must not be too short, and the overall figure must not look short; for chibi cartoon subjects, their original proportions shall be retained, but they must be 3D dimensional; if the subject is an animal, its fur should be simplified to make it more like a figurine product; attention must be paid to following the perspective principle of objects appearing larger when closer and smaller when farther away.",
+                "legacy_alias": "figurine_4"
+            },
+            {
+                "__template_key": "preset",
+                "command": "手办化5",
+                "prompt": "Realistic PVC figure based on the game screenshot character, exact pose replication highly detailed textures PVC material with subtle sheen and smooth paint finish, placed on an indoor wooden computer desk (with subtle desk items like a figure box/mouse), illuminated by soft indoor light (mix of desk lamp and natural window light) for realistic shadows and highlights, macro photography style,high resolution,sharp focus on the figure,shallow depth of field (desk background slightly blurred but visible), no stylization,true-to-reference color and design, 1:1scale.",
+                "legacy_alias": "figurine_5"
+            },
+            {
+                "__template_key": "preset",
+                "command": "手办化6",
+                "prompt": "Create a premium, collectible 1/7 scale standalone figurine based on the image, meticulously replicating the character, made from smooth PVC and ABS plastic with a professional matte finish. It stands on a minimalist transparent acrylic base. Next to it is its retail packaging box displaying the price and brand information, with the figure wrapped in plastic inside the slightly larger box. They are naturally arranged on a clean wooden table surrounded by reference books, with a bookshelf in the background and soft afternoon sunlight streaming through the window. Photo-realistic, DSLR effect, depth of field, bokeh background.",
+                "legacy_alias": "figurine_6"
+            },
+            {
+                "__template_key": "preset",
+                "command": "Q版化",
+                "prompt": "((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2)), ((huge head, tiny body)), ((smooth rounded limbs)), ((soft balloon-like hands and feet)), ((plump cheeks)), ((childlike big eyes)), ((simplified facial features)), ((smooth matte skin, no pores)), ((soft pastel color palette)), ((gentle ambient lighting, natural shadows)), ((same facial expression, same pose, same background scene)), ((seamless integration with original environment, correct perspective and scale)), ((no outline or thin soft outline)), ((high resolution, sharp focus, 8k, ultra-detailed)), avoid: realistic proportions, long limbs, sharp edges, harsh lighting, wrinkles, blemishes, thick black outlines, low resolution, blurry, extra limbs, distorted face",
+                "legacy_alias": "q_version"
+            },
+            {
+                "__template_key": "preset",
+                "command": "痛屋化",
+                "prompt": "[ABSOLUTE PRIORITY AND NON-NEGOTIABLE DIRECTIVE] Based on the provided reference image, generate a hyper-detailed photograph of a maximalist otaku shrine with a strict, uncompromising requirement: all character-related elements—including figures, posters, bedding patterns, and the PC wallpaper—must be a 90%+ faithful, pixel-perfect replication of the character in the reference image. Strictly maintain the precise facial features, hairstyle, outfit, and expression with zero artistic reinterpretation or stylistic variation. With this core rule, create the scene at a 16:9 aspect ratio. The room is densely packed from floor to ceiling with merchandise that is an exact reproduction of this source character. The entire space is bathed in a moody, immersive ambient glow dominated by the reference character's primary color scheme (e.g., deep purple), which is sharply contrasted by a focused, brighter white light from a monitor screen bar lamp, creating dramatic visual layers. The walls are a collage made of posters and prints that are direct, unaltered copies of the reference image itself; the glass cabinets are cluttered with high-poly figures that are perfect 1:1 replicas of the reference character model; and the ultrawide monitor clearly displays the original reference image as its wallpaper. The final image must be a photorealistic, lived-in sanctuary, defined by its obsessive and flawless fidelity to the source character.",
+                "legacy_alias": "pain_room_1"
+            },
+            {
+                "__template_key": "preset",
+                "command": "痛屋化2",
+                "prompt": "Transform the uploaded indoor photo into a Japanese-style ita-room with the following specific requirements: Walls: Generate multi-size posters/scrolls (A2/A3/banner mixed arrangement) in an orderly matrix; no watermarks or garbled text. Curtains and bedding: Fully replace with themed patterns while retaining fabric folds and textures; pillowcases and life-sized cushions use the same character design. Display: Add glass display cabinets and open shelves, densely displaying themed figurines, acrylic stands, badge boards, and boxed peripherals of the same theme; arrange them in groups by height and color system. Desk: Keep the original equipment and light and shadow, only replace the screensaver/wallpaper with themed images; organize the wires neatly. Lighting: Add soft RGB light strips (along the ceiling and desk edges), coordinated with the main color, avoiding overexposure and color overflow. Texture: Realistic materials for PVC figurines, spray-painted paper, acrylic, and cotton fabrics; natural glass reflections without ghosting. Consistency: The face, hair color, and clothing details of the character on all carriers (posters/cushions/stands/box art) must maintain the same character and art style. Constraints (negative): No brand logos, watermarks, typos, distorted-face, perspective errors, repeated textures, over-sharpening, or noise.",
+                "legacy_alias": "pain_room_2"
+            },
+            {
+                "__template_key": "preset",
+                "command": "痛车化",
+                "prompt": "A Xiaomi SU7 electric sedan with a professional 'itasha' wrap, parked on a rain-slicked, neon-lit city street at dusk. Accurately depict the Xiaomi SU7 body shape, grille-less front fascia, slim headlights, taillights, wheel design, and logo placements. The entire car is covered in a vibrant, high-resolution decal featuring multiple dynamic poses and expressions of ONLY the provided anime character. The glossy finish reflects colorful city lights, making the character artwork pop.Seamless full-body wrap integrating hood, doors, and rear quarter panels. Dynamic three-quarter front view showcasing the hood and side artwork.",
+                "legacy_alias": "pain_car"
+            },
+            {
+                "__template_key": "preset",
+                "command": "cos化",
+                "prompt": "Generate a highly detailed photo of a real-life girl cosplaying this illustration, at Comiket. Exactly replicate the same pose, body posture, hand gestures, facial expression, and camera framing as in the original illustration. Keep the same angle, perspective, and composition, without any deviation.",
+                "legacy_alias": "cos"
+            },
+            {
+                "__template_key": "preset",
+                "command": "cos自拍",
+                "prompt": "Generate a first-person perspective (POV) snapshot of a cosplayer in a cluttered bedroom. The cosplayer's hairstyle and anime costume must exactly match the subject in the reference image. She holds a phone in front of her face with both hands, completely covering her face. The phone screen is the focal point of the image, displaying the uploaded picture. The background is a room filled with posters on the walls and a slightly messy bed. The image should have a casual, informal snapshot quality with a slightly low-resolution and grainy texture, lit by natural indoor lighting.",
+                "legacy_alias": "cos_selfie"
+            },
+            {
+                "__template_key": "preset",
+                "command": "孤独的我",
+                "prompt": "Generate a hyper-realistic photograph with RAW photo quality, captured by a top-tier camera. The image must exhibit realistic skin textures, rich lighting layers, and a natural depth of field. Absolutely no anime, cartoon, CG, or painted elements are allowed—the result must be a 100% authentic photographic representation. The scene is set in a restaurant, captured from a first-person perspective. I am sitting alone, holding chopsticks in one hand and a phone in the other, displaying a photo of a beautiful cosplayer. In the background, the same cosplayer (dressed as the anime character) is dining with her boyfriend, feeding him a bite of food. The composition should evoke a sense of loneliness and contrast between the observer and the observed.",
+                "legacy_alias": "clown"
+            },
+            {
+                "__template_key": "preset",
+                "command": "第三视角",
+                "prompt": "A scene in a bright, modern McDonald’s or KFC restaurant at night, consistent with the visual style of the provided original image (no AI-generated imagery). In front of you (the viewer), there are foods like a hamburger and a small serving of French fries (with a visibly small portion) on the table, along with a crumpled used tissue, a few food crumbs (adding a sense of realism), and an Android phone (with a character displayed on the screen)—you are holding a hamburger or a French fry in your hand. At a very nearby separate table (not a shared table)—so close that it’s within easy sight—two Chinese people are sitting and engaging in intimate interactions (e.g., gentle eye contact, leaning slightly towards each other, or one resting a hand lightly on the other’s arm). One of them is a coser dressed exactly as the character on your Android phone, with the coser’s gender strictly corresponding to the character’s gender (male coser remains male, female coser remains female, no gender reversal) and matching that of the character in the provided original image; the other is a man. On their table, there is a two-person set meal, and both figures are slightly blurred (not overly so). The overall atmosphere blends a relaxed dining vibe with character-related elements, featuring natural lighting, and adheres to the visual style of the original image.",
+                "legacy_alias": "view_3"
+            },
+            {
+                "__template_key": "preset",
+                "command": "鬼图",
+                "prompt": "Convert the Input Image into a Convincing, Found-Footage Style Cryptid Sighting Photograph 1. The image should depict a [insert creature name or description - e.g., slender, pale humanoid; multi-limbed, insect-like entity; shadowy, canine-like beast], and the creature’s appearance must be highly similar to that in the original image. The creature should be spotted in a hyperrealistic and eerily desolate location, such as [e.g., an abandoned industrial complex at night, a remote, snow-covered mountain pass, the murky depths of a forgotten urban canal, a desolate rural road in the dead of winter].​2. The shot must appear accidental, amateurish, and raw, as if captured spontaneously by a low-fidelity device like a [e.g., degraded VHS camcorder, grainy security camera, old disposable camera with flash, an infrared trail cam that's seen better days].​3. To maximize the unsettling authenticity, the image quality should be significantly imperfect: featuring extreme [e.g., heavy digital noise, pronounced film grain, severe motion blur making details indistinct, a strong, disorienting lens flare, being significantly out of focus, or displaying visible static and tracking lines]. The creature should be partially obscured and difficult to clearly discern, perhaps hidden by [e.g., dense, skeletal tree branches; thick, unnatural fog; distorted reflections on murky water; the jagged silhouette of derelict machinery; or existing within deep, oppressive shadows].​4. The lighting is critically dim and unsettling, possibly at [e.g., the darkest hour before dawn, a moonless midnight, or starkly illuminated by a harsh, direct, and slightly malfunctioning camera flash that overexposes parts of the scene].5. The overall feeling should evoke profound unease, dread, and a sense of witnessing something truly inexplicable and horrifying. Emphasize an atmosphere of isolation, decay, and the uncanny.​6. Keywords: cryptozoology, urban legend, paranormal, faked sighting, unsettling, horror, cryptid, grotesque, eerie, found footage, degraded quality, creature feature.",
+                "legacy_alias": "ghost"
+            },
+            {
+                "__template_key": "preset",
+                "command": "第一视角",
+                "prompt": "At the venue of Japan's Comic Market Doujinshi Sales Event commonly known as Comiket a real Chinese boy or girl of the same gender as the character in the original image is sitting directly opposite you wearing a costume consistent with the one in the original image. A double meal set including hamburgers and French fries is placed on your table with crumpled tissues and some food scraps scattered beside it creating a strong sense of realism. Your Android phone is casually laid on the table and its screen displays an unedited original image of the character. The person is engaging in intimate interaction with you gazing gently into your eyes leaning slightly towards you and placing one hand softly on your arm.You are holding a hamburger or a few French fries.",
+                "legacy_alias": "view_1"
+            }
+        ],
         "templates": {
             "preset": {
                 "name": "预设条目",
                 "item_label": "提示词预设",
-                "hint": "配置一个快捷触发指令和对应提示词。",
+                "hint": "配置一个快捷预设。默认预设和自定义预设都可编辑、改名或删除。",
                 "items": {
                     "command": {
                         "label": "指令",
@@ -967,6 +1083,12 @@
                         "type": "text",
                         "default": "",
                         "hint": "该快捷预设实际发送给模型的提示词。"
+                    },
+                    "legacy_alias": {
+                        "label": "历史兼容别名",
+                        "type": "string",
+                        "default": "",
+                        "invisible": true
                     }
                 }
             }

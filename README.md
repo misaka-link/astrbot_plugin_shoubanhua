@@ -37,16 +37,14 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | 配置项 | 说明 |
 | --- | --- |
 | `generic_api_url` | API 服务地址。直接填写根地址即可，例如 `http://10.10.10.99:3000` 或 `http://10.10.10.99:3000/`；插件会按模型路由自动选择 Gemini 或 OpenAI 格式并拼接路径，也兼容完整 OpenAI 端点 URL |
-| `generic_api_keys` | Generic 模式 Key 池（可多条轮询）。当 `generic_api_url` 为服务根地址且 Gemini Key 池为空时，Gemini 路由自动复用本池 |
+| `generic_api_keys` | 共享 Key 池（可多条轮询），Generic/OpenAI 兼容接口与 Gemini 兼容请求都使用本池；旧 Gemini Key 池仅在本池为空时用于历史配置兼容 |
 | `request_user_agent` | 发送 Generic/Gemini 生图 API 请求时使用的 User-Agent，默认 `Codex Desktop/0.145.0-alpha.30 (Ubuntu 22.4.0; x86_64) xterm-256color (Codex Desktop; 26.715.72359)`；留空使用 HTTP 客户端默认值，不影响图片下载请求 |
-| `gemini_api_url` | 旧版兼容配置。仅当 `generic_api_url` 填写完整 OpenAI 端点 URL 时，Gemini 路由才回退使用它；默认 https://generativelanguage.googleapis.com |
-| `gemini_api_keys` | Gemini 路由 Key 池 |
 | `max_output_tokens` | Gemini 和 Generic Chat Completions 的最大输出/思考 Token 默认值；`0`（默认）不发送限制参数，即不限制；模型级正数可覆盖 |
 | `model_list` | 可用模型 ID 列表，默认包含 nano-banana 等 |
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
-| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、扣次、2K/4K扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；GPT/Gemini/Grok/Seedream 图片参数必须开启各自开关后才会发送 |
+| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、扣次、2K/4K扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；`parameter_mode` 选择唯一生效的 GPT/Gemini/Grok/Seedream 厂商参数，或 `none` 禁用厂商参数 |
 | `model_mapping_list` | 模型热备映射列表；选择源模型后按映射项的优先权重从高到低请求实际模型，同权重按列表顺序 |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `chat_completions_system_prompt_enabled` | 是否在 `/v1/chat/completions` 请求中发送 system 系统提示词，默认开启 |
@@ -89,9 +87,9 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `enable_checkin` | 是否启用每日签到获取次数 |
 | `checkin_fixed_reward` | 签到固定奖励（未开启随机时） |
 | `enable_random_checkin` / `checkin_random_reward_max` | 签到随机奖励开关与最大值 |
-| `prompt_list` | 预设提示词列表，每项包含 `指令` / `提示词`；旧 `触发词:提示词` 会自动迁移 |
+| `prompt_list` | 预设提示词列表，每项包含 `指令` / `提示词`；默认预设也来自配置，可在 WebUI 改名、修改或删除。旧 `触发词:提示词` 与历史 `prompts` 会自动迁移 |
 
-> 路径说明：`generic_api_url` 填写服务根地址（如 `http://10.10.10.99:3000` 或 `http://10.10.10.99:3000/`）时，命中 `gemini_model_list` 的模型自动请求 `/v1beta/models/{model}:generateContent`，并优先使用 Gemini Key 池，空时复用 Generic Key 池；其余模型按端点模型列表拼接 OpenAI `/v1/chat/completions`、`/v1/images/generations` 或 `/v1/images/edits`。未匹配的模型默认走 Chat Completions。同一模型同时配置在 `images_generations_model_list` 和 `images_edits_model_list` 时，文生图走 `/v1/images/generations`，图生图走 `/v1/images/edits`。填写完整 OpenAI 端点 URL 时，Generic 行为保持兼容，Gemini 继续使用旧版独立地址。
+> 路径说明：`generic_api_url` 是所有路由的共享服务地址。它可填写服务根地址、`/v1`，或完整 OpenAI 端点 URL；命中 `gemini_model_list` 的模型会先规范化为服务根，再自动请求 `/v1beta/models/{model}:generateContent`。其余模型按端点模型列表使用 OpenAI `/v1/chat/completions`、`/v1/images/generations` 或 `/v1/images/edits`。未匹配的模型默认走 Chat Completions。同一模型同时配置在 `images_generations_model_list` 和 `images_edits_model_list` 时，文生图走 `/v1/images/generations`，图生图走 `/v1/images/edits`。新配置不再需要 Gemini 专属地址或 Key。
 
 > `/v1/chat/completions` 的 system 系统提示词可通过 `chat_completions_system_prompt_enabled` 开关控制，并在 `chat_completions_system_prompt` 中自定义内容；这两个配置仅影响 Chat Completions 端点，不影响 Gemini、Images Generations 或 Images Edits 请求。
 
@@ -100,6 +98,20 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 > 每次提交生图请求前，插件日志会输出请求方式、最终 URL、路由、请求头和全部非图片生图参数。API Key 会显示为 `<redacted>`，图片字段仅显示 `<image omitted>`，不会输出图片内容、Base64 或图片摘要。Images Edits 的其他 multipart 字段会逐项展开记录。
 
 > 使用 SOCKS 代理时，需要在 AstrBot 的 Python 环境中先执行 `pip install aiohttp_socks`。
+
+### Web 用量与模型路由管理
+
+插件提供 `pages/usage-dashboard/` 管理页面，AstrBot 发现插件页面后可在插件 Web 页面中打开“用量与模型路由”。页面包含概览、用户、群组、配置和独立预设提示词视图：可查看成功输出、实际扣次、失败扣次、模型/端点分布、当前余额和最新 15 条账本；也可调整用户或群组额度，维护全部插件普通设置、敏感连接配置、模型目录与路由、自定义触发词、指令模型绑定、热备、模型提示词模板和按端点自动筛选的模型参数。
+
+页面访问由 AstrBot WebUI 的登录会话控制，插件不再维护额外的 `web_dashboard_admin_usernames` 用户名白名单。网页调整额度时，当前 AstrBot 后台用户名仍会作为账本操作人记录。
+
+用量账本保存到插件数据目录的 `usage_history.json`，同时继续同步原有 `user_counts.json` 与 `group_counts.json`，因此降级到旧插件版本时仍会保留最新余额。账本更新采用“写入临时文件后原子替换”的方式，不创建或写入 SQLite/WAL 文件。首次升级时，如果尚不存在 `usage_history.json` 但检测到旧 `usage_history.sqlite3`，插件会只读导入余额、身份快照和全部账本事件；当前两份次数 JSON 的余额优先，SQLite 中独有的主体会补入。导入成功后旧 SQLite 文件会保留为备份，不会自动删除；确认 `usage_history.json` 完整后可由管理员自行归档或删除。旧版 `daily_stats.json` 只能迁移为“旧版日汇总”，不包含真实请求时间、模型、路由、扣次或单次请求详情，也不会伪造这些数据。新版本启用后会记录聊天命令、LLM 生图工具、热备中间失败、签到和管理员调整的账本事件。
+
+账本只记录用于审计和统计的时间、来源、用户/群组 ID、身份快照、模型、路由、端点、结果、HTTP 状态、输出数、实际扣次和余额变动。不会保存提示词、图片、API Key、请求头或上游原始响应。QQ 数字 ID 默认使用官方 QQ 头像地址；昵称和群名称从后续事件中尽力更新，缺失时页面分别显示 `QQ <号码>` 与 `群 <群号>`。账本无法初始化或写入失败时，正常生成会继续使用原有 JSON 次数逻辑，仪表盘接口则返回统计不可用。
+
+插件日志会额外写入数据目录 `logs/figurine_pro.log`，按 5 MiB 轮转并保留最近 5 个备份，同时仍发送至 AstrBot 原有日志管道。日志可能包含消息内容、用户或群组标识、以及已脱敏的请求信息，应按敏感运行日志限制访问权限。
+
+配置页覆盖全部非敏感插件设置、模型路由、触发词、绑定、热备、模板和模型参数；`prompt_list` 在独立的预设提示词页面保存。控制台加载时会兼容旧的热备对象、列表和 `源模型:映射模型` 字符串格式，保存时统一转换为当前 schema 列表，不会再因页面显示为空而清空热备。API Key、认证代理，以及带用户认证或敏感查询参数的共享服务地址仅通过写入式敏感配置面板管理，页面不会读取或回显其明文；认证代理和认证服务地址可在该面板首次保存、替换或清除，无认证代理和无认证服务地址仍在普通设置中编辑。普通配置与敏感配置共享配置版本；预设使用独立的预设内容版本。直接编辑配置文件并重载后，陈旧的对应页面保存会被拒绝，避免覆盖新配置。代理、超时、下载限制/重试，以及 LLM 工具开关和模型白名单会标注为重载后生效；其他配置在保存后供后续生成请求直接读取。
 
 ### LLM 生图工具
 
@@ -147,26 +159,27 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 任何未成功生成图片的结果，包括上游 HTTP 错误、超时、响应无图片或图片下载失败，都会继续切换到下一条热备模型；但上游判定内容违规/安全拦截，或 HTTP 状态码命中 `failure_deduction_status_codes` 时会立即停止热备，并单独发送违规内容警告，不再请求后续模型。全部模型失败后才向用户返回最后一次失败结果；中间失败不会单独扣次。
 
-每次尝试均以实际调用模型为准：其 `model_prompt_template_list`、Gemini/Generic 路由、端点列表和 `model_parameter_list` 都会重新计算。因此映射模型在“模型参数设置”中配置了扣次、Token、GPT、Gemini、Grok 或 Seedream 图片参数时，切换后严格遵循映射模型自身的设置。成功、最终失败和失败扣次也按照实际调用模型结算；配额预检会按所有候选模型中的最高单次扣次检查，避免备用模型扣次更高时超额。
+每次尝试保留源模型和实际调用模型两个身份：提示词模板、上游 URL、Gemini URL 中的模型名，以及 Generic JSON 或 multipart 的 `model` 字段始终使用实际调用模型。实际模型在 Gemini、Chat Completions、Images Generations 或 Images Edits 任一路由列表中有显式配置时，完整采用它自己的路由；实际模型没有任何显式路由时，才继承源模型的显式路由；两者均未配置时使用 Generic Chat Completions。路由继承只决定端点，绝不把实际请求模型 ID 替换为源模型 ID。
 
-端点路由列表同样必须填写实际调用的映射模型名：例如 `model-1 -> model-2` 且 `model-2` 应走 Images Edits 时，`images_edits_model_list` 必须填写 `model-2`，不能只填写 `model-1`。Images Generations、Chat Completions 与 Gemini 路由列表也遵循同一规则；只有未配置映射项的源模型才需要自行配置实际路由。
+模型参数遵循同样的整项规则：实际模型存在 `model_parameter_list` 条目时，该条目完整覆盖源模型条目；只有实际模型完全没有条目时才继承源模型。目标条目中的 `false`、`0` 和 `parameter_mode=none` 都是明确设置，不会回退到源模型。成功、最终失败、违规扣次、参考图截断和账本路由/端点均按该候选模型实际使用的上下文结算；配额预检会按所有候选模型中的最高单次扣次检查，避免备用模型扣次更高时超额。
 
 ### 模型参数设置
 
-`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式。模型名、扣除次数、最大输出/思考 Token、默认分辨率和“默认传递 size”位于每项最上方，且不受下方 GPT/Gemini 参数开关影响。
+`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式。模型名、扣除次数、最大输出/思考 Token、默认分辨率和“默认传递 size”位于每项最上方，始终生效；每项通过唯一的 `parameter_mode` 选择无厂商参数、GPT、Gemini、Grok 或 Seedream。切换模式只改变本次请求允许发送的厂商字段，不会删除其他模式已填写的值。
 
 - `模型`：填写模型列表或端点模型列表中的模型名。
 - `参考图数量限制`：默认 `0`，继承全局 `max_images_count`；填写正数时，会按实际热备模型和全局设置的较小值截取参考图。普通命令和 LLM 图生图工具共用此规则。
 - `超限参考图阶梯额度`：默认 `0`。当 `参考图数量限制` 为正且本项也为正时启用：超出软限的参考图不再被截断，而是发送到全局 `max_images_count` 硬上限，并按阶梯额外扣次。每超出本项数量 = 1 个阶梯（向上取整），每阶梯固定额外扣除 **1 次**（与 `该模型扣除次数`、分辨率升级均无关）。例：限制 `2`、额度 `2` 时，传 `3/4` 张 = 多扣 `1` 次，`5/6` 张 = 多扣 `2` 次，`7` 张 = 多扣 `3` 次。批量生成时每批次都会叠加该额外扣次；命中违规或失败错误码时同样扣除。本项为 `0` 或 `参考图数量限制` 为 `0` 时不启用，维持原有截断行为。
-- `该模型扣除次数`：每次生成扣除多少次，默认 `1`；不受 GPT/Gemini 参数开关影响，批量生成还会乘以实际生成倍率。
-- `2K扣除次数`：默认 `0`。命中 2K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：参考图任一边长超过 `2000`（取所有参考图最大边长，读取失败跳过）、`自适应比例分辨率` 设置为 `2K`、命令使用 `x2`。填 `0` 时继承全局“2K 扣除次数”（`resolution_2k_cost`，默认 `2`）。超限参考图阶梯额外扣次仍独立叠加。
+- `该模型扣除次数`：每次生成扣除多少次，默认 `1`；不受厂商参数模式影响，批量生成还会乘以实际生成倍率。
+- `2K扣除次数`：默认 `0`。命中 2K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：参考图任一边长超过 `2000`（取所有参考图最大边长，读取失败跳过）、`自适应比例分辨率` 设置为 `2K`、命令使用 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率的自适应结果升到 2K。填 `0` 时继承全局“2K 扣除次数”（`resolution_2k_cost`，默认 `2`）。超限参考图阶梯额外扣次仍独立叠加。
 - `4K扣除次数`：默认 `0`。命中 4K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：`自适应比例分辨率` 设置为 `4K`、命令使用 `x4`。暂不按参考图边长检测。填 `0` 时继承全局“4K 扣除次数”（`resolution_4k_cost`，默认 `4`）。4K 优先于 2K；超限参考图阶梯额外扣次仍独立叠加。
 - `违规是否扣次数`：默认关闭。该模型发生内容安全/政策违规，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，是否按该模型实际命中的扣次档位（基础/2K/4K）扣次。模型单独设置优先于全局 `deduct_on_failure_status_codes`；未配置该模型参数项时才回退到全局开关。
-- `最大输出/思考 Token`：仅 Gemini 和 Generic Chat Completions 路由生效。大于 `0` 时覆盖全局 `max_output_tokens`；填 `0` 时继承全局设置。全局也为 `0`（默认）时不发送限制参数，即不限制。Gemini 使用 `maxOutputTokens`，Generic Chat Completions 使用 `max_tokens`；不受 GPT/Gemini 参数开关影响。
+- `最大输出/思考 Token`：仅 Gemini 和 Generic Chat Completions 路由生效。大于 `0` 时覆盖全局 `max_output_tokens`；填 `0` 时继承全局设置。全局也为 `0`（默认）时不发送限制参数，即不限制。Gemini 使用 `maxOutputTokens`，Generic Chat Completions 使用 `max_tokens`；不受厂商参数模式影响。
 - `默认分辨率`：独立设置，启用“默认传递 size”后，在自适应比例未启动或未生成有效尺寸时发送的 `size` 参数，默认 `auto`；可填写供应商支持的其他 `size` 值。
-- `默认传递 size`：独立设置，默认关闭。开启后，Images Generations / Edits 请求在未生成自适应尺寸时发送“默认分辨率”（默认 `size=auto`）；关闭时不传递兜底 `size`。不受 GPT/Gemini 参数开关影响。
-- `GPT参数设置`：默认关闭。只有开启后，下面的质量、审核、自适应比例、自适应比例分辨率和强制限制分辨率才会生效；关闭时即使已填写也不会发送这些参数。
-- `不传递 n 参数`：默认关闭。仅在开启“GPT参数设置”且模型走 Images Generations / Edits 路由时生效。开启后请求中不发送 `n`；关闭时保持发送 `n=1`。主要用于兼容无法正确解析 Images Edits multipart 表单 `n` 字段的上游接口；不影响插件的单次生成行为或 `*2` 等批量请求数。
+- `默认传递 size`：独立设置，默认关闭。开启后，Images Generations / Edits 请求在未生成自适应尺寸时发送“默认分辨率”（默认 `size=auto`）；关闭时不传递兜底 `size`。不受厂商参数模式影响。
+- `参数模式`：选择 `none`（无厂商参数）、`gpt`、`gemini`、`grok` 或 `seedream`。每个条目仅有一个生效模式，只有当前模式所属的厂商参数可发送到上游；`none` 不发送任何厂商参数。旧配置没有该字段时，会从旧开关按 `GPT > Gemini > Grok > Seedream` 的固定优先序推断，Web 配置页保存后会写成规范的单模式格式。
+- `GPT参数设置`：旧配置兼容字段。Web 页不再单独编辑该开关；选择 `参数模式=GPT` 时其等效开启。只有 GPT 模式下，下面的质量、审核、自适应比例、自适应比例分辨率和强制限制分辨率才会生效；切换到其他模式时已填写的值会保留但不会发送。
+- `不传递 n 参数`：默认关闭。仅在选择 GPT 模式且模型走 Images Generations / Edits 路由时生效。开启后请求中不发送 `n`；关闭时保持发送 `n=1`。主要用于兼容无法正确解析 Images Edits multipart 表单 `n` 字段的上游接口；不影响插件的单次生成行为或 `*2` 等批量请求数。
 - `质量`：可选 `low`、`medium`、`high`、`auto`，默认 `auto`。
 - `审核`：可选 `auto`、`low`。`auto` 为标准过滤；`low` 的过滤限制较少。
 - `自适应比例`：默认关闭。开启后，带图的 Images 请求会读取第一张图片宽高比并计算满足 Images API 约束的 `size` 参数。
@@ -174,14 +187,14 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `1K超限自动转2K`：默认关闭。开启后，当有效自适应分辨率为 `1K` 且初次计算出的 `size` 任一边超过 `1024` 时，插件会改按 `2K` 重新计算并提交 `size`；本次请求也按全局 `resolution_2k_cost` 结算。它与“强制限制分辨率”互斥；两项同时开启时，本项优先并自动按关闭强制限制处理。
 - `比例设置符号`：默认 `=`。命令中的 `=16:9` 或 `=16：9` 可临时覆盖参考图比例；比例参数会与 `x1/x2/x4`、批量倍率任意排序，例如 `#bnnx4*2=16:9`、`#bnn=16:9x4*2`。未传比例时继续使用参考图比例。
 - `强制限制分辨率`：默认关闭。开启后按供应商的最长边计费档位限制输出 `size`：`1K` 不超过 `1024`、`2K` 不超过 `2048`、`4K` 不超过 `3840`；宽高仍保持为 16 的倍数且总像素不少于 `655,360`。原始比例无法同时满足时会增大短边，1K 的宽屏或竖屏比例最多为 `8:5`。开启“1K超限自动转2K”时，本项自动失效。
-- `Gemini参数设置`：默认关闭。只有模型走 Gemini 路由且该开关开启时，下面的 Gemini 图片配置才会发送到上游。
+- `Gemini参数设置`：旧配置兼容字段。Web 页选择 `参数模式=Gemini` 时其等效开启；只有模型走 Gemini 路由且选择 Gemini 模式时，下面的 Gemini 图片配置才会发送到上游。
 - `Gemini分辨率`：可选 `auto`、`1K`、`2K`、`4K`，默认 `auto`。选择 `auto` 时不发送 `imageSize`，由上游使用默认值；选择 `1K`、`2K` 或 `4K` 时发送对应值。
 - `Gemini自适应比例`：默认关闭。开启后，带图请求会读取第一张图片比例，或使用命令 `=宽:高` 指定的比例，并按比例距离映射为 Gemini 官方 `ImageConfig.aspectRatio` 枚举中最接近的一项后发送。它只控制比例，不会修改 Gemini 分辨率；优先级高于“Gemini图片比例”。
 - `Gemini图片比例`：可选 `auto`、`1:1`、`1:4`、`4:1`、`1:8`、`8:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`，默认 `auto`。选择 `auto` 时不发送 `aspectRatio`，官方端点会在有参考图时依据参考图决定比例，无参考图时使用模型默认比例；选择其他值时发送对应比例。开启“Gemini自适应比例”且读取到首图时，本项会被自适应结果覆盖。不同 Gemini 模型支持的比例可能不同。
-- `Grok参数设置`：默认关闭，仅适用于 Generic 的 Images Generations / Edits 路由。开启后请求会发送 Grok 格式的 `resolution` 和 `aspect_ratio`，不复用 Generic/GPT 的 `size` 字段；实际网关必须支持这两个字段。
-- `Grok分辨率`：可选 `1k`、`2k`，默认 `2k`，开启 Grok 参数设置后发送为 `resolution`。
+- `Grok参数设置`：旧配置兼容字段。Web 页选择 `参数模式=Grok` 时其等效开启，仅适用于 Generic 的 Images Generations / Edits 路由。Grok 模式会发送 Grok 格式的 `resolution` 和 `aspect_ratio`，不复用 Generic/GPT 的 `size` 字段；实际网关必须支持这两个字段。
+- `Grok分辨率`：可选 `1k`、`2k`，默认 `2k`，选择 Grok 模式后发送为 `resolution`。
 - `Grok自适应比例`：默认关闭。关闭时始终发送 `aspect_ratio=auto`；开启后命令 `=宽:高` 优先，否则读取第一张参考图，并在 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`、`3:2`、`2:3`、`2:1`、`1:2`、`19.5:9`、`9:19.5`、`20:9`、`9:20` 中选择最接近的比例。没有参考图、读取失败或无法确定比例时仍发送 `auto`。
-- `Seedream参数设置`：默认关闭，仅适用于 Generic 的 Images Generations 路由。启用后请求会按 Seedream JSON 参数发送，且不发送 Generic/GPT 的 `n`、`quality`、`moderation`。模型必须加入 `images_generations_model_list`；带参考图时即使同时在 `images_edits_model_list`，也优先走 generations JSON 端点。
+- `Seedream参数设置`：旧配置兼容字段。Web 页选择 `参数模式=Seedream` 时其等效开启，仅适用于 Generic 的 Images Generations 路由。Seedream 模式会按 Seedream JSON 参数发送，且不发送 Generic/GPT 的 `n`、`quality`、`moderation`。模型必须加入 `images_generations_model_list`；带参考图时即使同时在 `images_edits_model_list`，也优先走 generations JSON 端点。
 - `Seedream联网搜索`：默认关闭。开启后发送 `tools: [{"type":"web_search"}]`；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 - `Seedream传递输出格式`：默认关闭。关闭时不发送 `output_format`，用于兼容不支持该字段的网关；只有上游确认支持时才开启。
 - `Seedream输出格式`：可选 `png`、`jpeg`，默认 `png`。仅“Seedream参数设置”和“Seedream传递输出格式”都开启时，才发送为 `output_format`；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
@@ -192,6 +205,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `Seedream像素数上限 (K)`：默认 `0`，即不限制。仅“Seedream传递详细分辨率”开启时使用，按价格表以十进制 `1000` 像素为一 K 限制总像素。例如 `2360` 表示 `2,360,000 px`，且不会超过固定尺寸表所选档位的像素数。
 - `Seedream自适应比例`：默认关闭，保留命令 `=宽:高` 优先、首张参考图兜底及最近官方比例表映射的自适应配置。仅“Seedream传递详细分辨率”开启时，该自适应结果才用于传递 `size=宽x高`；关闭详细分辨率后仍传递“Seedream分辨率”的档位值。
 - `Seedream宽高均不超过2000`：默认开启，仅在“Seedream传递详细分辨率”开启后参与固定尺寸表筛选。官方候选尺寸中宽或高任一边超过 `2000 px` 都会被排除，并向下选择同一比例的合法档位；关闭后恢复为仅按“Seedream像素数上限 (K)”筛选。
+- `边长超2000自动升2K`：默认开启，仅“Seedream参数设置”和“Seedream传递详细分辨率”均开启且有比例来源（命令 `=宽:高` 或首张参考图）时生效。所选档位尺寸任一边超过 `2000 px` 时不再向下降档，直接改发该比例的 2K 档官方尺寸（如 21:9 在 1.5K/2K 档都会发 `3136x1344`），并自动按 2K 档扣次计费；“Seedream像素数上限 (K)”连 2K 档都容纳不下时保持原降档逻辑（像素数上限优先）。关闭后维持原行为（排除超限档位，必要时回退 1K）。
 - `Seedream提示词优化模式`：可选 `standard`、`fast`，默认 `standard`，发送为 `optimize_prompt_options.mode`。`fast` 更快但可能影响效果；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 
 Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig.imageConfig`：
@@ -211,9 +225,9 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；若开启“1K超限自动转2K”（即使强制限制仍被配置为开启，也会自动失效），会改按 2K 提交 `size=2048x1152`。单独开启“强制限制分辨率”后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
 
-当前模型开启“GPT参数设置”后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。开启“Grok参数设置”后，两个 Images 路由都会发送 `resolution`（默认 `2k`）和 `aspect_ratio`；关闭 Grok 自适应比例时固定发送 `auto`，开启后使用命令 `=宽:高` 或首张参考图映射出的最近 Grok 比例。Grok 不使用或替换 Generic 的 `size`。Seedream 参数不复用 Edits multipart：启用“Seedream参数设置”的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由“Gemini参数设置”独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；扣次档位由参考图边长、`自适应比例分辨率` 设置与命令 `x2/x4` 决定（见上方计费规则）。
+当前模型选择 GPT 模式后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。选择 Grok 模式后，两个 Images 路由都会发送 `resolution`（默认 `2k`）和 `aspect_ratio`；关闭 Grok 自适应比例时固定发送 `auto`，开启后使用命令 `=宽:高` 或首张参考图映射出的最近 Grok 比例。Grok 不使用或替换 Generic 的 `size`。Seedream 参数不复用 Edits multipart：选择 Seedream 模式的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且选择 GPT 模式并开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由 Gemini 模式独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；扣次档位由参考图边长、`自适应比例分辨率` 设置与命令 `x2/x4` 决定（见上方计费规则）。
 
-每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。命中 2K/4K 档位时，单次扣除次数改为该模型“2K/4K扣除次数”（填 `0` 时回退全局 `resolution_2k_cost` / `resolution_4k_cost`）；2K 档触发条件为参考图任一边长超过 `2000`、`自适应比例分辨率` 为 `2K` 或命令 `x2`，4K 档触发条件为 `自适应比例分辨率` 为 `4K` 或命令 `x4`，4K 优先于 2K。配额预检和最终成功/失败结算均使用同一规则。
+每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。命中 2K/4K 档位时，单次扣除次数改为该模型“2K/4K扣除次数”（填 `0` 时回退全局 `resolution_2k_cost` / `resolution_4k_cost`）；2K 档触发条件为参考图任一边长超过 `2000`、`自适应比例分辨率` 为 `2K`、命令 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率升级为 2K 尺寸；4K 档触发条件为 `自适应比例分辨率` 为 `4K` 或命令 `x4`，4K 优先于 2K。配额预检和最终成功/失败结算均使用同一规则。
 
 次数按每个请求的实际结果结算：生成成功正常扣次。上游判定内容违规或触发安全拦截时，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，均会单独发送 `content_policy_warning_message`。模型参数中的 `违规是否扣次数` 优先决定是否扣次；未配置该模型参数项时才使用 `deduct_on_failure_status_codes`（旧配置 `deduct_on_content_policy_violation` 仍兼容）。违规/错误码失败若扣次，按实际调用模型命中的扣次档位（基础/2K/4K）结算，与成功请求使用同一规则；关闭后仍会警告但不扣次。未命中错误码的普通失败不扣次，并继续模型热备切换。批量生成逐个结果结算。
 
@@ -239,28 +253,18 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 新增签到系统，文生图功能和自定义模型。
 
-### 本次更新
+### 本次更新 (v1.9.0)
 
-- 新增维护模式开关和可配置提示内容；开启后会拦截所有插件命令，不调用 API 或扣次。
-- 模型参数设置新增 GPT/Gemini 参数开关；模型名、模型扣次和最大输出/思考 Token 始终生效，其余参数须开启对应开关。Gemini 支持 `auto`、`1K`、`2K`、`4K` 分辨率。
-- Gemini 参数设置新增图片比例，可设为 `auto` 或官方 `ImageConfig` 支持的比例；图片大小和比例改按官方 `generationConfig.imageConfig` 请求结构提交，并支持按首图自适应比例。
-- 后台新增触发指令与模型绑定列表，配置项位于最上方。
-- 后台新增按模型配置的预设提示词列表，支持全大写 `ALL` 作为全模型兜底，具体模型模板优先；未命中模板时直接发送原始提示词。
-- 后台新增模型参数设置列表，支持为 Images Generations / Edits 模型指定质量与审核参数。
-- 后台新增模型热备映射列表；同一源模型可按优先权重配置多个备用模型，权重从高到低调用，同权重按列表顺序，失败后自动切换，且备用模型遵循自身的模型参数设置。
-- 模型参数设置新增自适应比例开关和 `1K/2K/4K` 默认分辨率；分辨率符号（默认 `x`）可用 `x1/x2/x4` 临时覆盖，并支持与批量倍率、比例任意排序组合。
-- 模型参数设置新增独立的“默认传递 size”开关，默认关闭；仅开启时才会在未生成自适应尺寸的场景提交默认 `size=auto`。
-- GPT 参数设置新增“1K超限自动转2K”开关：1K 自适应尺寸任一边超过 `1024` 时，改按 2K 计算并使用 `2K` 扣次。
-- 新增比例设置符号（默认 `=`），支持 `=16:9` / `=16：9` 覆盖参考图比例，且参数可乱序组合。
-- 新增 `1K/2K/4K` 扣次配置和模型默认扣次配置。
-- 新增失败扣次错误码列表，默认仅 HTTP `400` 失败会扣次。
-- 新增错误码是否扣次开关；命中错误码时可控制是否扣次。
-- 新增违规内容警告文本；上游安全拦截或命中配置错误码时，均单独发送该警告并停止模型热备切换。
-- 生图请求发送前记录全部非图片参数，API Key 脱敏且图片字段不输出内容。
-- 移除后台 `gemini_official` / API 模式切换，改为 `gemini_model_list` 自动路由。
-- 预设列表改为 HTML 模板渲染，模板位于 `templates/preset_list.html`。
-- `prompt_list` 改为对象列表，并自动兼容/导入旧字符串格式。
-- 新增默认批量数 `default_batch_count`，默认 1。
+- **Web 用量与模型路由仪表盘（Usage Dashboard）**：新增 `pages/usage-dashboard/` 插件前端管理页面，支持概览统计、用户余额、群组余额、审计账本与插件配置/独立预设维护，直连 AstrBot Web 会话鉴权。
+- **隐私保护持久化账本（UsageStore）**：全新采用原子替换的 JSON 账本存储（`usage_history.json`），双写保持旧版 `user_counts.json` 与 `group_counts.json` 兼容；支持从旧版 SQLite 历史平滑只读迁移；绝不持久化提示词、生成图片与认证凭据。
+- **模型参数统一厂商模式（`parameter_mode`）**：引入单一厂商参数模式（`none` / `gpt` / `gemini` / `grok` / `seedream`），杜绝跨厂商字段冲突，旧开关平滑自动推断升级。
+- **Seedream 边长超2000自动升2K**：新增 `seedream_side_over_2000_auto_2k`（默认开启），在详细分辨率模式且有比例输入时，遇超限尺寸直升官方 2K 档位并自动按 2K 扣次，兼顾像素数上限限制。
+- **快捷预设全量配置化**：全部预设（含 16 个默认预设）统一纳入 `prompt_list` 配置，管理员可在 WebUI 自由改名、修改或删除，内置隐藏历史别名保证向下兼容，并增加专用命令防重名校验。
+- **共享 Key 池与统一路由**：`generic_api_keys` 作为 Generic 与 Gemini 共享 Key 池，统一根地址规范化，消除冗余配置。
+- **写入式敏感配置面板**：API Key、认证代理与敏感地址由独立写入式面板管理，前端防明文泄漏，配备版本并发冲突保护（CAS）。
+- **插件独立日志轮转**：日志独立追加至数据目录 `logs/figurine_pro.log`，按 5 MiB 自动轮转保留 5 份备份。
+- **热备路由与参数整项继承**：重构热备切换逻辑，实际调用模型优先采用自身路由与参数配置，未配置时方继承源模型，计费按最终实际调用模型精准结算。
+- **全自动化单元测试**：覆盖消息流、用量存储、扣次阶梯、参数模式与热备回退，101 个测试用例全部通过。
 ## 📖 命令列表
 
 ### 基础与新增命令（合并）

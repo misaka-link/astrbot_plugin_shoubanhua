@@ -1,28 +1,108 @@
 import asyncio
 import base64
+import copy
 import functools
+import hashlib
 import html
 import io
 import json
+import logging
 import math
 import random
 import re
 import unicodedata
 from dataclasses import field as dataclass_field
-from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, Any, List, Optional, Tuple
 from urllib.parse import parse_qsl, unquote, urlencode, urlparse
 
 import aiohttp
 from PIL import Image as PILImage
 
-from astrbot import logger
+from astrbot import logger as astrbot_host_logger
 from astrbot.api.event import filter
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Reply, Plain, Node, Nodes
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+from .usage_store import UsageStore
+
+PLUGIN_LOGGER_NAME = "astrbot.plugin.astrbot_plugin_shoubanhua"
+PLUGIN_LOG_HANDLER_MARKER = "astrbot_plugin_shoubanhua_file_handler"
+
+
+class _PluginLogProxy:
+    """Forward plugin records to AstrBot and the plugin-specific logger."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(astrbot_host_logger, name)
+
+    def _emit(self, level: str, message: Any, *args: Any, **kwargs: Any) -> None:
+        host_method = getattr(astrbot_host_logger, level)
+        host_method(message, *args, **kwargs)
+        plugin_logger = logging.getLogger(PLUGIN_LOGGER_NAME)
+        log_method = getattr(plugin_logger, level)
+        if args:
+            log_method(message, *args, **kwargs)
+        else:
+            log_method(str(message), **kwargs)
+
+    def info(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        self._emit("info", message, *args, **kwargs)
+
+    def warning(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        self._emit("warning", message, *args, **kwargs)
+
+    def error(self, message: Any, *args: Any, **kwargs: Any) -> None:
+        self._emit("error", message, *args, **kwargs)
+
+
+logger = _PluginLogProxy()
+
+
+def _plugin_logger(data_dir: Path):
+    """Return the plugin logger and install one reload-safe local file sink."""
+    plugin_logger = logging.getLogger(PLUGIN_LOGGER_NAME)
+    plugin_logger.setLevel(logging.INFO)
+    plugin_logger.propagate = False
+    log_path = data_dir / "logs" / "figurine_pro.log"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_path = log_path.resolve()
+        for handler in list(plugin_logger.handlers):
+            if not getattr(handler, PLUGIN_LOG_HANDLER_MARKER, False):
+                continue
+            if Path(getattr(handler, "baseFilename", "")).resolve() == resolved_path:
+                return plugin_logger
+            plugin_logger.removeHandler(handler)
+            handler.close()
+        handler = RotatingFileHandler(
+            resolved_path,
+            maxBytes=5 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
+        setattr(handler, PLUGIN_LOG_HANDLER_MARKER, True)
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(name)s: %(message)s",
+            "%Y-%m-%d %H:%M:%S",
+        ))
+        plugin_logger.addHandler(handler)
+    except OSError as exc:
+        logger.warning(f"初始化插件独立日志文件失败: {exc}")
+    return plugin_logger
+
+
+try:
+    from astrbot.api.web import error_response, json_response, request
+
+    WEB_API_AVAILABLE = True
+except ImportError:
+    error_response = json_response = request = None
+    WEB_API_AVAILABLE = False
 
 try:
     from pydantic import Field
@@ -179,16 +259,12 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
-    BUILT_IN_CMD_MAP = {
-        "手办化": "figurine_1", "手办化2": "figurine_2", "手办化3": "figurine_3",
-        "手办化4": "figurine_4", "手办化5": "figurine_5", "手办化6": "figurine_6",
-        "Q版化": "q_version",
-        "痛屋化": "pain_room_1", "痛屋化2": "pain_room_2",
-        "痛车化": "pain_car",
-        "cos化": "cos", "cos自拍": "cos_selfie",
-        "孤独的我": "clown",
-        "第三视角": "view_3", "鬼图": "ghost", "第一视角": "view_1",
-    }
+    RESERVED_COMMAND_NAMES = frozenset({
+        "切换模型", "SwitchModel", "模型列表", "文生图",
+        "手办化预设增加", "手办化预设查看",
+        "预设图片清理", "预设图片统计", "手办化今日统计", "手办化签到",
+        "手办化增加用户次数", "手办化增加群组次数", "手办化查询次数",
+    })
 
     GENERIC_ENDPOINT_PATHS = {
         "chat_completions": "/v1/chat/completions",
@@ -196,7 +272,6 @@ class FigurineProPlugin(Star):
         "images_edits": "/v1/images/edits",
     }
     DEFAULT_GENERIC_API_URL = "https://api.bltcy.ai/v1/chat/completions"
-    DEFAULT_GEMINI_API_URL = "https://generativelanguage.googleapis.com"
     DEFAULT_CONTENT_POLICY_WARNING_MESSAGE = (
         "您的请求包含违规内容，无法生成图片。\n"
         "请更换模型或提示词/参考图 尝试 ！！\n"
@@ -214,6 +289,20 @@ class FigurineProPlugin(Star):
         "chat_completions": "chat_completions_model_list",
         "images_generations": "images_generations_model_list",
         "images_edits": "images_edits_model_list",
+    }
+
+    PARAMETER_MODES = (
+        ("none", "无厂商参数"),
+        ("gpt", "GPT"),
+        ("gemini", "Gemini"),
+        ("grok", "Grok"),
+        ("seedream", "Seedream"),
+    )
+    PARAMETER_MODE_ENABLE_FIELDS = {
+        "gpt": "enable_gpt_parameters",
+        "gemini": "enable_gemini_parameters",
+        "grok": "enable_grok_parameters",
+        "seedream": "enable_seedream_parameters",
     }
 
     IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
@@ -328,10 +417,10 @@ class FigurineProPlugin(Star):
                         ) from exc
                     self._socks_proxy_cls = ProxyConnector
                     self._socks_proxy_url = normalized_proxy
-                    logger.info(f"ImageWorkflow 使用 SOCKS 代理: {normalized_proxy}")
+                    logger.info("ImageWorkflow 使用 SOCKS 代理")
                 else:
                     self.proxy = normalized_proxy
-                    logger.info(f"ImageWorkflow 使用 HTTP 代理: {normalized_proxy}")
+                    logger.info("ImageWorkflow 使用 HTTP 代理")
 
             self.max_retries = max_retries
             self.timeout = timeout
@@ -469,53 +558,74 @@ class FigurineProPlugin(Star):
             """增强的图片获取方法，支持多@用户和混合@与图片"""
             img_bytes_list: List[bytes] = []
             at_user_ids: List[str] = []
+            message_obj = getattr(event, "message_obj", None)
+            message_segments = getattr(message_obj, "message", None)
+            if not isinstance(message_segments, (list, tuple)):
+                if message_segments is not None:
+                    logger.warning("消息组件格式无效，无法解析其中的参考图")
+                message_segments = ()
+            message_str = str(getattr(event, "message_str", "") or "")
             
             # 统计各种来源的图片数量
             reply_image_count = 0
             message_image_count = 0
 
             logger.info("=== 开始获取图片资源 ===")
-            logger.info(f"消息平台: {event.platform}")
-            logger.info(f"消息内容: {event.message_str}")
+            logger.info(f"消息平台: {getattr(event, 'platform', 'unknown')}")
+            logger.info(f"消息内容: {message_str}")
 
             # 1. 处理回复链中的图片
-            for seg in event.message_obj.message:
-                if isinstance(seg, Reply) and seg.chain:
-                    logger.info(f"发现回复链，长度: {len(seg.chain)}")
-                    for s_chain in seg.chain:
+            for seg in message_segments:
+                if not isinstance(seg, Reply):
+                    continue
+                reply_chain = getattr(seg, "chain", None)
+                if not isinstance(reply_chain, (list, tuple)):
+                    if getattr(seg, "id", None) not in (None, ""):
+                        logger.info("引用消息未携带可解析的内容链，无法读取其中的图片")
+                    continue
+                if reply_chain:
+                    logger.info(f"发现回复链，长度: {len(reply_chain)}")
+                    for s_chain in reply_chain:
                         if isinstance(s_chain, Image):
                             logger.info("在回复链中发现图片")
-                            if s_chain.url and (img := await self._load_bytes(s_chain.url)):
+                            image_url = getattr(s_chain, "url", None)
+                            image_file = getattr(s_chain, "file", None)
+                            if image_url and (img := await self._load_bytes(image_url)):
                                 img_bytes_list.append(img)
                                 reply_image_count += 1
                                 logger.info("成功从回复链URL加载图片")
-                            elif s_chain.file and (img := await self._load_bytes(s_chain.file)):
+                            elif image_file and (img := await self._load_bytes(image_file)):
                                 img_bytes_list.append(img)
                                 reply_image_count += 1
                                 logger.info("成功从回复链文件加载图片")
 
             # 2. 处理当前消息中的图片
-            for seg in event.message_obj.message:
+            for seg in message_segments:
                 if isinstance(seg, Image):
                     logger.info("在当前消息中发现图片")
-                    if seg.url and (img := await self._load_bytes(seg.url)):
+                    image_url = getattr(seg, "url", None)
+                    image_file = getattr(seg, "file", None)
+                    if image_url and (img := await self._load_bytes(image_url)):
                         img_bytes_list.append(img)
                         message_image_count += 1
                         logger.info("成功从当前消息URL加载图片")
-                    elif seg.file and (img := await self._load_bytes(seg.file)):
+                    elif image_file and (img := await self._load_bytes(image_file)):
                         img_bytes_list.append(img)
                         message_image_count += 1
                         logger.info("成功从当前消息文件加载图片")
 
             # 3. 处理@用户（支持多@）
-            for seg in event.message_obj.message:
+            for seg in message_segments:
                 if isinstance(seg, At):
-                    at_user_ids.append(str(seg.qq))
-                    logger.info(f"发现@用户: {seg.qq}")
+                    user_id = getattr(seg, "qq", None)
+                    if user_id in (None, ""):
+                        continue
+                    at_user_ids.append(str(user_id))
+                    logger.info(f"发现@用户: {user_id}")
 
             # 4. 处理命令文本中的@用户（从文本提取QQ号）
             import re
-            text_at_matches = re.findall(r'@(\d+)', event.message_str)
+            text_at_matches = re.findall(r'@(\d+)', message_str)
             for qq in text_at_matches:
                 if qq not in at_user_ids:
                     at_user_ids.append(qq)
@@ -553,11 +663,14 @@ class FigurineProPlugin(Star):
         super().__init__(context)
         self.conf = config
         self.plugin_data_dir = StarTools.get_data_dir()
+        self.log = _plugin_logger(self.plugin_data_dir)
 
         self.user_counts_file = self.plugin_data_dir / "user_counts.json"
         self.group_counts_file = self.plugin_data_dir / "group_counts.json"
         self.user_checkin_file = self.plugin_data_dir / "user_checkin.json"
         self.daily_stats_file = self.plugin_data_dir / "daily_stats.json"
+        self.usage_store_file = self.plugin_data_dir / "usage_history.json"
+        self.legacy_usage_store_file = self.plugin_data_dir / "usage_history.sqlite3"
         self.preset_images_file = self.plugin_data_dir / "preset_images.json"
         self.preset_images_dir = self.plugin_data_dir / "preset_images"
 
@@ -565,6 +678,7 @@ class FigurineProPlugin(Star):
         self.group_counts: Dict[str, int] = {}
         self.user_checkin_data: Dict[str, str] = {}
         self.daily_stats: Dict[str, Any] = {}
+        self.usage_store: Optional[UsageStore] = None
         self.prompt_map: Dict[str, str] = {}
         self.preset_images: Dict[str, str] = {}  # 预设词 -> 图片文件名映射
         self.request_timeout = 120
@@ -574,6 +688,7 @@ class FigurineProPlugin(Star):
         self.generic_key_index = 0
         self.gemini_key_index = 0
         self.key_lock = asyncio.Lock()
+        self._dashboard_config_lock = asyncio.Lock()
 
         self.iwf: Optional[FigurineProPlugin.ImageWorkflow] = None
         self.llm_tools_registered = False
@@ -608,6 +723,7 @@ class FigurineProPlugin(Star):
         await self._load_group_counts()
         await self._load_user_checkin_data()
         await self._load_daily_stats()
+        await self._initialize_usage_store()
         await self._migrate_failure_deduction_config()
         await self._migrate_command_model_list_config()
         await self._migrate_extra_prefix_config()
@@ -627,6 +743,1286 @@ class FigurineProPlugin(Star):
 
         if not g_keys and not o_keys:
             logger.warning("FigurinePro: 未配置任何 API Key")
+
+        self._register_usage_web_apis()
+
+    async def _initialize_usage_store(self):
+        try:
+            store = UsageStore(self.usage_store_file, self.legacy_usage_store_file)
+            await store.initialize(self.user_counts, self.group_counts, self.daily_stats)
+            balances = await store.merge_balance_sources(self.user_counts, self.group_counts)
+            merged_users = balances["user"]
+            merged_groups = balances["group"]
+            user_changed = merged_users != self.user_counts
+            group_changed = merged_groups != self.group_counts
+            self.user_counts = merged_users
+            self.group_counts = merged_groups
+            if user_changed:
+                await self._save_user_counts()
+            if group_changed:
+                await self._save_group_counts()
+            self.usage_store = store
+            self.log.info("JSON 用量账本已就绪: %s", self.usage_store_file)
+        except Exception as exc:
+            self.usage_store = None
+            self.log.error(f"用量账本初始化失败，将继续使用 JSON 次数数据: {exc}")
+
+    def _dashboard_error(self, message: str, status: int = 403):
+        if error_response:
+            return error_response(message, status_code=status)
+        return {"ok": False, "error": message, "message": message, "status": status}
+
+    @staticmethod
+    def _dashboard_json(payload: Dict[str, Any]):
+        return json_response(payload) if json_response else payload
+
+    @staticmethod
+    def _dashboard_query_value(name: str, default: Any = "") -> Any:
+        query = getattr(request, "query", {}) if request else {}
+        try:
+            return query.get(name, default)
+        except AttributeError:
+            return default
+
+    @staticmethod
+    def _dashboard_page_value(value: Any, default: int = 1) -> int:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _dashboard_date_value(value: Any, end: bool = False) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            raise ValueError("日期必须是 YYYY-MM-DD 格式")
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+        if end:
+            return (parsed + timedelta(days=1)).isoformat(timespec="seconds")
+        return parsed.isoformat(timespec="seconds")
+
+    def _register_usage_web_apis(self):
+        if not WEB_API_AVAILABLE or not hasattr(self.context, "register_web_api"):
+            return
+        routes = (
+            ("usage/overview", self._web_usage_overview, ["GET"], "查询手办化用量概览"),
+            ("usage/users", self._web_usage_users, ["GET"], "查询手办化用户用量"),
+            ("usage/groups", self._web_usage_groups, ["GET"], "查询手办化群组用量"),
+            ("usage/events", self._web_usage_events, ["GET"], "查询手办化用量账本"),
+            ("usage/adjust", self._web_usage_adjust, ["POST"], "调整手办化次数"),
+            ("configuration", self._web_dashboard_configuration_get, ["GET"], "查询手办化仪表盘配置"),
+            ("configuration", self._web_dashboard_configuration_save, ["POST"], "保存手办化仪表盘配置"),
+            ("configuration/sensitive", self._web_dashboard_sensitive_get, ["GET"], "查询手办化敏感配置状态"),
+            ("configuration/sensitive", self._web_dashboard_sensitive_save, ["POST"], "保存手办化敏感配置"),
+            ("presets", self._web_dashboard_presets_get, ["GET"], "查询手办化预设提示词"),
+            ("presets", self._web_dashboard_presets_save, ["POST"], "保存手办化预设提示词"),
+        )
+        for suffix, handler, methods, description in routes:
+            try:
+                self.context.register_web_api(
+                    f"/astrbot_plugin_shoubanhua/{suffix}", handler, methods, description
+                )
+            except Exception as exc:
+                logger.warning(f"注册用量仪表盘接口失败 ({suffix}): {exc}")
+
+    async def _web_usage_overview(self):
+        if not self.usage_store:
+            return self._dashboard_error("用量账本不可用", 503)
+        try:
+            start = self._dashboard_date_value(self._dashboard_query_value("start"))
+            end = self._dashboard_date_value(self._dashboard_query_value("end"), end=True)
+            data = await self.usage_store.get_overview(start, end)
+            return self._dashboard_json({"ok": True, **data})
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"查询用量概览失败: {exc}")
+            return self._dashboard_error("查询用量概览失败", 500)
+
+    async def _web_usage_users(self):
+        if not self.usage_store:
+            return self._dashboard_error("用量账本不可用", 503)
+        try:
+            data = await self.usage_store.list_users(
+                start=self._dashboard_date_value(self._dashboard_query_value("start")),
+                end=self._dashboard_date_value(self._dashboard_query_value("end"), end=True),
+                search=str(self._dashboard_query_value("search", "")),
+                page=self._dashboard_page_value(self._dashboard_query_value("page", 1)),
+                page_size=self._dashboard_page_value(self._dashboard_query_value("page_size", 30), 30),
+            )
+            return self._dashboard_json({"ok": True, **data})
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"查询用户用量失败: {exc}")
+            return self._dashboard_error("查询用户用量失败", 500)
+
+    async def _web_usage_groups(self):
+        if not self.usage_store:
+            return self._dashboard_error("用量账本不可用", 503)
+        try:
+            data = await self.usage_store.list_groups(
+                start=self._dashboard_date_value(self._dashboard_query_value("start")),
+                end=self._dashboard_date_value(self._dashboard_query_value("end"), end=True),
+                search=str(self._dashboard_query_value("search", "")),
+                page=self._dashboard_page_value(self._dashboard_query_value("page", 1)),
+                page_size=self._dashboard_page_value(self._dashboard_query_value("page_size", 30), 30),
+            )
+            return self._dashboard_json({"ok": True, **data})
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"查询群组用量失败: {exc}")
+            return self._dashboard_error("查询群组用量失败", 500)
+
+    async def _web_usage_events(self):
+        if not self.usage_store:
+            return self._dashboard_error("用量账本不可用", 503)
+        try:
+            data = await self.usage_store.list_events(
+                start=self._dashboard_date_value(self._dashboard_query_value("start")),
+                end=self._dashboard_date_value(self._dashboard_query_value("end"), end=True),
+                user_id=self._norm_id(self._dashboard_query_value("user_id", "")),
+                group_id=self._norm_id(self._dashboard_query_value("group_id", "")),
+                model=str(self._dashboard_query_value("model", "")).strip(),
+                page=self._dashboard_page_value(self._dashboard_query_value("page", 1)),
+                page_size=self._dashboard_page_value(self._dashboard_query_value("page_size", 30), 30),
+            )
+            return self._dashboard_json({"ok": True, **data})
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"查询用量账本失败: {exc}")
+            return self._dashboard_error("查询用量账本失败", 500)
+
+    async def _web_usage_adjust(self):
+        try:
+            body = await request.json(default={})
+            subject_type = str(body.get("subject_type") or "").strip()
+            subject_id = self._norm_id(body.get("subject_id"))
+            amount = int(body.get("amount"))
+            note = str(body.get("note") or "").strip()[:500]
+            if subject_type not in {"user", "group"} or not subject_id:
+                raise ValueError("目标类型或 ID 无效")
+            if not -100000 <= amount <= 100000 or amount == 0:
+                raise ValueError("调整次数必须在 -100000 到 100000 之间且不能为 0")
+            actor = self._norm_id(getattr(request, "username", ""))
+            balance = await self._adjust_usage_balance(
+                event=None,
+                subject_type=subject_type,
+                subject_id=subject_id,
+                amount=amount,
+                source="web_admin",
+                actor=actor,
+                note=note or "网页管理员调整次数",
+            )
+            return self._dashboard_json({"ok": True, "balance": balance})
+        except (TypeError, ValueError) as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"网页调整次数失败: {exc}")
+            return self._dashboard_error("调整次数失败", 500)
+
+    @staticmethod
+    def _dashboard_string_list(value: Any, field_name: str) -> List[str]:
+        if not isinstance(value, list):
+            raise ValueError(f"{field_name} 必须是列表")
+        result: List[str] = []
+        for item in value:
+            name = str(item or "").strip()
+            if not name:
+                continue
+            if len(name) > 200:
+                raise ValueError(f"{field_name} 包含过长名称")
+            if name not in result:
+                result.append(name)
+        return result
+
+    @staticmethod
+    def _dashboard_command_name(value: Any, field_name: str) -> str:
+        command = str(value or "").strip().lstrip("#").strip()
+        if not command or len(command) > 80 or any(character.isspace() for character in command):
+            raise ValueError(f"{field_name} 必须是不含空格、最长 80 字符的指令")
+        return command
+
+    @staticmethod
+    def _preset_alias(value: Any) -> str:
+        return str(value or "").strip()
+
+    @classmethod
+    def _schema_default_preset_items(cls) -> List[Dict[str, str]]:
+        prompt_list = cls._dashboard_schema().get("prompt_list", {})
+        raw_presets = prompt_list.get("default", []) if isinstance(prompt_list, dict) else []
+        if not isinstance(raw_presets, list):
+            return []
+
+        presets: List[Dict[str, str]] = []
+        for item in raw_presets:
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command") or "").strip()
+            prompt = str(item.get("prompt") or "").strip()
+            if not command or not prompt:
+                continue
+            preset = {
+                "__template_key": "preset",
+                "command": command,
+                "prompt": prompt,
+            }
+            if alias := cls._preset_alias(item.get("legacy_alias")):
+                preset["legacy_alias"] = alias
+            presets.append(preset)
+        return presets
+
+    @classmethod
+    def _schema_default_preset_aliases(cls) -> Dict[str, str]:
+        return {
+            item["command"]: item["legacy_alias"]
+            for item in cls._schema_default_preset_items()
+            if item.get("legacy_alias")
+        }
+
+    def _normalized_preset_items(self, raw_presets: Any = None) -> List[Dict[str, str]]:
+        if raw_presets is None:
+            raw_presets = self.conf.get("prompt_list", [])
+        if not isinstance(raw_presets, list):
+            return []
+
+        schema_aliases = self._schema_default_preset_aliases()
+        valid_aliases = set(schema_aliases.values())
+        presets: List[Dict[str, str]] = []
+        seen = set()
+        for item in raw_presets:
+            command = ""
+            prompt = ""
+            alias = ""
+            if isinstance(item, dict):
+                command = str(item.get("command") or item.get("指令") or item.get("name") or "").strip()
+                prompt = str(item.get("prompt") or item.get("提示词") or item.get("value") or "").strip()
+                alias = self._preset_alias(item.get("legacy_alias"))
+            elif isinstance(item, str) and ":" in item:
+                command, prompt = (part.strip() for part in item.split(":", 1))
+            if not command or not prompt or command in seen:
+                continue
+            seen.add(command)
+            preset = {
+                "__template_key": "preset",
+                "command": command,
+                "prompt": prompt,
+            }
+            alias = alias if alias in valid_aliases else schema_aliases.get(command, "")
+            if alias:
+                preset["legacy_alias"] = alias
+            presets.append(preset)
+        return presets
+
+    def _get_default_preset_aliases(self) -> Dict[str, str]:
+        schema_aliases = self._schema_default_preset_aliases()
+        aliases: Dict[str, str] = {}
+        for preset in self._normalized_preset_items():
+            alias = self._preset_alias(preset.get("legacy_alias")) or schema_aliases.get(preset["command"], "")
+            if alias:
+                aliases[preset["command"]] = alias
+        return aliases
+
+    def _get_default_preset_commands(self) -> set[str]:
+        return set(self._get_default_preset_aliases())
+
+    def _get_reserved_command_names(self) -> set[str]:
+        names = set(self.RESERVED_COMMAND_NAMES)
+        names.add(self._get_help_command())
+        names.update(self._get_preset_list_commands())
+        return names
+
+    def _preset_command_conflict_message(
+            self,
+            command: str,
+            *,
+            prefixes: Optional[List[str]] = None,
+            reserved_commands: Optional[set[str]] = None,
+            preset_commands: Optional[set[str]] = None,
+            help_command: Optional[str] = None,
+            preset_list_commands: Optional[List[str]] = None,
+    ) -> Optional[str]:
+        active_prefixes = prefixes if prefixes is not None else self._get_extra_prefixes()
+        if command in active_prefixes:
+            return f"预设指令“{command}”与自定义触发词“{command}”冲突"
+
+        if preset_commands is not None and command in preset_commands:
+            return f"预设指令“{command}”与同一列表中的另一条预设指令重复"
+
+        active_reserved_commands = (
+            set(reserved_commands)
+            if reserved_commands is not None
+            else self._get_reserved_command_names()
+        )
+        if command not in active_reserved_commands:
+            return None
+
+        effective_help_command = help_command if help_command is not None else self._get_help_command()
+        effective_preset_list_commands = (
+            preset_list_commands
+            if preset_list_commands is not None
+            else self._get_preset_list_commands()
+        )
+        if command == effective_help_command:
+            category = "帮助菜单指令"
+        elif command in effective_preset_list_commands:
+            category = "提示词列表指令"
+        else:
+            category = "插件专用指令"
+        return f"预设指令“{command}”与{category}“{command}”冲突"
+
+    @staticmethod
+    def _dashboard_url(value: Any, field_name: str, *, required: bool = False) -> str:
+        url = str(value or "").strip()
+        if not url:
+            if required:
+                raise ValueError(f"{field_name} 不能为空")
+            return ""
+        if len(url) > 1000:
+            raise ValueError(f"{field_name} 过长")
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ValueError(f"{field_name} 必须是合法的 HTTP(S) URL")
+        if parsed_url.username or parsed_url.password:
+            raise ValueError(f"{field_name} 不能包含认证信息，请使用敏感配置入口")
+        sensitive_query_names = {
+            "key", "api_key", "apikey", "token", "access_token", "password", "passwd",
+        }
+        if any(name.lower() in sensitive_query_names for name, _ in parse_qsl(parsed_url.query, keep_blank_values=True)):
+            raise ValueError(f"{field_name} 不能包含敏感查询参数，请使用敏感配置入口")
+        return url
+
+    @staticmethod
+    def _dashboard_bool(value: Any, field_name: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value in {0, 1}:
+            return bool(value)
+        normalized = str(value or "").strip().lower()
+        if normalized in {"true", "1", "yes", "on", "开启"}:
+            return True
+        if normalized in {"false", "0", "no", "off", "", "关闭"}:
+            return False
+        raise ValueError(f"{field_name} 必须是布尔值")
+
+    @staticmethod
+    def _dashboard_int(value: Any, field_name: str, minimum: int, maximum: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} 必须是整数") from exc
+        if not minimum <= number <= maximum:
+            raise ValueError(f"{field_name} 必须在 {minimum} 到 {maximum} 之间")
+        return number
+
+    @staticmethod
+    def _dashboard_schema_path() -> Path:
+        return Path(__file__).with_name("_conf_schema.json")
+
+    @classmethod
+    def _dashboard_schema(cls) -> Dict[str, Any]:
+        try:
+            with cls._dashboard_schema_path().open("r", encoding="utf-8") as schema_file:
+                schema = json.load(schema_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error(f"读取仪表盘配置 schema 失败: {exc}")
+            return {}
+        return schema if isinstance(schema, dict) else {}
+
+    @staticmethod
+    def _dashboard_setting_group(description: Any) -> str:
+        matched = re.match(r"\s*【([^】]+)】", str(description or ""))
+        return matched.group(1) if matched else "其他设置"
+
+    @staticmethod
+    def _dashboard_setting_label(description: Any, fallback: str) -> str:
+        label = re.sub(r"^\s*【[^】]+】", "", str(description or "")).strip()
+        return label or fallback
+
+    @staticmethod
+    def _dashboard_url_is_sensitive(value: Any) -> bool:
+        url = str(value or "").strip()
+        if not url:
+            return False
+        parsed = urlparse(url)
+        if parsed.username or parsed.password:
+            return True
+        sensitive_query_names = {
+            "key", "api_key", "apikey", "token", "access_token", "password", "passwd",
+        }
+        return any(
+            name.lower() in sensitive_query_names
+            for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+
+    @classmethod
+    def _dashboard_proxy_url_is_sensitive(cls, value: Any) -> bool:
+        return cls._dashboard_url_is_sensitive(value)
+
+    @staticmethod
+    def _dashboard_sensitive_service_url(value: Any, field_name: str) -> str:
+        url = str(value or "").strip()
+        if not url or len(url) > 1000:
+            raise ValueError(f"{field_name} 格式无效")
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{field_name} 必须是合法的 HTTP(S) URL")
+        return url
+
+    def _dashboard_sensitive_state(self) -> Dict[str, Any]:
+        keys = self.conf.get("generic_api_keys", [])
+        key_count = len(keys) if isinstance(keys, list) else 0
+        generic_api_url = str(self.conf.get("generic_api_url", "") or "").strip()
+        proxy_url = str(self.conf.get("proxy_url", "") or "").strip()
+        return {
+            "generic_api_keys": {"configured": bool(key_count), "count": key_count},
+            "generic_api_url": {
+                "configured": bool(generic_api_url),
+                "write_only": self._dashboard_url_is_sensitive(generic_api_url),
+            },
+            "proxy_url": {
+                "configured": bool(proxy_url),
+                "write_only": self._dashboard_proxy_url_is_sensitive(proxy_url),
+            },
+        }
+
+    def _dashboard_special_setting_keys(self) -> set[str]:
+        return {
+            "generic_api_url",
+            "generic_api_keys",
+            "gemini_api_keys",
+            "extra_prefix",
+            "command_model_list",
+            "model_prompt_template_list",
+            "model_parameter_list",
+            "model_mapping_list",
+            "prompt_list",
+            "model",
+            "model_list",
+            "gemini_model_list",
+            "chat_completions_model_list",
+            "images_generations_model_list",
+            "images_edits_model_list",
+        }
+
+    def _dashboard_settings_metadata(self) -> List[Dict[str, Any]]:
+        metadata: List[Dict[str, Any]] = []
+        reload_required = {
+            "use_proxy", "proxy_url", "timeout", "download_timeout",
+            "download_size_limit_mb", "download_retries", "enable_llm_tools",
+            "llm_image_generation_model_list",
+        }
+        for key, spec in self._dashboard_schema().items():
+            if key in self._dashboard_special_setting_keys() or not isinstance(spec, dict):
+                continue
+            setting_type = str(spec.get("type") or "string")
+            if setting_type not in {"bool", "int", "string", "text", "list"}:
+                continue
+            value = self.conf.get(key, copy.deepcopy(spec.get("default")))
+            is_sensitive_proxy = key == "proxy_url" and self._dashboard_proxy_url_is_sensitive(value)
+            metadata.append({
+                "key": key,
+                "label": self._dashboard_setting_label(spec.get("description"), key),
+                "group": self._dashboard_setting_group(spec.get("description")),
+                "hint": str(spec.get("hint") or ""),
+                "type": setting_type,
+                "default": copy.deepcopy(spec.get("default")),
+                "min": spec.get("min"),
+                "max": spec.get("max"),
+                "options": copy.deepcopy(spec.get("options", [])),
+                "item_type": str((spec.get("items") or {}).get("type") or "string"),
+                "reload_required": key in reload_required,
+                "write_only": is_sensitive_proxy,
+            })
+        return metadata
+
+    def _dashboard_public_setting_values(self) -> Dict[str, Any]:
+        values: Dict[str, Any] = {}
+        for setting in self._dashboard_settings_metadata():
+            if setting["write_only"]:
+                continue
+            key = setting["key"]
+            values[key] = copy.deepcopy(self.conf.get(key, setting["default"]))
+        return values
+
+    def _dashboard_normalize_setting_values(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for setting in self._dashboard_settings_metadata():
+            key = setting["key"]
+            if setting["write_only"]:
+                continue
+            value = raw.get(key, copy.deepcopy(self.conf.get(key, setting["default"])))
+            field_type = setting["type"]
+            label = setting["label"]
+            if field_type == "bool":
+                result[key] = self._dashboard_bool(value, label)
+            elif field_type == "int":
+                minimum = int(setting["min"]) if setting["min"] is not None else -1_000_000_000
+                maximum = int(setting["max"]) if setting["max"] is not None else 1_000_000_000
+                result[key] = self._dashboard_int(value, label, minimum, maximum)
+            elif field_type in {"string", "text"}:
+                normalized = str(value or "").strip()
+                if len(normalized) > (20_000 if field_type == "text" else 1_000):
+                    raise ValueError(f"{label} 过长")
+                if setting["options"] and normalized not in setting["options"]:
+                    raise ValueError(f"{label} 取值无效")
+                if key == "generic_api_url":
+                    normalized = self._dashboard_url(normalized, label)
+                if key == "proxy_url" and self._dashboard_proxy_url_is_sensitive(normalized):
+                    raise ValueError("带认证信息的代理地址请在敏感配置中保存")
+                result[key] = normalized
+            else:
+                if not isinstance(value, list):
+                    raise ValueError(f"{label} 必须是列表")
+                if len(value) > 1_000:
+                    raise ValueError(f"{label} 项数过多")
+                item_type = setting["item_type"]
+                items: List[Any] = []
+                for item in value:
+                    if item_type == "int":
+                        items.append(self._dashboard_int(item, label, -1_000_000_000, 1_000_000_000))
+                    else:
+                        normalized_item = str(item or "").strip()
+                        if not normalized_item or len(normalized_item) > 1_000:
+                            raise ValueError(f"{label} 包含无效项目")
+                        if normalized_item not in items:
+                            items.append(normalized_item)
+                result[key] = items
+        return result
+
+    def _dashboard_preset_items(self) -> List[Dict[str, str]]:
+        return [
+            {
+                "command": preset["command"],
+                "prompt": preset["prompt"],
+                **({"legacy_alias": preset["legacy_alias"]} if preset.get("legacy_alias") else {}),
+            }
+            for preset in self._normalized_preset_items()
+        ]
+
+    def _dashboard_mapping_items(self) -> List[Dict[str, Any]]:
+        """Normalize every runtime-supported failover shape for dashboard editing."""
+        raw_mappings = self.conf.get("model_mapping_list", [])
+        items: List[Dict[str, Any]] = []
+
+        def add_item(source: Any, mapped: Any, priority: Any = 0) -> None:
+            source_name = str(source or "").strip()
+            if not source_name:
+                return
+            try:
+                normalized_priority = int(priority)
+            except (TypeError, ValueError):
+                normalized_priority = 0
+            if isinstance(mapped, (list, tuple, set)):
+                for target in mapped:
+                    add_item(source_name, target, normalized_priority)
+                return
+            target_name = str(mapped or "").strip()
+            if target_name and target_name != source_name:
+                items.append({
+                    "model": source_name,
+                    "mapped_model": target_name,
+                    "priority": max(-1, normalized_priority),
+                })
+
+        def priority_of(item: Dict[str, Any]) -> Any:
+            return item.get("priority") if "priority" in item else item.get("优先权重", 0)
+
+        if isinstance(raw_mappings, dict):
+            for source, mapped in raw_mappings.items():
+                if isinstance(mapped, dict):
+                    add_item(
+                        source,
+                        mapped.get("mapped_model")
+                        or mapped.get("target_model")
+                        or mapped.get("mapping_model")
+                        or mapped.get("映射模型"),
+                        priority_of(mapped),
+                    )
+                else:
+                    add_item(source, mapped)
+        elif isinstance(raw_mappings, list):
+            for item in raw_mappings:
+                if isinstance(item, dict):
+                    add_item(
+                        item.get("model") or item.get("source_model") or item.get("源模型"),
+                        item.get("mapped_model")
+                        or item.get("target_model")
+                        or item.get("mapping_model")
+                        or item.get("映射模型"),
+                        priority_of(item),
+                    )
+                elif isinstance(item, str) and ":" in item:
+                    source, mapped = item.split(":", 1)
+                    add_item(source, mapped)
+        return items
+
+    def _dashboard_parameter_fields(self) -> List[Dict[str, Any]]:
+        fields = [
+            {"name": "reference_image_limit", "label": "参考图数量限制", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
+            {"name": "extra_reference_image_quota", "label": "超限参考图阶梯额度", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
+            {"name": "deduction_count", "label": "该模型扣除次数", "group": "基础与额度", "type": "number", "default": 1, "min": 1, "max": 100},
+            {"name": "deduction_count_2k", "label": "2K扣除次数", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100},
+            {"name": "deduction_count_4k", "label": "4K扣除次数", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100},
+            {"name": "deduct_on_violation", "label": "违规是否扣次数", "group": "基础与额度", "type": "boolean", "default": False},
+            {"name": "max_output_tokens", "label": "最大输出/思考 Token", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 1000000},
+            {"name": "default_resolution", "label": "默认分辨率", "group": "基础与额度", "type": "text", "default": "auto", "max_length": 64},
+            {"name": "send_default_size", "label": "默认传递 size", "group": "基础与额度", "type": "boolean", "default": False},
+            {"name": "enable_gpt_parameters", "label": "启用 GPT 参数", "group": "GPT", "type": "boolean", "default": False},
+            {"name": "omit_n_parameter", "label": "不传递 n 参数", "group": "GPT", "type": "boolean", "default": False},
+            {"name": "quality", "label": "质量", "group": "GPT", "type": "select", "default": "auto", "options": ["low", "medium", "high", "auto"]},
+            {"name": "moderation", "label": "审核", "group": "GPT", "type": "select", "default": "auto", "options": ["auto", "low"]},
+            {"name": "adaptive_aspect_ratio", "label": "自适应比例", "group": "GPT", "type": "boolean", "default": False},
+            {"name": "adaptive_resolution", "label": "自适应比例分辨率", "group": "GPT", "type": "select", "default": "1K", "options": ["1K", "2K", "4K"]},
+            {"name": "auto_upgrade_1k_adaptive_resolution", "label": "1K超限自动转2K", "group": "GPT", "type": "boolean", "default": False},
+            {"name": "force_resolution_limit", "label": "强制限制分辨率", "group": "GPT", "type": "boolean", "default": False},
+            {"name": "enable_gemini_parameters", "label": "启用 Gemini 参数", "group": "Gemini", "type": "boolean", "default": False},
+            {"name": "gemini_resolution", "label": "Gemini分辨率", "group": "Gemini", "type": "select", "default": "auto", "options": ["auto", "1K", "2K", "4K"]},
+            {"name": "gemini_adaptive_aspect_ratio", "label": "Gemini自适应比例", "group": "Gemini", "type": "boolean", "default": False},
+            {"name": "gemini_aspect_ratio", "label": "Gemini图片比例", "group": "Gemini", "type": "select", "default": "auto", "options": ["auto", *sorted(self.GEMINI_ASPECT_RATIO_OPTIONS)]},
+            {"name": "enable_grok_parameters", "label": "启用 Grok 参数", "group": "Grok", "type": "boolean", "default": False},
+            {"name": "grok_resolution", "label": "Grok分辨率", "group": "Grok", "type": "select", "default": "2k", "options": ["1k", "2k"]},
+            {"name": "grok_adaptive_aspect_ratio", "label": "Grok自适应比例", "group": "Grok", "type": "boolean", "default": False},
+            {"name": "enable_seedream_parameters", "label": "启用 Seedream 参数", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_web_search", "label": "Seedream联网搜索", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_send_output_format", "label": "Seedream传递输出格式", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_output_format", "label": "Seedream输出格式", "group": "Seedream", "type": "select", "default": "png", "options": ["png", "jpeg"]},
+            {"name": "seedream_watermark", "label": "Seedream添加水印", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_resolution", "label": "Seedream分辨率", "group": "Seedream", "type": "select", "default": "1.5K", "options": ["1K", "1.5K", "2K"]},
+            {"name": "seedream_send_aspect_ratio", "label": "Seedream传递比例", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_send_detailed_resolution", "label": "Seedream传递详细分辨率", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_pixel_limit", "label": "Seedream像素数上限 (K)", "group": "Seedream", "type": "number", "default": 0, "min": 0, "max": 16384},
+            {"name": "seedream_adaptive_aspect_ratio", "label": "Seedream自适应比例", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "seedream_max_side_2000", "label": "Seedream宽高均不超过2000", "group": "Seedream", "type": "boolean", "default": True},
+            {"name": "seedream_side_over_2000_auto_2k", "label": "边长超2000自动升2K", "group": "Seedream", "type": "boolean", "default": True},
+            {"name": "seedream_optimize_prompt_mode", "label": "Seedream提示词优化模式", "group": "Seedream", "type": "select", "default": "standard", "options": ["standard", "fast"]},
+        ]
+        generic_image_fields = {
+            "default_resolution", "send_default_size", "enable_gpt_parameters", "omit_n_parameter",
+            "quality", "moderation", "adaptive_aspect_ratio", "adaptive_resolution",
+            "auto_upgrade_1k_adaptive_resolution", "force_resolution_limit",
+        }
+        gemini_fields = {
+            "enable_gemini_parameters", "gemini_resolution", "gemini_adaptive_aspect_ratio",
+            "gemini_aspect_ratio",
+        }
+        grok_fields = {"enable_grok_parameters", "grok_resolution", "grok_adaptive_aspect_ratio"}
+        seedream_fields = {
+            "enable_seedream_parameters", "seedream_web_search", "seedream_send_output_format",
+            "seedream_output_format", "seedream_watermark", "seedream_resolution",
+            "seedream_send_aspect_ratio", "seedream_send_detailed_resolution", "seedream_pixel_limit",
+            "seedream_adaptive_aspect_ratio", "seedream_max_side_2000",
+            "seedream_side_over_2000_auto_2k", "seedream_optimize_prompt_mode",
+        }
+        mode_by_field = {
+            **{name: "gpt" for name in generic_image_fields},
+            **{name: "gemini" for name in gemini_fields},
+            **{name: "grok" for name in grok_fields},
+            **{name: "seedream" for name in seedream_fields},
+        }
+        for field_name in {
+            *self.PARAMETER_MODE_ENABLE_FIELDS.values(),
+            "default_resolution",
+            "send_default_size",
+        }:
+            mode_by_field.pop(field_name, None)
+        dependencies = {
+            "omit_n_parameter": "enable_gpt_parameters",
+            "quality": "enable_gpt_parameters",
+            "moderation": "enable_gpt_parameters",
+            "adaptive_aspect_ratio": "enable_gpt_parameters",
+            "adaptive_resolution": "enable_gpt_parameters",
+            "auto_upgrade_1k_adaptive_resolution": "enable_gpt_parameters",
+            "force_resolution_limit": "enable_gpt_parameters",
+            "gemini_resolution": "enable_gemini_parameters",
+            "gemini_adaptive_aspect_ratio": "enable_gemini_parameters",
+            "gemini_aspect_ratio": "enable_gemini_parameters",
+            "grok_resolution": "enable_grok_parameters",
+            "grok_adaptive_aspect_ratio": "enable_grok_parameters",
+            "seedream_web_search": "enable_seedream_parameters",
+            "seedream_send_output_format": "enable_seedream_parameters",
+            "seedream_output_format": "enable_seedream_parameters",
+            "seedream_watermark": "enable_seedream_parameters",
+            "seedream_resolution": "enable_seedream_parameters",
+            "seedream_send_aspect_ratio": "enable_seedream_parameters",
+            "seedream_send_detailed_resolution": "enable_seedream_parameters",
+            "seedream_pixel_limit": "enable_seedream_parameters",
+            "seedream_adaptive_aspect_ratio": "enable_seedream_parameters",
+            "seedream_max_side_2000": "enable_seedream_parameters",
+            "seedream_side_over_2000_auto_2k": "enable_seedream_parameters",
+            "seedream_optimize_prompt_mode": "enable_seedream_parameters",
+        }
+        schema_parameter_items = (
+            self._dashboard_schema().get("model_parameter_list", {}).get("templates", {})
+            .get("model_parameters", {}).get("items", {})
+        )
+        for field in fields:
+            name = field["name"]
+            field["route"] = "any"
+            field["endpoint_types"] = []
+            if name == "max_output_tokens":
+                field["route"] = "any"
+                field["endpoint_types"] = ["chat_completions", "gemini_generate_content"]
+            elif name in generic_image_fields:
+                field["route"] = "generic"
+                field["endpoint_types"] = ["images_generations", "images_edits"]
+            elif name in gemini_fields:
+                field["route"] = "gemini"
+            elif name in grok_fields:
+                field["route"] = "generic"
+                field["endpoint_types"] = ["images_generations", "images_edits"]
+            elif name in seedream_fields:
+                field["route"] = "generic"
+                field["endpoint_types"] = ["images_generations"]
+            if name in dependencies:
+                field["depends_on"] = {"field": dependencies[name], "equals": True}
+            field["parameter_mode"] = mode_by_field.get(name, "base")
+            if name in self.PARAMETER_MODE_ENABLE_FIELDS.values():
+                field["parameter_mode"] = "mode_switch"
+            schema_item = schema_parameter_items.get(name, {})
+            field["hint"] = str(schema_item.get("hint") or "")
+        return fields
+
+    def _dashboard_model_parameter_items(self) -> List[Dict[str, Any]]:
+        raw_entries = self._get_raw_model_parameter_entry_map()
+        known_fields = {field["name"] for field in self._dashboard_parameter_fields()}
+        reserved_keys = {
+            "__template_key", "model", "模型", "model_name", "模型名", "parameter_mode",
+        }
+        items: List[Dict[str, Any]] = []
+        for model, parameters in self._get_model_parameter_map().items():
+            raw_entry = raw_entries.get(model, {})
+            extensions = {
+                key: copy.deepcopy(value)
+                for key, value in raw_entry.items()
+                if key not in known_fields and key not in reserved_keys
+            }
+            items.append({"model": model, **extensions, **parameters})
+        return items
+
+    def _dashboard_configuration_values(self) -> Dict[str, Any]:
+        generic_api_url = str(self.conf.get("generic_api_url", "") or "").strip()
+        if self._dashboard_url_is_sensitive(generic_api_url):
+            generic_api_url = ""
+        else:
+            try:
+                generic_api_url = self._dashboard_url(generic_api_url, "共享 API 地址")
+            except ValueError:
+                generic_api_url = ""
+        model_names = list(self._get_all_models())
+        model_names.append(str(self.conf.get("model", "") or "").strip())
+        template_map = self._get_model_prompt_template_map()
+        parameter_map = self._get_model_parameter_map()
+        model_names.extend(name for name in template_map if name != "ALL")
+        model_names.extend(parameter_map)
+        model_names = self._dedupe_preserve_order([name for name in model_names if name])
+        return {
+            "model": str(self.conf.get("model", "") or "").strip(),
+            "model_list": model_names,
+            "generic_api_url": generic_api_url,
+            "gemini_model_list": self._normalize_model_list(self.conf.get("gemini_model_list", [])),
+            "chat_completions_model_list": self._normalize_model_list(self.conf.get("chat_completions_model_list", [])),
+            "images_generations_model_list": self._normalize_model_list(self.conf.get("images_generations_model_list", [])),
+            "images_edits_model_list": self._normalize_model_list(self.conf.get("images_edits_model_list", [])),
+            "extra_prefix": self._get_extra_prefixes(),
+            "command_model_list": [
+                {"command": command, "model": model}
+                for command, model in self._get_command_model_map().items()
+            ],
+            "model_mapping_list": self._dashboard_mapping_items(),
+            "model_prompt_template_list": [
+                {"model": model, "prompt_template": template}
+                for model, template in template_map.items()
+            ],
+            "model_parameter_list": self._dashboard_model_parameter_items(),
+            "settings": self._dashboard_public_setting_values(),
+        }
+
+    def _dashboard_configuration_generation(self) -> int:
+        try:
+            return max(0, int(self.conf.get("_dashboard_config_generation", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    async def _persist_configuration(self) -> None:
+        """Persist the injected AstrBot configuration across supported host versions."""
+        save_async = getattr(self.conf, "save_config_async", None)
+        if callable(save_async):
+            await save_async()
+            return
+
+        save_sync = getattr(self.conf, "save_config", None)
+        if callable(save_sync):
+            save_sync()
+            return
+
+        save_legacy = getattr(self.conf, "save", None)
+        if callable(save_legacy):
+            save_legacy()
+            return
+
+        raise RuntimeError("当前 AstrBot 配置对象不支持持久化（缺少 save_config_async/save_config）")
+
+    def _dashboard_configuration_revision(self, values: Optional[Dict[str, Any]] = None) -> str:
+        raw = json.dumps(
+            values or self._dashboard_configuration_values(),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        versioned = f"{self._dashboard_configuration_generation()}:{raw}"
+        return hashlib.sha256(versioned.encode("utf-8")).hexdigest()[:16]
+
+    def _dashboard_preset_revision(self) -> str:
+        raw = json.dumps(
+            self._dashboard_preset_items(),
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _dashboard_advance_configuration_generation(self) -> None:
+        self.conf["_dashboard_config_generation"] = (
+            self._dashboard_configuration_generation() + 1
+        )
+
+    def _dashboard_normalize_model_parameters(self, value: Any, models: set[str]) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            raise ValueError("model_parameter_list 必须是列表")
+        fields = {field["name"]: field for field in self._dashboard_parameter_fields()}
+        result: List[Dict[str, Any]] = []
+        seen = set()
+        for item in value:
+            if not isinstance(item, dict):
+                raise ValueError("模型参数条目必须是对象")
+            model = str(item.get("model") or "").strip()
+            if model not in models or model in seen:
+                raise ValueError("模型参数包含重复或未配置模型")
+            seen.add(model)
+            parameter_mode = self._get_parameter_mode_from_entry(item)
+            normalized: Dict[str, Any] = {
+                key: copy.deepcopy(raw_value)
+                for key, raw_value in item.items()
+                if key not in {"__template_key", "model", "模型", "model_name", "模型名", "parameter_mode"}
+                and key not in fields
+            }
+            normalized.update({
+                "__template_key": "model_parameters",
+                "model": model,
+                "parameter_mode": parameter_mode,
+            })
+            for name, field in fields.items():
+                raw_value = item.get(name, field["default"])
+                field_type = field["type"]
+                if field_type == "boolean":
+                    normalized[name] = self._dashboard_bool(raw_value, field["label"])
+                elif field_type == "number":
+                    normalized[name] = self._dashboard_int(raw_value, field["label"], field["min"], field["max"])
+                elif field_type == "select":
+                    normalized_value = str(raw_value or field["default"]).strip()
+                    if normalized_value not in field["options"]:
+                        raise ValueError(f"{field['label']} 取值无效")
+                    normalized[name] = normalized_value
+                else:
+                    normalized_value = str(raw_value or field["default"]).strip()
+                    if not normalized_value or len(normalized_value) > field["max_length"]:
+                        raise ValueError(f"{field['label']} 长度无效")
+                    normalized[name] = normalized_value
+            if normalized["auto_upgrade_1k_adaptive_resolution"]:
+                normalized["force_resolution_limit"] = False
+            for mode, enable_field in self.PARAMETER_MODE_ENABLE_FIELDS.items():
+                normalized[enable_field] = parameter_mode == mode
+            result.append(normalized)
+        return result
+
+    def _validate_dashboard_configuration(self, raw: Any) -> Dict[str, Any]:
+        if not isinstance(raw, dict):
+            raise ValueError("仪表盘配置必须是对象")
+        model_list = self._dashboard_string_list(raw.get("model_list", []), "model_list")
+        if not model_list:
+            raise ValueError("至少需要配置一个模型")
+        model_set = set(model_list)
+        default_model = str(raw.get("model") or "").strip()
+        if default_model not in model_set:
+            raise ValueError("默认模型必须存在于模型列表")
+        gemini_models = self._dashboard_string_list(raw.get("gemini_model_list", []), "gemini_model_list")
+        generic_lists: Dict[str, List[str]] = {}
+        for field_name in self.GENERIC_ENDPOINT_MODEL_LIST_KEYS.values():
+            generic_lists[field_name] = self._dashboard_string_list(raw.get(field_name, []), field_name)
+        for field_name, models in {"gemini_model_list": gemini_models, **generic_lists}.items():
+            unknown = [model for model in models if model not in model_set]
+            if unknown:
+                raise ValueError(f"{field_name} 包含未配置模型: {unknown[0]}")
+        generic_members = {model for models in generic_lists.values() for model in models}
+        conflict = next((model for model in gemini_models if model in generic_members), None)
+        if conflict:
+            raise ValueError(f"模型 {conflict} 不能同时使用 Gemini 和 Generic 路由")
+        current_generic_api_url = str(self.conf.get("generic_api_url", "") or "").strip()
+        if self._dashboard_url_is_sensitive(current_generic_api_url):
+            if str(raw.get("generic_api_url") or "").strip():
+                raise ValueError("带认证信息的共享 API 地址请在敏感配置中保存")
+            generic_api_url = current_generic_api_url
+        else:
+            generic_api_url = self._dashboard_url(raw.get("generic_api_url"), "共享 API 地址")
+        settings_payload = raw.get("settings", {})
+        if not isinstance(settings_payload, dict):
+            raise ValueError("settings 必须是对象")
+        settings = self._dashboard_normalize_setting_values(settings_payload)
+        help_command = self._dashboard_command_name(
+            settings.get("help_command", "手办化帮助"), "帮助菜单命令"
+        )
+        preset_list_command = self._dashboard_command_name(
+            settings.get("preset_list_command", "手办化列表"), "提示词列表触发指令"
+        )
+        static_reserved_commands = set(self.RESERVED_COMMAND_NAMES)
+        if help_command in static_reserved_commands:
+            raise ValueError("帮助菜单命令不能与插件专用指令冲突")
+        if preset_list_command in static_reserved_commands:
+            raise ValueError("提示词列表触发指令不能与插件专用指令冲突")
+        if help_command == preset_list_command:
+            raise ValueError("帮助菜单命令不能与提示词列表触发指令相同")
+        settings["help_command"] = help_command
+        settings["preset_list_command"] = preset_list_command
+        configured_reserved_commands = static_reserved_commands | {
+            help_command,
+            preset_list_command,
+        }
+        mappings: List[Dict[str, Any]] = []
+        mapping_pairs = set()
+        raw_mappings = raw.get("model_mapping_list", [])
+        if not isinstance(raw_mappings, list):
+            raise ValueError("model_mapping_list 必须是列表")
+        for item in raw_mappings:
+            if not isinstance(item, dict):
+                raise ValueError("热备映射条目必须是对象")
+            source = str(item.get("model") or "").strip()
+            target = str(item.get("mapped_model") or "").strip()
+            priority = self._dashboard_int(item.get("priority", 0), "热备优先级", -1, 10000)
+            if source not in model_set or target not in model_set or source == target or (source, target) in mapping_pairs:
+                raise ValueError("热备映射包含重复、自映射或未配置模型")
+            mapping_pairs.add((source, target))
+            mappings.append({"__template_key": "model_mapping", "model": source, "mapped_model": target, "priority": priority})
+        active_mapping_sources = {item["model"] for item in mappings if item["priority"] >= 0}
+        active_mapping_targets = {item["mapped_model"] for item in mappings if item["priority"] >= 0}
+        effective_models = (model_set - active_mapping_sources) | active_mapping_targets
+        if effective_models and not generic_api_url:
+            raise ValueError("存在启用模型时必须配置共享 API 地址")
+        prefixes = []
+        for raw_prefix in self._dashboard_string_list(raw.get("extra_prefix", []), "extra_prefix"):
+            prefix = self._dashboard_command_name(raw_prefix, "自定义触发词")
+            if prefix in prefixes:
+                raise ValueError("自定义触发词不能重复")
+            if prefix in configured_reserved_commands:
+                raise ValueError(f"自定义触发词不能覆盖插件专用指令: {prefix}")
+            prefixes.append(prefix)
+        if not prefixes:
+            raise ValueError("至少需要保留一个自定义触发词")
+        preset_commands = {
+            item["command"]
+            for item in self._dashboard_validate_presets(
+                self._dashboard_preset_items(),
+                prefixes=prefixes,
+                reserved_commands=configured_reserved_commands,
+                help_command=help_command,
+                preset_list_commands=[preset_list_command],
+            )
+        }
+        available_commands = set(prefixes) | preset_commands
+
+        bindings: List[Dict[str, str]] = []
+        bound_commands = set()
+        raw_bindings = raw.get("command_model_list", [])
+        if not isinstance(raw_bindings, list):
+            raise ValueError("command_model_list 必须是列表")
+        for item in raw_bindings:
+            if not isinstance(item, dict):
+                raise ValueError("指令模型绑定条目必须是对象")
+            command = self._dashboard_command_name(item.get("command"), "绑定指令")
+            model = str(item.get("model") or "").strip()
+            if command not in available_commands:
+                raise ValueError(f"绑定指令未启用: {command}")
+            if model not in model_set or command in bound_commands:
+                raise ValueError("指令模型绑定包含重复指令或未配置模型")
+            bound_commands.add(command)
+            bindings.append({"__template_key": "binding", "command": command, "model": model})
+        templates: List[Dict[str, str]] = []
+        template_models = set()
+        raw_templates = raw.get("model_prompt_template_list", [])
+        if not isinstance(raw_templates, list):
+            raise ValueError("model_prompt_template_list 必须是列表")
+        for item in raw_templates:
+            if not isinstance(item, dict):
+                raise ValueError("模型提示词模板条目必须是对象")
+            model = str(item.get("model") or "").strip()
+            template = str(item.get("prompt_template") or "").strip()
+            if (model != "ALL" and model not in model_set) or model in template_models or not template or len(template) > 20000:
+                raise ValueError("模型提示词模板包含重复、未配置模型或无效内容")
+            template_models.add(model)
+            templates.append({"__template_key": "model_prompt_template", "model": model, "prompt_template": template})
+        parameters = self._dashboard_normalize_model_parameters(raw.get("model_parameter_list", []), model_set)
+        return {
+            "model": default_model,
+            "model_list": model_list,
+            "generic_api_url": generic_api_url,
+            "gemini_model_list": gemini_models,
+            **settings,
+            **generic_lists,
+            "extra_prefix": [{"__template_key": "prefix", "prefix": prefix} for prefix in prefixes],
+            "command_model_list": bindings,
+            "model_mapping_list": mappings,
+            "model_prompt_template_list": templates,
+            "model_parameter_list": parameters,
+        }
+
+    def _dashboard_validate_presets(
+            self,
+            raw_presets: Any,
+            *,
+            prefixes: Optional[List[str]] = None,
+            reserved_commands: Optional[set[str]] = None,
+            help_command: Optional[str] = None,
+            preset_list_commands: Optional[List[str]] = None,
+    ) -> List[Dict[str, str]]:
+        if not isinstance(raw_presets, list):
+            raise ValueError("prompt_list 必须是列表")
+        active_prefixes = prefixes if prefixes is not None else self._get_extra_prefixes()
+        active_reserved_commands = (
+            set(reserved_commands)
+            if reserved_commands is not None
+            else self._get_reserved_command_names()
+        )
+        schema_aliases = self._schema_default_preset_aliases()
+        valid_aliases = set(schema_aliases.values())
+        used_aliases = set()
+        presets: List[Dict[str, str]] = []
+        preset_commands = set()
+        for item in raw_presets:
+            if not isinstance(item, dict):
+                raise ValueError("预设条目必须是对象")
+            command = self._dashboard_command_name(item.get("command"), "预设指令")
+            prompt = str(item.get("prompt") or "").strip()
+            if not prompt or len(prompt) > 20000:
+                raise ValueError("预设提示词不能为空且不能超过 20000 字符")
+            if conflict_message := self._preset_command_conflict_message(
+                command,
+                prefixes=active_prefixes,
+                reserved_commands=active_reserved_commands,
+                preset_commands=preset_commands,
+                help_command=help_command,
+                preset_list_commands=preset_list_commands,
+            ):
+                raise ValueError(conflict_message)
+            preset = {"__template_key": "preset", "command": command, "prompt": prompt}
+            submitted_alias = self._preset_alias(item.get("legacy_alias"))
+            alias = submitted_alias or schema_aliases.get(command, "")
+            if alias:
+                if alias not in valid_aliases:
+                    raise ValueError("预设包含无效的历史兼容别名")
+                if alias in used_aliases:
+                    raise ValueError("预设包含重复的历史兼容别名")
+                preset["legacy_alias"] = alias
+                used_aliases.add(alias)
+            preset_commands.add(command)
+            presets.append(preset)
+        return presets
+
+    def _dashboard_current_revision(self) -> str:
+        return self._dashboard_configuration_revision(self._dashboard_configuration_values())
+
+    async def _web_dashboard_configuration_get(self):
+        values = self._dashboard_configuration_values()
+        return self._dashboard_json({
+            "ok": True,
+            "revision": self._dashboard_configuration_revision(values),
+            "config": values,
+            "sensitive": self._dashboard_sensitive_state(),
+            "metadata": {
+                "model_parameter_fields": self._dashboard_parameter_fields(),
+                "parameter_modes": [
+                    {"value": value, "label": label}
+                    for value, label in self.PARAMETER_MODES
+                ],
+                "settings": self._dashboard_settings_metadata(),
+            },
+        })
+
+    async def _web_dashboard_sensitive_get(self):
+        values = self._dashboard_configuration_values()
+        return self._dashboard_json({
+            "ok": True,
+            "revision": self._dashboard_configuration_revision(values),
+            "sensitive": self._dashboard_sensitive_state(),
+        })
+
+    async def _web_dashboard_presets_get(self):
+        return self._dashboard_json({
+            "ok": True,
+            "revision": self._dashboard_preset_revision(),
+            "presets": self._dashboard_preset_items(),
+        })
+
+    async def _web_dashboard_configuration_save(self):
+        try:
+            body = await request.json(default={})
+            expected_revision = str(body.get("revision") or "").strip()
+            async with self._dashboard_config_lock:
+                current_values = self._dashboard_configuration_values()
+                current_revision = self._dashboard_configuration_revision(current_values)
+                if expected_revision != current_revision:
+                    return self._dashboard_error("配置已被其他页面修改，请重新加载后再保存", 409)
+                validated = self._validate_dashboard_configuration(body.get("config", body))
+                previous = {
+                    key: (key in self.conf, copy.deepcopy(self.conf.get(key)))
+                    for key in {*validated, "_dashboard_config_generation"}
+                }
+                try:
+                    for key, value in validated.items():
+                        self.conf[key] = value
+                    self._dashboard_advance_configuration_generation()
+                    await self._persist_configuration()
+                except Exception:
+                    for key, (existed, value) in previous.items():
+                        if existed:
+                            self.conf[key] = value
+                        else:
+                            try:
+                                del self.conf[key]
+                            except (KeyError, TypeError):
+                                pass
+                    raise
+                await self._load_prompt_map()
+                values = self._dashboard_configuration_values()
+            return self._dashboard_json({
+                "ok": True,
+                "revision": self._dashboard_configuration_revision(values),
+                "config": values,
+                "message": "仪表盘配置已保存，后续生成请求将使用新配置。",
+            })
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error("保存仪表盘配置失败", exc_info=True)
+            reason = str(exc).strip() or exc.__class__.__name__
+            return self._dashboard_error(
+                f"保存仪表盘配置失败，运行中的配置已恢复：{reason}", 500
+            )
+
+    async def _web_dashboard_presets_save(self):
+        try:
+            body = await request.json(default={})
+            expected_revision = str(body.get("revision") or "").strip()
+            async with self._dashboard_config_lock:
+                if expected_revision != self._dashboard_preset_revision():
+                    return self._dashboard_error("预设已被其他页面或配置文件修改，请重新加载后再保存", 409)
+                presets = self._dashboard_validate_presets(body.get("presets", body.get("prompt_list", [])))
+                previous = {
+                    "prompt_list": ("prompt_list" in self.conf, copy.deepcopy(self.conf.get("prompt_list"))),
+                }
+                try:
+                    self.conf["prompt_list"] = presets
+                    await self._persist_configuration()
+                except Exception:
+                    for key, (existed, value) in previous.items():
+                        if existed:
+                            self.conf[key] = value
+                        else:
+                            self.conf.pop(key, None)
+                    raise
+                await self._load_prompt_map()
+            return self._dashboard_json({
+                "ok": True,
+                "revision": self._dashboard_preset_revision(),
+                "presets": self._dashboard_preset_items(),
+                "message": "预设提示词已保存。",
+            })
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception as exc:
+            logger.error(f"保存预设提示词失败: {exc}")
+            return self._dashboard_error("保存预设提示词失败，运行中的配置已恢复", 500)
+
+    async def _web_dashboard_sensitive_save(self):
+        try:
+            body = await request.json(default={})
+            expected_revision = str(body.get("revision") or "").strip()
+            action = str(body.get("action") or "").strip()
+            target = str(body.get("target") or "").strip()
+            if target not in {"generic_api_keys", "generic_api_url", "proxy_url"}:
+                raise ValueError("敏感配置目标无效")
+            if action not in {"append", "replace", "clear"}:
+                raise ValueError("敏感配置操作无效")
+            async with self._dashboard_config_lock:
+                if expected_revision != self._dashboard_current_revision():
+                    return self._dashboard_error("配置已被其他页面修改，请重新加载后再保存", 409)
+                previous = {
+                    target: (target in self.conf, copy.deepcopy(self.conf.get(target))),
+                    "_dashboard_config_generation": (
+                        "_dashboard_config_generation" in self.conf,
+                        copy.deepcopy(self.conf.get("_dashboard_config_generation")),
+                    ),
+                }
+                if target == "generic_api_keys":
+                    raw_values = body.get("values", [])
+                    if not isinstance(raw_values, list):
+                        raise ValueError("Key 池必须是列表")
+                    values = []
+                    for raw_value in raw_values:
+                        value = str(raw_value or "").strip()
+                        if not value or len(value) > 1000:
+                            raise ValueError("Key 格式无效")
+                        if value not in values:
+                            values.append(value)
+                    if action == "append":
+                        current = self.conf.get(target, [])
+                        current_values = list(current) if isinstance(current, list) else []
+                        next_value = current_values + [value for value in values if value not in current_values]
+                    elif action == "replace":
+                        next_value = values
+                    else:
+                        next_value = []
+                else:
+                    if action == "append":
+                        raise ValueError("该敏感配置不支持追加")
+                    if action == "clear":
+                        next_value = ""
+                    else:
+                        next_value = str(body.get("value") or "").strip()
+                        if not self._dashboard_url_is_sensitive(next_value):
+                            raise ValueError("敏感地址必须包含认证信息或敏感查询参数")
+                        if target == "generic_api_url":
+                            next_value = self._dashboard_sensitive_service_url(next_value, "共享 API 地址")
+                        else:
+                            parsed = urlparse(next_value)
+                            if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.netloc:
+                                raise ValueError("代理地址格式无效")
+                try:
+                    self.conf[target] = next_value
+                    self._dashboard_advance_configuration_generation()
+                    await self._persist_configuration()
+                except Exception:
+                    for key, (existed, value) in previous.items():
+                        if existed:
+                            self.conf[key] = value
+                        else:
+                            self.conf.pop(key, None)
+                    raise
+                values_snapshot = self._dashboard_configuration_values()
+            return self._dashboard_json({
+                "ok": True,
+                "revision": self._dashboard_configuration_revision(values_snapshot),
+                "sensitive": self._dashboard_sensitive_state(),
+                "message": "敏感配置已保存。",
+            })
+        except ValueError as exc:
+            return self._dashboard_error(str(exc), 400)
+        except Exception:
+            logger.error("保存敏感配置失败")
+            return self._dashboard_error("保存敏感配置失败，运行中的配置已恢复", 500)
 
     def _register_llm_tools(self):
         if not self.conf.get("enable_llm_tools", False):
@@ -843,7 +2239,7 @@ class FigurineProPlugin(Star):
             if not image_bytes_list and self.iwf:
                 image_bytes_list = await self.iwf.get_images(event)
             max_images = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
-            image_bytes_list = self._limit_reference_images(model_name, image_bytes_list)
+            image_bytes_list = image_bytes_list[:max_images]
             if not image_bytes_list:
                 return self._build_llm_tool_result(
                     ok=False,
@@ -856,7 +2252,53 @@ class FigurineProPlugin(Star):
             _normalize_positive_int(self.conf.get("max_batch_concurrency", 4), 4),
             20,
         )
+        initial_candidate_model = self._get_model_failover_candidates(model_name)[0]
+        initial_request_context = self._get_request_context(
+            model_name,
+            initial_candidate_model,
+            bool(image_bytes_list),
+        )
+        initial_request_context["image_bytes_list"] = self._limit_reference_images(
+            initial_candidate_model,
+            image_bytes_list,
+            initial_request_context["parameters"],
+        )
         batch_semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _record_llm_failover_attempt(
+            failed_model: str,
+            failed_result: Any,
+            failed_status: int,
+            succeeded: bool,
+        ):
+            failed_context = self._get_request_context(
+                model_name,
+                failed_model,
+                bool(image_bytes_list),
+            )
+            failed_context["image_bytes_list"] = self._limit_reference_images(
+                failed_model,
+                image_bytes_list,
+                failed_context["parameters"],
+            )
+            sender_id = self._norm_id(event.get_sender_id())
+            group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
+            await self._settle_usage_generation(
+                event=event,
+                source="llm_tool",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_name,
+                actual_model=failed_context["actual_model"],
+                has_images=bool(failed_context["image_bytes_list"]),
+                outcome="failed",
+                http_status=failed_status,
+                output_count=0,
+                charged_units=0,
+                deduction_source=None,
+                note="LLM 工具热备切换前的中间失败",
+                request_context=failed_context,
+            )
 
         async def call_generation(batch_index: int):
             async with batch_semaphore:
@@ -867,7 +2309,8 @@ class FigurineProPlugin(Star):
                         override_model=model_name,
                         aspect_ratio=normalized_aspect_ratio,
                         force_aspect_ratio=bool(normalized_aspect_ratio),
-                        return_actual_model=True,
+                        return_request_context=True,
+                        on_attempt=_record_llm_failover_attempt,
                     )
                 except Exception as exc:
                     return batch_index, exc
@@ -888,9 +2331,29 @@ class FigurineProPlugin(Star):
                     "error_type": "system_error",
                     "message": self._safe_error_text(str(result), 300),
                 })
+                sender_id = self._norm_id(event.get_sender_id())
+                group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
+                await self._settle_usage_generation(
+                    event=event,
+                    source="llm_tool",
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    logical_model=model_name,
+                    actual_model=initial_request_context["actual_model"],
+                    has_images=bool(initial_request_context["image_bytes_list"]),
+                    outcome="failed",
+                    http_status=0,
+                    output_count=0,
+                    charged_units=0,
+                    deduction_source=None,
+                    note="LLM 工具系统错误",
+                    request_context=initial_request_context,
+                )
                 continue
 
-            generated_image, http_status, actual_model = result
+            generated_image, http_status, request_context = result
+            actual_model = request_context["actual_model"]
+            candidate_images = request_context["image_bytes_list"]
             if not isinstance(generated_image, bytes):
                 error_data = generated_image if isinstance(generated_image, dict) else {}
                 failures.append({
@@ -903,16 +2366,58 @@ class FigurineProPlugin(Star):
                     ),
                     "model": actual_model,
                 })
+                sender_id = self._norm_id(event.get_sender_id())
+                group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
+                await self._settle_usage_generation(
+                    event=event,
+                    source="llm_tool",
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    logical_model=model_name,
+                    actual_model=actual_model,
+                    has_images=bool(candidate_images),
+                    outcome="failed",
+                    http_status=http_status,
+                    output_count=0,
+                    charged_units=0,
+                    deduction_source=None,
+                    request_context=request_context,
+                )
                 continue
 
-            successful_models.append(actual_model)
             sender_id = self._norm_id(event.get_sender_id())
             group_id = self._norm_id(event.get_group_id()) if event.get_group_id() else None
+            await self._settle_usage_generation(
+                event=event,
+                source="llm_tool",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_name,
+                actual_model=actual_model,
+                has_images=bool(candidate_images),
+                outcome="success",
+                http_status=http_status,
+                output_count=1,
+                charged_units=0,
+                deduction_source=None,
+                request_context=request_context,
+            )
             await self._record_daily_usage(sender_id, group_id)
-            await event.send(self._reply_chain_result(event, [
-                Image.fromBytes(generated_image),
-                Plain(f"LLM 工具生成完成 {batch_index}/{normalized_batch_count} | 模型: {actual_model}"),
-            ]))
+            sent = await self._send_llm_image_once(
+                event,
+                generated_image,
+                f"LLM 工具生成完成 {batch_index}/{normalized_batch_count} | 模型: {actual_model}",
+            )
+            if not sent:
+                failures.append({
+                    "batch_index": batch_index,
+                    "error_type": "delivery_failed",
+                    "message": "图片已生成，但发送到聊天平台失败。",
+                    "model": actual_model,
+                })
+            else:
+                successful_models.append(actual_model)
+
 
         result_payload: Dict[str, Any] = {
             "ok": bool(successful_models),
@@ -934,8 +2439,7 @@ class FigurineProPlugin(Star):
 
         self.conf[current_key] = bool(self.conf.get(legacy_key, True))
         try:
-            if hasattr(self.conf, "save"):
-                self.conf.save()
+            await self._persist_configuration()
             logger.info("已迁移违规内容扣次配置为错误码扣次配置")
         except Exception as exc:
             logger.error(f"迁移错误码扣次配置失败: {exc}")
@@ -1058,95 +2562,112 @@ class FigurineProPlugin(Star):
         return None
 
     async def _migrate_prompt_list_config(self):
-        prompt_list = self.conf.get("prompt_list", [])
+        raw_prompt_list = self.conf.get("prompt_list", [])
+        had_prompts = "prompts" in self.conf
         prompts_cfg = self.conf.get("prompts", {})
-        if not isinstance(prompt_list, list):
-            prompt_list = []
+        if not isinstance(raw_prompt_list, list):
+            raw_prompt_list = []
+        try:
+            preset_schema_version = int(self.conf.get("_preset_schema_version", 0))
+        except (TypeError, ValueError):
+            preset_schema_version = 0
 
-        migrated: List[Dict[str, str]] = []
-        changed = False
-        seen = set()
-
-        def add_item(command: Any, prompt: Any):
-            nonlocal changed
-            key = str(command or "").strip()
-            value = str(prompt or "").strip()
-            if not key or not value or key in seen:
-                return
-            seen.add(key)
-            migrated.append({"__template_key": "preset", "command": key, "prompt": value})
-
-        for item in prompt_list:
-            if isinstance(item, dict):
-                key = str(item.get("command") or item.get("指令") or item.get("name") or "").strip()
-                value = str(item.get("prompt") or item.get("提示词") or item.get("value") or "").strip()
-                if key and value:
-                    add_item(key, value)
-                    if item.get("__template_key") != "preset" or set(item.keys()) != {"__template_key", "command", "prompt"}:
-                        changed = True
-                else:
-                    changed = True
-            elif isinstance(item, str) and ":" in item:
-                key, value = item.split(":", 1)
-                add_item(key, value)
-                changed = True
-            elif item:
-                changed = True
+        schema_defaults = self._schema_default_preset_items()
+        schema_aliases = self._schema_default_preset_aliases()
+        alias_commands = {alias: command for command, alias in schema_aliases.items()}
+        existing_presets = self._normalized_preset_items(raw_prompt_list)
+        existing_commands = {preset["command"] for preset in existing_presets}
+        legacy_values: Dict[str, str] = {}
+        legacy_custom_presets: List[Dict[str, str]] = []
 
         if isinstance(prompts_cfg, dict):
-            for key, value in prompts_cfg.items():
-                if key in self.BUILT_IN_CMD_MAP.values() or key in self.BUILT_IN_CMD_MAP:
+            for raw_key, raw_value in prompts_cfg.items():
+                key = str(raw_key or "").strip()
+                value = raw_value.get("default") if isinstance(raw_value, dict) else raw_value
+                prompt = str(value or "").strip()
+                if not key or not prompt:
                     continue
-                if isinstance(value, dict) and "default" in value:
-                    add_item(key, value["default"])
-                    changed = True
-                elif isinstance(value, str):
-                    add_item(key, value)
-                    changed = True
+                command = alias_commands.get(key, key)
+                if command in schema_aliases:
+                    legacy_values[command] = prompt
+                elif command not in existing_commands:
+                    legacy_custom_presets.append({
+                        "__template_key": "preset",
+                        "command": command,
+                        "prompt": prompt,
+                    })
+                    existing_commands.add(command)
 
-        if changed:
-            self.conf["prompt_list"] = migrated
+        explicit_presets = {preset["command"]: preset for preset in existing_presets}
+        if preset_schema_version < 1:
+            migrated = []
+            for default_preset in schema_defaults:
+                migrated.append(copy.deepcopy(explicit_presets.pop(default_preset["command"], default_preset)))
+            migrated.extend(explicit_presets.values())
+        else:
+            migrated = list(existing_presets)
+
+        migrated_by_command = {preset["command"]: preset for preset in migrated}
+        for command, prompt in legacy_values.items():
+            if command in existing_commands:
+                continue
+            alias = schema_aliases[command]
+            legacy_preset = {
+                "__template_key": "preset",
+                "command": command,
+                "prompt": prompt,
+                "legacy_alias": alias,
+            }
+            if command in migrated_by_command:
+                index = migrated.index(migrated_by_command[command])
+                migrated[index] = legacy_preset
+            elif preset_schema_version < 1:
+                migrated.append(legacy_preset)
+            migrated_by_command[command] = legacy_preset
+        migrated.extend(legacy_custom_presets)
+
+        needs_migration = (
+            migrated != raw_prompt_list
+            or had_prompts
+            or preset_schema_version < 1
+        )
+        if not needs_migration:
+            return
+
+        previous_prompt_list = copy.deepcopy(self.conf.get("prompt_list"))
+        previous_schema_version = self.conf.get("_preset_schema_version")
+        previous_prompts = copy.deepcopy(prompts_cfg)
+        self.conf["prompt_list"] = migrated
+        self.conf["_preset_schema_version"] = 1
+        if had_prompts:
             try:
-                if hasattr(self.conf, "save"):
-                    self.conf.save()
-                logger.info(f"已自动迁移 prompt_list 到对象列表格式，共 {len(migrated)} 条")
-            except Exception as e:
-                logger.error(f"自动迁移 prompt_list 配置失败: {e}")
+                del self.conf["prompts"]
+            except (KeyError, TypeError):
+                self.conf["prompts"] = {}
+        try:
+            await self._persist_configuration()
+            logger.info(f"已自动迁移 prompt_list 到配置驱动预设，共 {len(migrated)} 条")
+        except Exception as exc:
+            self.conf["prompt_list"] = previous_prompt_list
+            if previous_schema_version is None:
+                self.conf.pop("_preset_schema_version", None)
+            else:
+                self.conf["_preset_schema_version"] = previous_schema_version
+            if had_prompts:
+                self.conf["prompts"] = previous_prompts
+            logger.error(f"自动迁移 prompt_list 配置失败: {exc}")
 
     async def _load_prompt_map(self):
-        self.prompt_map.clear()
-
-        # 1. 内置基础映射 (硬编码的指令)
-        for k in self.BUILT_IN_CMD_MAP.keys():
-            self.prompt_map[k] = "[内置预设]"
-
-        # 2. 从配置的 prompts 加载
-        prompts_cfg = self.conf.get("prompts", {})
-        if isinstance(prompts_cfg, dict):
-            for k, v in prompts_cfg.items():
-                if isinstance(v, dict) and "default" in v:
-                    self.prompt_map[k] = v["default"]
-                elif isinstance(v, str):
-                    self.prompt_map[k] = v
-
-        # 3. 从 prompt_list 加载
-        prompt_list = self.conf.get("prompt_list", [])
-        if isinstance(prompt_list, list):
-            for item in prompt_list:
-                if isinstance(item, dict):
-                    k = str(item.get("command") or item.get("指令") or item.get("name") or "").strip()
-                    v = str(item.get("prompt") or item.get("提示词") or item.get("value") or "").strip()
-                    if k and v:
-                        self.prompt_map[k] = v
-                elif isinstance(item, str) and ":" in item:
-                    k, v = item.split(":", 1)
-                    self.prompt_map[k.strip()] = v.strip()
+        self.prompt_map = {
+            preset["command"]: preset["prompt"]
+            for preset in self._normalized_preset_items()
+        }
 
     def _get_custom_preset_prompt(self, preset_name: str) -> Optional[str]:
-        prompt = self.prompt_map.get((preset_name or "").strip())
-        if prompt and prompt != "[内置预设]":
-            return prompt
-        return None
+        command = (preset_name or "").strip()
+        if command in self._get_default_preset_commands():
+            return None
+        return self.prompt_map.get(command)
 
     def _resolve_bnn_prompt(
             self,
@@ -1432,8 +2953,83 @@ class FigurineProPlugin(Star):
         # 精确模型配置优先；ALL（必须全大写）作为所有模型的兜底配置。
         return mapping.get(normalized_model) or mapping.get("ALL")
 
+    def _get_raw_model_parameter_entry_map(self) -> Dict[str, Dict[str, Any]]:
+        """Return configured entries without filling defaults so entry presence remains meaningful."""
+        raw_list = self.conf.get("model_parameter_list", [])
+        entries: Dict[str, Dict[str, Any]] = {}
+
+        def add_entry(model: Any, entry: Any) -> None:
+            model_name = str(model or "").strip()
+            if model_name and isinstance(entry, dict):
+                entries[model_name] = entry
+
+        if isinstance(raw_list, dict):
+            for model_name, entry in raw_list.items():
+                add_entry(model_name, entry)
+        elif isinstance(raw_list, list):
+            for entry in raw_list:
+                if isinstance(entry, dict):
+                    add_entry(
+                        entry.get("model") or entry.get("模型") or entry.get("model_name") or entry.get("模型名"),
+                        entry,
+                    )
+        return entries
+
+    def _get_parameter_mode_from_entry(self, entry: Optional[Dict[str, Any]]) -> str:
+        """Resolve the persisted mode, or infer one deterministically for legacy entries."""
+        if not isinstance(entry, dict):
+            return "none"
+        known_modes = {mode for mode, _ in self.PARAMETER_MODES}
+        configured_mode = ""
+        if "parameter_mode" in entry:
+            configured_mode = str(entry.get("parameter_mode") or "").strip().lower()
+            if configured_mode and configured_mode not in known_modes:
+                return "none"
+            if configured_mode and configured_mode != "none":
+                return configured_mode
+
+        def is_enabled(*keys: str) -> bool:
+            for key in keys:
+                if key not in entry or entry[key] is None:
+                    continue
+                value = entry[key]
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, (int, float)):
+                    return value != 0
+                return str(value).strip().lower() in {
+                    "1", "true", "yes", "on", "enable", "enabled", "是", "开启",
+                }
+            return False
+
+        legacy_enable_fields = {
+            "gpt": ("enable_gpt_parameters", "gpt_parameters", "GPT参数设置"),
+            "gemini": ("enable_gemini_parameters", "gemini_parameters", "Gemini参数设置"),
+            "grok": ("enable_grok_parameters", "grok_parameters", "Grok参数设置"),
+            "seedream": ("enable_seedream_parameters", "seedream_parameters", "Seedream参数设置"),
+        }
+        for mode in ("gpt", "gemini", "grok", "seedream"):
+            if is_enabled(*legacy_enable_fields[mode]):
+                return mode
+        return configured_mode if configured_mode in known_modes else "none"
+
+    def _get_effective_model_parameters(
+            self,
+            source_model: str,
+            actual_model: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Target entries override wholesale; inherit source only when target has no entry."""
+        raw_entries = self._get_raw_model_parameter_entry_map()
+        actual_name = str(actual_model or "").strip()
+        source_name = str(source_model or "").strip()
+        parameter_model = actual_name if actual_name in raw_entries else source_name
+        if parameter_model not in raw_entries:
+            return None
+        return self._get_model_parameter_map().get(parameter_model)
+
     def _get_model_parameter_map(self) -> Dict[str, Dict[str, Any]]:
         mapping: Dict[str, Dict[str, Any]] = {}
+        raw_entries = self._get_raw_model_parameter_entry_map()
         raw_list = self.conf.get("model_parameter_list", [])
 
         def normalize_option(value: Any, allowed: set[str], default: str) -> str:
@@ -1527,13 +3123,17 @@ class FigurineProPlugin(Star):
                 seedream_pixel_limit: Any = 0,
                 seedream_adaptive_aspect_ratio: Any = False,
                 seedream_max_side_2000: Any = True,
+                seedream_side_over_2000_auto_2k: Any = True,
                 seedream_optimize_prompt_mode: Any = "standard",
         ):
             model_name = str(model or "").strip()
             if not model_name:
                 return
             auto_upgrade_1k = normalize_bool(auto_upgrade_1k_adaptive_resolution)
+            parameter_mode = self._get_parameter_mode_from_entry(raw_entries.get(model_name))
+            enabled_field = self.PARAMETER_MODE_ENABLE_FIELDS.get(parameter_mode, "")
             mapping[model_name] = {
+                "parameter_mode": parameter_mode,
                 "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
@@ -1549,18 +3149,18 @@ class FigurineProPlugin(Star):
                 "force_resolution_limit": (
                     normalize_bool(force_resolution_limit) and not auto_upgrade_1k
                 ),
-                "enable_gpt_parameters": normalize_bool(enable_gpt_parameters),
+                "enable_gpt_parameters": enabled_field == "enable_gpt_parameters",
                 "omit_n_parameter": normalize_bool(omit_n_parameter),
-                "enable_gemini_parameters": normalize_bool(enable_gemini_parameters),
+                "enable_gemini_parameters": enabled_field == "enable_gemini_parameters",
                 "gemini_resolution": normalize_gemini_resolution(gemini_resolution),
                 "gemini_adaptive_aspect_ratio": normalize_bool(gemini_adaptive_aspect_ratio),
                 "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
                 "reference_image_limit": _normalize_nonnegative_int(reference_image_limit),
                 "extra_reference_image_quota": _normalize_nonnegative_int(extra_reference_image_quota),
-                "enable_grok_parameters": normalize_bool(enable_grok_parameters),
+                "enable_grok_parameters": enabled_field == "enable_grok_parameters",
                 "grok_resolution": normalize_grok_resolution(grok_resolution),
                 "grok_adaptive_aspect_ratio": normalize_bool(grok_adaptive_aspect_ratio),
-                "enable_seedream_parameters": normalize_bool(enable_seedream_parameters),
+                "enable_seedream_parameters": enabled_field == "enable_seedream_parameters",
                 "seedream_web_search": normalize_bool(seedream_web_search),
                 "seedream_send_output_format": normalize_bool(seedream_send_output_format),
                 "seedream_output_format": normalize_seedream_output_format(seedream_output_format),
@@ -1571,6 +3171,7 @@ class FigurineProPlugin(Star):
                 "seedream_pixel_limit": _normalize_nonnegative_int(seedream_pixel_limit),
                 "seedream_adaptive_aspect_ratio": normalize_bool(seedream_adaptive_aspect_ratio),
                 "seedream_max_side_2000": normalize_bool(seedream_max_side_2000),
+                "seedream_side_over_2000_auto_2k": normalize_bool(seedream_side_over_2000_auto_2k),
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
             }
 
@@ -1716,6 +3317,13 @@ class FigurineProPlugin(Star):
                             "seedream_max_side_2000",
                             "Seedream宽高均不超过2000",
                             "Seedream最大边长不超过2000",
+                            default=True,
+                        ),
+                        get_value(
+                            parameters,
+                            "seedream_side_over_2000_auto_2k",
+                            "边长超2000自动升2K",
+                            "边长超过2000自动升级2K",
                             default=True,
                         ),
                         get_value(
@@ -1876,6 +3484,13 @@ class FigurineProPlugin(Star):
                 ),
                 get_value(
                     item,
+                    "seedream_side_over_2000_auto_2k",
+                    "边长超2000自动升2K",
+                    "边长超过2000自动升级2K",
+                    default=True,
+                ),
+                get_value(
+                    item,
                     "seedream_optimize_prompt_mode",
                     "Seedream提示词优化模式",
                     default="standard",
@@ -1884,8 +3499,21 @@ class FigurineProPlugin(Star):
 
         return mapping
 
-    def _get_model_parameters(self, model_name: str) -> Dict[str, str]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+    def _parameters_for_request(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if parameters is not None:
+            return parameters
+        return self._get_model_parameter_map().get((model_name or "").strip())
+
+    def _get_model_parameters(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_gpt_parameters"):
             return {}
         return {
@@ -1893,8 +3521,12 @@ class FigurineProPlugin(Star):
             "moderation": parameters["moderation"],
         }
 
-    def _get_max_output_tokens(self, model_name: str) -> int:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+    def _get_max_output_tokens(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        parameters = self._parameters_for_request(model_name, parameters)
         model_limit = _normalize_nonnegative_int((parameters or {}).get("max_output_tokens", 0))
         if model_limit:
             return model_limit
@@ -1902,32 +3534,45 @@ class FigurineProPlugin(Star):
             self.conf.get("max_output_tokens", self.conf.get("gemini_max_output_tokens", 0))
         )
 
-    def _get_seedream_parameters(self, model_name: str) -> Optional[Dict[str, Any]]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+    def _get_seedream_parameters(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_seedream_parameters"):
             return None
         return parameters
 
-    def _get_reference_image_limit(self, model_name: str) -> int:
+    def _get_reference_image_limit(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> int:
         global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         model_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
         return min(model_limit, global_limit) if model_limit else global_limit
 
-    def _limit_reference_images(self, model_name: str, image_bytes_list: List[bytes]) -> List[bytes]:
+    def _limit_reference_images(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> List[bytes]:
         global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         configured_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
         quota = _normalize_nonnegative_int((parameters or {}).get("extra_reference_image_quota", 0))
-        # 超限计费模式：软限不再截断，允许发到全局硬上限，超出软限部分由 _get_extra_reference_image_cost 计费
         if configured_limit > 0 and quota > 0:
             return image_bytes_list[:global_limit]
-        return image_bytes_list[:self._get_reference_image_limit(model_name)]
+        return image_bytes_list[:self._get_reference_image_limit(model_name, parameters)]
 
     def _get_extra_reference_image_cost(
             self,
             model_name: str,
             image_bytes_list: Optional[List[bytes]],
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
         """超限参考图阶梯额外扣次（不含基础扣次）。
 
@@ -1937,7 +3582,7 @@ class FigurineProPlugin(Star):
         """
         if not image_bytes_list:
             return 0
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if not parameters:
             return 0
         configured_limit = _normalize_nonnegative_int(parameters.get("reference_image_limit", 0))
@@ -1973,14 +3618,17 @@ class FigurineProPlugin(Star):
             model_name: str,
             resolution: Optional[str] = None,
             image_bytes_list: Optional[List[bytes]] = None,
+            parameters: Optional[Dict[str, Any]] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> Optional[str]:
         """判定本次请求应使用的分辨率扣次档位。
 
         4K > 2K > 无。4K 档由模型分辨率设置或命令 x4 触发（暂不按边长检测）；
-        2K 档由参考图任一边长 > 2000、模型分辨率设置 2K 或命令 x2 触发。
+        2K 档由参考图任一边长 > 2000、模型分辨率设置 2K、命令 x2，
+        或「边长超2000自动升2K」开启时 Seedream 详细分辨率的自适应结果触发。
         任一条件满足即命中对应档位，取最高档。
         """
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         configured_resolution = str((parameters or {}).get("adaptive_resolution") or "1K").upper()
         requested_resolution = str(resolution or "").strip().upper()
 
@@ -1990,17 +3638,69 @@ class FigurineProPlugin(Star):
                 configured_resolution == "2K"
                 or requested_resolution == "2K"
                 or self._get_max_reference_image_side(image_bytes_list) > 2000
+                or self._seedream_side_upgrade_hits_2k(
+                    model_name,
+                    image_bytes_list,
+                    aspect_ratio,
+                    parameters,
+                )
         ):
             return "2K"
         return None
 
-    def _get_tiered_deduction_cost(self, model_name: str, tier: Optional[str]) -> int:
+    def _seedream_side_upgrade_hits_2k(
+            self,
+            model_name: str,
+            image_bytes_list: Optional[List[bytes]],
+            aspect_ratio: Optional[str],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """判断 Seedream 详细分辨率本次是否会因边长超限而升级为 2K 尺寸。
+
+        与 _build_seedream_adaptive_size 的升级条件保持一致：
+        「Seedream参数设置 + 传递详细分辨率 + 边长超2000自动升2K」均开启、
+        有比例来源（命令 =宽:高 或首张参考图），且所选档位尺寸任一边超过
+        宽高上限（像素数上限容纳不下 2K 档时不升级）。
+        """
+        seedream_parameters = self._get_seedream_parameters(model_name, parameters)
+        if not seedream_parameters:
+            return False
+        if not seedream_parameters.get("seedream_send_detailed_resolution"):
+            return False
+        if not seedream_parameters.get("seedream_side_over_2000_auto_2k", True):
+            return False
+        selected_ratio = self._get_seedream_selected_aspect_ratio(image_bytes_list, aspect_ratio)
+        if not selected_ratio:
+            return False
+        resolution = str(seedream_parameters.get("seedream_resolution") or "1.5K").upper()
+        if resolution not in self.SEEDREAM_RESOLUTION_ORDER:
+            resolution = "1.5K"
+        width, height = self._parse_seedream_size(
+            self.SEEDREAM_SIZE_OPTIONS[resolution][selected_ratio]
+        )
+        if max(width, height) <= self.SEEDREAM_ADAPTIVE_MAX_SIDE:
+            return False
+        pixel_limit = _normalize_nonnegative_int(seedream_parameters.get("seedream_pixel_limit", 0)) * 1000
+        if pixel_limit:
+            upgrade_width, upgrade_height = self._parse_seedream_size(
+                self.SEEDREAM_SIZE_OPTIONS["2K"][selected_ratio]
+            )
+            if upgrade_width * upgrade_height > pixel_limit:
+                return False
+        return True
+
+    def _get_tiered_deduction_cost(
+            self,
+            model_name: str,
+            tier: Optional[str],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> int:
         """按档位返回单次扣次：命中 2K/4K 时替换基础扣次，未命中时为基础扣次。
 
         模型「2K/4K扣除次数」>0 时使用模型配置，否则回退全局
         resolution_2k_cost / resolution_4k_cost（默认 2 / 4）。
         """
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if tier == "4K":
             model_cost = _normalize_nonnegative_int((parameters or {}).get("deduction_count_4k", 0))
             if model_cost > 0:
@@ -2038,8 +3738,9 @@ class FigurineProPlugin(Star):
             model_name: str,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str] = None,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if (
                 not parameters
                 or not parameters.get("enable_gemini_parameters")
@@ -2075,8 +3776,9 @@ class FigurineProPlugin(Star):
             image_bytes_list: Optional[List[bytes]] = None,
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_gemini_parameters"):
             return {}
 
@@ -2095,6 +3797,7 @@ class FigurineProPlugin(Star):
                 model_name,
                 image_bytes_list or [],
                 aspect_ratio,
+                parameters,
             )
             if adaptive_aspect_ratio:
                 image_config["aspectRatio"] = adaptive_aspect_ratio
@@ -2214,8 +3917,9 @@ class FigurineProPlugin(Star):
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Optional[Tuple[str, str, bool]]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         normalized_resolution = str(resolution or "").strip().upper()
         if (
                 not parameters
@@ -2284,6 +3988,7 @@ class FigurineProPlugin(Star):
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         details = self._get_adaptive_image_size_details(
             model_name,
@@ -2291,11 +3996,16 @@ class FigurineProPlugin(Star):
             resolution,
             aspect_ratio,
             force_aspect_ratio,
+            parameters,
         )
         return details[0] if details else None
 
-    def _should_omit_n_parameter(self, model_name: str) -> bool:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+    def _should_omit_n_parameter(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        parameters = self._parameters_for_request(model_name, parameters)
         return bool(
             parameters
             and parameters.get("enable_gpt_parameters")
@@ -2324,8 +4034,9 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_grok_parameters"):
             return {}
 
@@ -2397,13 +4108,20 @@ class FigurineProPlugin(Star):
             return None
         return self._get_nearest_seedream_aspect_ratio(source_ratio)
 
+    @classmethod
+    def _parse_seedream_size(cls, value: str) -> Tuple[int, int]:
+        """解析尺寸表中的 "宽x高" 字符串。"""
+        width_text, height_text = str(value).split("x", 1)
+        return int(width_text), int(height_text)
+
     def _build_seedream_adaptive_size(
             self,
             model_name: str,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> str:
-        parameters = self._get_seedream_parameters(model_name) or {}
+        parameters = self._get_seedream_parameters(model_name, parameters) or {}
         requested_resolution = str(parameters.get("seedream_resolution") or "1.5K").upper()
         if requested_resolution not in self.SEEDREAM_RESOLUTION_ORDER:
             logger.warning(
@@ -2422,6 +4140,31 @@ class FigurineProPlugin(Star):
         )
         available_resolutions = self.SEEDREAM_RESOLUTION_ORDER
         requested_index = available_resolutions.index(requested_resolution)
+
+        side_auto_upgrade = (
+            bool(parameters.get("seedream_side_over_2000_auto_2k", True))
+            and bool(max_side_limit)
+        )
+        if side_auto_upgrade:
+            width, height = self._parse_seedream_size(
+                self.SEEDREAM_SIZE_OPTIONS[requested_resolution][selected_ratio]
+            )
+            if max(width, height) > max_side_limit:
+                upgrade_width, upgrade_height = self._parse_seedream_size(
+                    self.SEEDREAM_SIZE_OPTIONS["2K"][selected_ratio]
+                )
+                if not pixel_limit or upgrade_width * upgrade_height <= pixel_limit:
+                    logger.info(
+                        f"Seedream 尺寸边长超 {max_side_limit}px，自动升级 2K: "
+                        f"model={model_name}, {width}x{height} -> "
+                        f"{upgrade_width}x{upgrade_height}"
+                    )
+                    return self.SEEDREAM_SIZE_OPTIONS["2K"][selected_ratio]
+                logger.info(
+                    f"Seedream 边长超 {max_side_limit}px 但 2K 档超出像素数上限 "
+                    f"{pixel_limit // 1000}K，维持降档逻辑: model={model_name}"
+                )
+
         allowed_resolutions = available_resolutions[:requested_index + 1]
         if pixel_limit or max_side_limit:
             fitting_resolutions = []
@@ -2470,8 +4213,9 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
             force_aspect_ratio: bool,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        parameters = self._get_seedream_parameters(model_name)
+        parameters = self._get_seedream_parameters(model_name, parameters)
         if not parameters:
             return {}
 
@@ -2502,6 +4246,7 @@ class FigurineProPlugin(Star):
                 model_name,
                 image_bytes_list,
                 aspect_ratio,
+                parameters,
             )
         else:
             request["size"] = parameters["seedream_resolution"]
@@ -2514,18 +4259,20 @@ class FigurineProPlugin(Star):
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
-        model_parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        model_parameters = self._parameters_for_request(model_name, parameters)
         if not model_parameters:
             return {}
 
-        parameters = self._get_model_parameters(model_name)
+        parameters = self._get_model_parameters(model_name, model_parameters)
         adaptive_size = self._get_adaptive_image_size(
             model_name,
             image_bytes_list,
             resolution,
             aspect_ratio,
             force_aspect_ratio,
+            model_parameters,
         )
         if adaptive_size:
             parameters["size"] = adaptive_size
@@ -2536,6 +4283,7 @@ class FigurineProPlugin(Star):
             image_bytes_list,
             aspect_ratio,
             force_aspect_ratio,
+            model_parameters,
         ))
         return parameters
 
@@ -2619,8 +4367,7 @@ class FigurineProPlugin(Star):
         if changed:
             self.conf["command_model_list"] = migrated
             try:
-                if hasattr(self.conf, "save"):
-                    self.conf.save()
+                await self._persist_configuration()
                 logger.info(f"已自动迁移 command_model_list 到模板列表格式，共 {len(migrated)} 条")
             except Exception as e:
                 logger.error(f"自动迁移 command_model_list 配置失败: {e}")
@@ -2655,8 +4402,7 @@ class FigurineProPlugin(Star):
 
         self.conf["extra_prefix"] = [{"__template_key": "prefix", "prefix": prefix} for prefix in prefixes]
         try:
-            if hasattr(self.conf, "save"):
-                self.conf.save()
+            await self._persist_configuration()
             logger.info(f"已自动迁移 extra_prefix 到模板列表格式，共 {len(prefixes)} 条")
         except Exception as e:
             logger.error(f"自动迁移 extra_prefix 配置失败: {e}")
@@ -2689,11 +4435,60 @@ class FigurineProPlugin(Star):
         configured = configured.lstrip("#").strip()
         return [configured or "手办化列表"]
 
-    def _get_api_route_for_model(self, model_name: str) -> str:
-        gemini_models = self._normalize_model_list(self.conf.get("gemini_model_list", []))
-        return "gemini" if (model_name or "").strip() in gemini_models else "generic"
+    def _model_has_explicit_endpoint_route(self, model_name: str) -> bool:
+        normalized_model = (model_name or "").strip()
+        if not normalized_model:
+            return False
+        if normalized_model in self._normalize_model_list(self.conf.get("gemini_model_list", [])):
+            return True
+        return any(
+            normalized_model in self._get_endpoint_models(endpoint_type)
+            for endpoint_type in self.GENERIC_ENDPOINT_MODEL_LIST_KEYS
+        )
 
-    def _get_generic_endpoint_type_for_model(self, model_name: str, has_images: bool) -> str:
+    def _get_request_context(
+            self,
+            source_model: str,
+            actual_model: str,
+            has_images: bool,
+    ) -> Dict[str, Any]:
+        """Resolve per-attempt route and parameters without changing the actual model ID."""
+        source_name = (source_model or "").strip()
+        actual_name = (actual_model or source_name).strip()
+        route_model = (
+            actual_name if self._model_has_explicit_endpoint_route(actual_name)
+            else source_name if self._model_has_explicit_endpoint_route(source_name)
+            else ""
+        )
+        gemini_models = self._normalize_model_list(self.conf.get("gemini_model_list", []))
+        api_route = "gemini" if route_model in gemini_models else "generic"
+        parameters = self._get_effective_model_parameters(source_name, actual_name)
+        endpoint_type = "gemini_generate_content"
+        if api_route == "generic":
+            endpoint_type = self._get_generic_endpoint_type_for_model(
+                route_model,
+                has_images,
+                parameters=parameters,
+            )
+        return {
+            "source_model": source_name,
+            "actual_model": actual_name,
+            "route_model": route_model,
+            "parameters": parameters,
+            "api_route": api_route,
+            "endpoint_type": endpoint_type,
+        }
+
+    def _get_api_route_for_model(self, model_name: str) -> str:
+        return self._get_request_context(model_name, model_name, False)["api_route"]
+
+    def _get_generic_endpoint_type_for_model(
+            self,
+            model_name: str,
+            has_images: bool,
+            *,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """根据端点模型列表和输入图片决定 Generic 模式的请求端点。
 
         同一模型同时配置在 Images Edits 与 Images Generations 列表时，
@@ -2706,8 +4501,13 @@ class FigurineProPlugin(Star):
         if not normalized_model:
             return "chat_completions"
 
+        effective_parameters = self._parameters_for_request(normalized_model, parameters)
         if has_images:
-            if self._get_seedream_parameters(normalized_model) and normalized_model in self._get_endpoint_models("images_generations"):
+            if (
+                    effective_parameters
+                    and effective_parameters.get("enable_seedream_parameters")
+                    and normalized_model in self._get_endpoint_models("images_generations")
+            ):
                 endpoint_order = ("images_generations", "images_edits", "chat_completions")
             else:
                 endpoint_order = ("images_edits", "images_generations", "chat_completions")
@@ -2720,14 +4520,22 @@ class FigurineProPlugin(Star):
 
         return "chat_completions"
 
-    def _get_endpoint_display_for_request(self, model_name: str, has_images: bool) -> str:
+    def _get_endpoint_display_for_request(
+            self,
+            model_name: str,
+            has_images: bool,
+            source_model: Optional[str] = None,
+    ) -> str:
         """返回开始消息中显示的当前请求端点。"""
-        if self._get_api_route_for_model(model_name) == "gemini":
+        context = self._get_request_context(
+            source_model or model_name,
+            model_name,
+            has_images,
+        )
+        if context["api_route"] == "gemini":
             return "generateContent"
-
-        endpoint_type = self._get_generic_endpoint_type_for_model(model_name, has_images)
         return self.GENERIC_ENDPOINT_DISPLAY_NAMES.get(
-            endpoint_type,
+            context["endpoint_type"],
             self.GENERIC_ENDPOINT_DISPLAY_NAMES["chat_completions"],
         )
 
@@ -2809,6 +4617,203 @@ class FigurineProPlugin(Star):
             return ""
         return str(raw_id).strip()
 
+    @staticmethod
+    def _qq_avatar_url(user_id: str) -> str:
+        normalized = str(user_id or "").strip()
+        if not normalized.isdigit():
+            return ""
+        return f"https://q1.qlogo.cn/g?b=qq&nk={normalized}&s=100"
+
+    @staticmethod
+    def _event_display_value(event: AstrMessageEvent, names: Tuple[str, ...]) -> str:
+        for name in names:
+            value = getattr(event, name, None)
+            if callable(value):
+                try:
+                    value = value()
+                except Exception:
+                    continue
+            if value not in (None, ""):
+                return str(value).strip()
+        message_obj = getattr(event, "message_obj", None)
+        for name in names:
+            value = getattr(message_obj, name, None)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
+
+    async def _snapshot_event_identity(
+        self,
+        event: AstrMessageEvent,
+        user_id: str,
+        group_id: Optional[str],
+    ) -> Dict[str, str]:
+        message_obj = getattr(event, "message_obj", None)
+        sender = getattr(message_obj, "sender", None)
+        group = getattr(message_obj, "group", None)
+        nickname = str(getattr(sender, "nickname", "") or "").strip()
+        group_name = str(getattr(group, "group_name", "") or "").strip()
+        snapshot = {
+            "identity_platform": str(getattr(event, "platform", "") or "").strip(),
+            "user_nickname_snapshot": nickname or self._event_display_value(
+                event,
+                ("get_sender_name", "sender_name", "nickname", "user_name", "sender_nickname"),
+            ),
+            "user_avatar_url_snapshot": self._qq_avatar_url(user_id),
+            "group_name_snapshot": group_name or self._event_display_value(
+                event,
+                ("get_group_name", "group_name", "group_nickname", "group_title"),
+            ),
+        }
+        if not self.usage_store:
+            return snapshot
+        try:
+            await self.usage_store.snapshot_identity(
+                user_id=user_id,
+                platform=snapshot["identity_platform"],
+                nickname=snapshot["user_nickname_snapshot"],
+                avatar_url=snapshot["user_avatar_url_snapshot"],
+                group_id=group_id or "",
+                group_name=snapshot["group_name_snapshot"],
+            )
+        except Exception as exc:
+            logger.warning(f"记录用量身份快照失败: {exc}")
+        return snapshot
+
+    def _get_usage_endpoint_details(
+            self,
+            model_name: str,
+            has_images: bool,
+            source_model: Optional[str] = None,
+            request_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, str]:
+        context = request_context or self._get_request_context(
+            source_model or model_name,
+            model_name,
+            has_images,
+        )
+        return context["api_route"], context["endpoint_type"]
+
+    async def _settle_usage_generation(
+        self,
+        *,
+        event: AstrMessageEvent,
+        source: str,
+        sender_id: str,
+        group_id: Optional[str],
+        logical_model: str,
+        actual_model: str,
+        has_images: bool,
+        outcome: str,
+        http_status: int,
+        output_count: int,
+        charged_units: int,
+        deduction_source: Optional[str],
+        note: str = "",
+        request_context: Optional[Dict[str, Any]] = None,
+    ):
+        identity_snapshot = await self._snapshot_event_identity(event, sender_id, group_id)
+        if not self.usage_store:
+            if charged_units:
+                await self._deduct_generation_cost(
+                    deduction_source, sender_id, group_id, charged_units
+                )
+            return
+        api_route, endpoint_type = self._get_usage_endpoint_details(
+            actual_model,
+            has_images,
+            source_model=logical_model,
+            request_context=request_context,
+        )
+        try:
+            settlement = await self.usage_store.settle_generation(
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+                source=source,
+                user_id=sender_id,
+                group_id=group_id,
+                logical_model=logical_model,
+                actual_model=actual_model,
+                api_route=api_route,
+                endpoint_type=endpoint_type,
+                mode="图生图" if has_images else "文生图",
+                outcome=outcome,
+                http_status=http_status,
+                output_count=output_count,
+                charged_units=charged_units,
+                deduction_source=deduction_source,
+                note=note,
+                **identity_snapshot,
+            )
+            resulting_balance = settlement.get("resulting_balance")
+            subject_type = settlement.get("balance_subject_type")
+            subject_id = settlement.get("balance_subject_id")
+            if resulting_balance is not None and subject_type == "user" and subject_id:
+                self.user_counts[subject_id] = int(resulting_balance)
+                await self._save_user_counts()
+            elif resulting_balance is not None and subject_type == "group" and subject_id:
+                self.group_counts[subject_id] = int(resulting_balance)
+                await self._save_group_counts()
+        except Exception as exc:
+            logger.error(f"记录用量账本失败，回退 JSON 扣次: {exc}")
+            if charged_units:
+                await self._deduct_generation_cost(
+                    deduction_source, sender_id, group_id, charged_units
+                )
+
+    async def _adjust_usage_balance(
+        self,
+        *,
+        event: Optional[AstrMessageEvent],
+        subject_type: str,
+        subject_id: str,
+        amount: int,
+        source: str,
+        actor: str = "",
+        note: str = "",
+        snapshot_identity: bool = True,
+    ) -> int:
+        subject_id = self._norm_id(subject_id)
+        if not subject_id:
+            raise ValueError("次数目标不能为空")
+        group_id = subject_id if subject_type == "group" else ""
+        user_id = subject_id if subject_type == "user" else ""
+        identity_snapshot: Dict[str, str] = {}
+        if event and snapshot_identity:
+            identity_snapshot = await self._snapshot_event_identity(event, user_id, group_id or None)
+        if self.usage_store:
+            try:
+                result = await self.usage_store.adjust_balance(
+                    subject_type=subject_type,
+                    subject_id=subject_id,
+                    amount=amount,
+                    timestamp=datetime.now().isoformat(timespec="seconds"),
+                    source=source,
+                    actor=actor,
+                    note=note,
+                    user_id=user_id,
+                    group_id=group_id,
+                    **identity_snapshot,
+                )
+                balance = int(result["after"])
+                if subject_type == "user":
+                    self.user_counts[subject_id] = balance
+                    await self._save_user_counts()
+                else:
+                    self.group_counts[subject_id] = balance
+                    await self._save_group_counts()
+                return balance
+            except Exception as exc:
+                logger.error(f"调整次数账本失败，回退 JSON: {exc}")
+        if subject_type == "user":
+            balance = max(0, self._get_user_count(subject_id) + amount)
+            self.user_counts[subject_id] = balance
+            await self._save_user_counts()
+        else:
+            balance = max(0, self._get_group_count(subject_id) + amount)
+            self.group_counts[subject_id] = balance
+            await self._save_group_counts()
+        return balance
+
     def _get_maintenance_message(self) -> Optional[str]:
         if not self.conf.get("maintenance_mode", False):
             return None
@@ -2868,40 +4873,34 @@ class FigurineProPlugin(Star):
 
         if 0 <= target_idx < len(all_models):
             new_model = all_models[target_idx]
+            previous_model = self.conf.get("model")
             self.conf["model"] = new_model
             try:
-                if hasattr(self.conf, "save"):
-                    self.conf.save()
-            except:
-                pass
+                await self._persist_configuration()
+            except Exception as exc:
+                self.conf["model"] = previous_model
+                yield event.plain_result(f"❌ 默认模型保存失败: {exc}")
+                return
             yield event.plain_result(f"✅ 切换成功！\n当前默认模型: **{new_model}**")
         else:
             yield event.plain_result(f"❌ 序号无效。")
 
-    async def _get_pool_api_key(self, mode: str, allow_generic_fallback: bool = False) -> str | None:
-        keys = []
+    async def _get_pool_api_key(self, mode: str) -> str | None:
+        """Return a shared Generic key, with legacy Gemini keys as read-only fallback."""
         async with self.key_lock:
-            if mode == "gemini":
-                keys = self.conf.get("gemini_api_keys", [])
-                if not keys and allow_generic_fallback:
-                    keys = self.conf.get("generic_api_keys", [])
-                    if keys:
-                        key = keys[self.generic_key_index]
-                        self.generic_key_index = (self.generic_key_index + 1) % len(keys)
-                        return key
-            else:
-                keys = self.conf.get("generic_api_keys", [])
-
-            if not keys: return None
+            generic_keys = self.conf.get("generic_api_keys", [])
+            if isinstance(generic_keys, list) and generic_keys:
+                key = generic_keys[self.generic_key_index % len(generic_keys)]
+                self.generic_key_index = (self.generic_key_index + 1) % len(generic_keys)
+                return key
 
             if mode == "gemini":
-                key = keys[self.gemini_key_index]
-                self.gemini_key_index = (self.gemini_key_index + 1) % len(keys)
-                return key
-            else:
-                key = keys[self.generic_key_index]
-                self.generic_key_index = (self.generic_key_index + 1) % len(keys)
-                return key
+                legacy_keys = self.conf.get("gemini_api_keys", [])
+                if isinstance(legacy_keys, list) and legacy_keys:
+                    key = legacy_keys[self.gemini_key_index % len(legacy_keys)]
+                    self.gemini_key_index = (self.gemini_key_index + 1) % len(legacy_keys)
+                    return key
+            return None
 
     @staticmethod
     def _looks_like_image_mime(mime_type: Any) -> bool:
@@ -2913,6 +4912,29 @@ class FigurineProPlugin(Star):
             return 0
         b64 = data_url.split(",", 1)[1].strip()
         return max(0, len(b64) * 3 // 4)
+
+    @staticmethod
+    def _decode_data_url_image(data_url: str) -> bytes:
+        """容错解码 data URL 中的 Base64：去除空白、兼容 URL-safe 字符集、补齐缺失的 = 填充。
+        解码结果需为常见图片格式，损坏/截断的数据抛异常以便调用方回退到其他候选。"""
+        b64 = re.sub(r"\s+", "", data_url.split(",", 1)[-1])
+        b64 = b64.translate(str.maketrans("-_", "+/"))
+        b64 += "=" * (-len(b64) % 4)
+        raw = base64.b64decode(b64, validate=True)
+        if raw.startswith(b"\x89PNG"):
+            if b"IEND" not in raw[-16:]:
+                raise ValueError("PNG 数据不完整(缺少 IEND 结尾块)")
+        elif raw.startswith(b"\xff\xd8"):
+            if not raw.endswith(b"\xff\xd9"):
+                raise ValueError("JPEG 数据不完整(缺少结尾标记)")
+        elif raw.startswith(b"GIF8"):
+            if not raw.endswith(b"\x00\x3b"):
+                raise ValueError("GIF 数据不完整(缺少结尾标记)")
+        elif raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            pass
+        else:
+            raise ValueError("解码结果不是可识别的图片数据")
+        return raw
 
     @staticmethod
     def _normalize_image_candidate(url: Any) -> str:
@@ -3035,23 +5057,11 @@ class FigurineProPlugin(Star):
         parsed = urlparse(url)
         return bool(parsed.scheme and parsed.netloc and not parsed.path.rstrip("/"))
 
-    def _get_api_base_url(self, api_mode: str) -> Tuple[str, bool]:
-        """Return the configured base URL and whether Gemini reuses the Generic service."""
-        generic_url = str(
+    def _get_api_base_url(self) -> str:
+        """Return the shared service URL for Generic and Gemini-compatible requests."""
+        return str(
             self.conf.get("generic_api_url", self.DEFAULT_GENERIC_API_URL) or ""
         ).strip()
-        if api_mode != "gemini":
-            return generic_url, False
-
-        # A Generic service root can expose both OpenAI and Gemini-compatible APIs.
-        # Keep the legacy Gemini URL for users who configured a full OpenAI endpoint.
-        if self._is_generic_service_root(generic_url):
-            return generic_url, True
-
-        gemini_url = str(
-            self.conf.get("gemini_api_url", self.DEFAULT_GEMINI_API_URL) or ""
-        ).strip()
-        return gemini_url, False
 
     def _resolve_generic_endpoint_url(self, url: str, endpoint_type: str) -> str:
         target_path = self.GENERIC_ENDPOINT_PATHS.get(
@@ -3081,9 +5091,9 @@ class FigurineProPlugin(Star):
         new_path = f"{base_path.rstrip('/')}{target_path}"
         return parsed._replace(path=new_path).geturl()
 
-    @staticmethod
-    def _resolve_gemini_endpoint_url(url: str, model_name: str) -> str:
-        base_url = (url or "").strip() or "https://generativelanguage.googleapis.com"
+    @classmethod
+    def _resolve_gemini_endpoint_url(cls, url: str, model_name: str) -> str:
+        base_url = (url or "").strip()
         model = (model_name or "").strip()
         if "{model}" in base_url:
             return base_url.replace("{model}", model)
@@ -3091,6 +5101,15 @@ class FigurineProPlugin(Star):
         parsed = urlparse(base_url)
         path = parsed.path.rstrip("/")
         lower_path = path.lower()
+
+        for suffix in sorted(cls.GENERIC_ENDPOINT_PATHS.values(), key=len, reverse=True):
+            if lower_path.endswith(suffix):
+                path = path[: -len(suffix)]
+                lower_path = path.rstrip("/").lower()
+                break
+        if lower_path.endswith("/v1"):
+            path = path[: -len("/v1")]
+            lower_path = path.rstrip("/").lower()
 
         if lower_path.endswith(":generatecontent"):
             return base_url
@@ -3157,12 +5176,21 @@ class FigurineProPlugin(Star):
     @staticmethod
     def _sanitize_request_log_url(url: str) -> str:
         parsed = urlparse(str(url or ""))
-        sensitive_names = {"api_key", "apikey", "key", "token", "access_token"}
+        sensitive_names = {
+            "api_key", "apikey", "key", "token", "access_token", "password", "passwd",
+        }
         sanitized_query = [
             (name, "<redacted>" if name.lower() in sensitive_names else value)
             for name, value in parse_qsl(parsed.query, keep_blank_values=True)
         ]
-        return parsed._replace(query=urlencode(sanitized_query)).geturl()
+        if parsed.username or parsed.password:
+            host = parsed.hostname or ""
+            if parsed.port is not None:
+                host = f"{host}:{parsed.port}"
+            netloc = f"<redacted>@{host}"
+        else:
+            netloc = parsed.netloc
+        return parsed._replace(netloc=netloc, query=urlencode(sanitized_query)).geturl()
 
     def _build_images_edits_log_parameters(
             self,
@@ -3172,22 +5200,24 @@ class FigurineProPlugin(Star):
             resolution: Optional[str],
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        parameters: Dict[str, Any] = {
+        log_parameters: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
         }
-        if not self._should_omit_n_parameter(model_name):
-            parameters["n"] = "1"
-        parameters.update(self._get_image_request_parameters(
+        if not self._should_omit_n_parameter(model_name, parameters):
+            log_parameters["n"] = "1"
+        log_parameters.update(self._get_image_request_parameters(
             model_name,
             image_bytes_list,
             resolution,
             aspect_ratio,
             force_aspect_ratio,
+            parameters,
         ))
-        parameters["image"] = "<image omitted>"
-        return parameters
+        log_parameters["image"] = "<image omitted>"
+        return log_parameters
 
     @staticmethod
     def _mime_type_to_extension(mime_type: str) -> str:
@@ -3207,21 +5237,23 @@ class FigurineProPlugin(Star):
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model_name,
             "prompt": final_prompt,
         }
-        seedream_parameters = self._get_seedream_parameters(model_name)
+        seedream_parameters = self._get_seedream_parameters(model_name, parameters)
         if seedream_parameters:
             payload.update(self._get_seedream_request_parameters(
                 model_name,
                 image_bytes_list,
                 aspect_ratio,
                 force_aspect_ratio,
+                parameters,
             ))
         else:
-            if not self._should_omit_n_parameter(model_name):
+            if not self._should_omit_n_parameter(model_name, parameters):
                 payload["n"] = 1
             payload.update(self._get_image_request_parameters(
                 model_name,
@@ -3229,6 +5261,7 @@ class FigurineProPlugin(Star):
                 resolution,
                 aspect_ratio,
                 force_aspect_ratio,
+                parameters,
             ))
 
         if image_bytes_list:
@@ -3250,11 +5283,12 @@ class FigurineProPlugin(Star):
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> aiohttp.FormData:
         form = aiohttp.FormData()
         form.add_field("model", model_name)
         form.add_field("prompt", final_prompt)
-        if not self._should_omit_n_parameter(model_name):
+        if not self._should_omit_n_parameter(model_name, parameters):
             form.add_field("n", "1")
         for field_name, value in self._get_image_request_parameters(
                 model_name,
@@ -3262,6 +5296,7 @@ class FigurineProPlugin(Star):
                 resolution,
                 aspect_ratio,
                 force_aspect_ratio,
+                parameters,
         ).items():
             form.add_field(field_name, value)
 
@@ -3295,11 +5330,23 @@ class FigurineProPlugin(Star):
             has_images: bool = False,
             image_bytes_list: Optional[List[bytes]] = None,
             aspect_ratio: Optional[str] = None,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
-        tier = self._get_resolution_deduction_tier(model_name, resolution, image_bytes_list)
-        return self._get_tiered_deduction_cost(model_name, tier) + self._get_extra_reference_image_cost(
+        tier = self._get_resolution_deduction_tier(
+            model_name,
+            resolution,
+            image_bytes_list,
+            parameters,
+            aspect_ratio,
+        )
+        return self._get_tiered_deduction_cost(
+            model_name,
+            tier,
+            parameters,
+        ) + self._get_extra_reference_image_cost(
             model_name,
             image_bytes_list,
+            parameters,
         )
 
     def _get_violation_deduction_cost(
@@ -3307,12 +5354,25 @@ class FigurineProPlugin(Star):
             model_name: str,
             resolution: Optional[str] = None,
             image_bytes_list: Optional[List[bytes]] = None,
+            parameters: Optional[Dict[str, Any]] = None,
+            aspect_ratio: Optional[str] = None,
     ) -> int:
         """违规失败按实际调用模型的扣次档位结算（含超限参考图阶梯额外扣次）。"""
-        tier = self._get_resolution_deduction_tier(model_name, resolution, image_bytes_list)
-        return self._get_tiered_deduction_cost(model_name, tier) + self._get_extra_reference_image_cost(
+        tier = self._get_resolution_deduction_tier(
+            model_name,
+            resolution,
+            image_bytes_list,
+            parameters,
+            aspect_ratio,
+        )
+        return self._get_tiered_deduction_cost(
+            model_name,
+            tier,
+            parameters,
+        ) + self._get_extra_reference_image_cost(
             model_name,
             image_bytes_list,
+            parameters,
         )
 
     def _get_failure_deduction_status_codes(self) -> set[int]:
@@ -3341,13 +5401,14 @@ class FigurineProPlugin(Star):
             result: Any,
             http_status: int,
             model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
     ) -> bool:
         if isinstance(result, bytes):
             return True
         if not self._should_send_content_policy_warning(http_status, result):
             return False
 
-        parameters = self._get_model_parameter_map().get((model_name or "").strip())
+        parameters = self._parameters_for_request(model_name, parameters)
         if parameters is not None:
             return bool(parameters.get("deduct_on_violation"))
 
@@ -3443,7 +5504,17 @@ class FigurineProPlugin(Star):
         if message_id in (None, ""):
             raw_message = getattr(msg_obj, "raw_message", None)
             if isinstance(raw_message, dict):
-                message_id = raw_message.get("message_id") or raw_message.get("id")
+                message_id = (
+                    raw_message.get("message_id")
+                    or raw_message.get("messageId")
+                    or raw_message.get("id")
+                )
+            elif raw_message is not None:
+                message_id = (
+                    getattr(raw_message, "message_id", None)
+                    or getattr(raw_message, "messageId", None)
+                    or getattr(raw_message, "id", None)
+                )
 
         if message_id in (None, ""):
             return []
@@ -3454,6 +5525,22 @@ class FigurineProPlugin(Star):
 
     def _reply_chain_result(self, event: AstrMessageEvent, chain: List[Any]):
         return event.chain_result([*self._build_reply_chain(event), *chain])
+
+    def _build_image_result(self, event: AstrMessageEvent, image_bytes: bytes, text: str):
+        return self._reply_chain_result(event, [Image.fromBytes(image_bytes), Plain(text)])
+
+    async def _send_llm_image_once(
+            self,
+            event: AstrMessageEvent,
+            image_bytes: bytes,
+            text: str,
+    ) -> bool:
+        try:
+            await event.send(self._build_image_result(event, image_bytes, text))
+            return True
+        except Exception as exc:
+            logger.error(f"LLM 工具图片发送失败，不会重试以避免重复发送: {exc}")
+            return False
 
     @staticmethod
     def _mask_sensitive_text(text: str) -> str:
@@ -3806,6 +5893,8 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
             return_actual_model: bool = False,
+            return_request_context: bool = False,
+            on_attempt: Optional[Callable[[str, Any, int, bool], Awaitable[None]]] = None,
     ) -> Any:
         """按模型映射顺序调用接口，失败时切换到下一个热备模型。"""
         source_model = str(
@@ -3818,15 +5907,25 @@ class FigurineProPlugin(Star):
             model=source_model,
         )
         last_status = 0
-        actual_model = source_model
+        last_context = self._get_request_context(source_model, source_model, bool(image_bytes_list))
 
         for index, candidate_model in enumerate(candidate_models):
-            actual_model = candidate_model
-            candidate_images = self._limit_reference_images(candidate_model, image_bytes_list)
+            request_context = self._get_request_context(
+                source_model,
+                candidate_model,
+                bool(image_bytes_list),
+            )
+            candidate_images = self._limit_reference_images(
+                candidate_model,
+                image_bytes_list,
+                request_context["parameters"],
+            )
+            request_context["image_bytes_list"] = candidate_images
             result, http_status = await self._call_api_once(
                 candidate_images,
                 prompt,
                 override_model=candidate_model,
+                request_context=request_context,
                 resolution=resolution,
                 aspect_ratio=aspect_ratio,
                 force_aspect_ratio=force_aspect_ratio,
@@ -3837,12 +5936,17 @@ class FigurineProPlugin(Star):
                         f"模型热备切换成功: source={source_model}, model={candidate_model}, "
                         f"attempt={index + 1}/{len(candidate_models)}"
                     )
+                if return_request_context:
+                    return result, http_status, request_context
                 if return_actual_model:
                     return result, http_status, candidate_model
                 return result, http_status
 
-            last_result, last_status = result, http_status
-            if self._should_stop_model_failover(http_status, result):
+            last_result, last_status, last_context = result, http_status, request_context
+            should_stop = self._should_stop_model_failover(http_status, result)
+            if on_attempt and not should_stop and index + 1 < len(candidate_models):
+                await on_attempt(request_context["actual_model"], result, http_status, False)
+            if should_stop:
                 logger.warning(
                     f"模型调用失败，命中违规内容或配置错误码并停止热备切换: "
                     f"source={source_model}, failed_model={candidate_model}, "
@@ -3857,8 +5961,10 @@ class FigurineProPlugin(Star):
                     f"error_type={error_type}, next_model={candidate_models[index + 1]}"
                 )
 
+        if return_request_context:
+            return last_result, last_status, last_context
         if return_actual_model:
-            return last_result, last_status, actual_model
+            return last_result, last_status, last_context["actual_model"]
         return last_result, last_status
 
     async def _call_api_once(
@@ -3866,6 +5972,7 @@ class FigurineProPlugin(Star):
             image_bytes_list: List[bytes],
             prompt: str,
             override_model: str | None = None,
+            request_context: Optional[Dict[str, Any]] = None,
             resolution: Optional[str] = None,
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
@@ -3874,9 +5981,14 @@ class FigurineProPlugin(Star):
         调用API生成图片
         返回: (结果, HTTP状态码) 元组，其中结果可以是bytes(成功)或str(错误信息)，状态码为0表示未获取到
         """
-        model_name = override_model or self.conf.get("model", "nano-banana")
-        api_mode = self._get_api_route_for_model(model_name)
-        endpoint_type = "gemini_generate_content" if api_mode == "gemini" else "chat_completions"
+        model_name = (request_context or {}).get("actual_model") or override_model or self.conf.get("model", "nano-banana")
+        model_name = str(model_name or "").strip() or "nano-banana"
+        if request_context is None:
+            request_context = self._get_request_context(model_name, model_name, bool(image_bytes_list))
+        parameters = request_context.get("parameters")
+        api_mode = request_context.get("api_route") or "generic"
+        endpoint_type = request_context.get("endpoint_type") or "chat_completions"
+        route_model = request_context.get("route_model") or model_name
         final_url = ""
 
         def make_error(error_type: str, message: str, status: int = 0, **kwargs: Any) -> Tuple[Dict[str, Any], int]:
@@ -3897,19 +6009,15 @@ class FigurineProPlugin(Star):
                 status,
             )
 
-        base_url, gemini_uses_generic_service = self._get_api_base_url(api_mode)
+        base_url = self._get_api_base_url()
 
         if not base_url:
             base_url = ""
             return make_error("config_error", "API URL 未配置", 0)
 
-        api_key = await self._get_pool_api_key(
-            api_mode,
-            allow_generic_fallback=gemini_uses_generic_service,
-        )
+        api_key = await self._get_pool_api_key(api_mode)
         if not api_key:
-            key_pool_name = "gemini 或 generic" if gemini_uses_generic_service else api_mode
-            return make_error("config_error", f"无可用 API Key (请在 {key_pool_name} 池中添加Key)", 0)
+            return make_error("config_error", "无可用 API Key (请在共享 Key 池中添加 Key)", 0)
 
         # --- 构造最终 Prompt (支持按模型指定预设提示词模板) ---
         final_prompt = self._build_final_prompt(prompt, model_name, len(image_bytes_list))
@@ -3962,13 +6070,14 @@ class FigurineProPlugin(Star):
                 }
             }
             generation_config: Dict[str, Any] = {}
-            if max_output_tokens := self._get_max_output_tokens(model_name):
+            if max_output_tokens := self._get_max_output_tokens(model_name, parameters):
                 generation_config["maxOutputTokens"] = max_output_tokens
             if image_config := self._get_gemini_image_config(
                     model_name,
                     image_bytes_list,
                     aspect_ratio,
                     force_aspect_ratio,
+                    parameters,
             ):
                 generation_config["imageConfig"] = image_config
             if generation_config:
@@ -3976,17 +6085,14 @@ class FigurineProPlugin(Star):
 
         else:
             headers["Authorization"] = f"Bearer {api_key}"
-            routed_endpoint_type = self._get_generic_endpoint_type_for_model(
-                model_name,
-                has_images=len(image_bytes_list) > 0,
-            )
-            if routed_endpoint_type:
-                generic_endpoint_type = routed_endpoint_type
-                final_url = self._resolve_generic_endpoint_url(base_url, generic_endpoint_type)
-            else:
-                generic_endpoint_type = self._detect_generic_endpoint_type(base_url)
-                if self._is_generic_base_url(base_url):
-                    final_url = self._resolve_generic_endpoint_url(base_url, generic_endpoint_type)
+            generic_endpoint_type = endpoint_type
+            if generic_endpoint_type not in self.GENERIC_ENDPOINT_PATHS:
+                generic_endpoint_type = self._get_generic_endpoint_type_for_model(
+                    route_model,
+                    has_images=len(image_bytes_list) > 0,
+                    parameters=parameters,
+                )
+            final_url = self._resolve_generic_endpoint_url(base_url, generic_endpoint_type)
             endpoint_type = generic_endpoint_type
 
             if generic_endpoint_type == "images_edits" and not image_bytes_list:
@@ -4000,6 +6106,7 @@ class FigurineProPlugin(Star):
                     resolution,
                     aspect_ratio,
                     force_aspect_ratio,
+                    parameters,
                 )
             elif generic_endpoint_type == "images_generations":
                 headers["Content-Type"] = "application/json"
@@ -4010,6 +6117,7 @@ class FigurineProPlugin(Star):
                     resolution,
                     aspect_ratio,
                     force_aspect_ratio,
+                    parameters,
                 )
             else:
                 headers["Content-Type"] = "application/json"
@@ -4036,7 +6144,7 @@ class FigurineProPlugin(Star):
                     "stream": use_stream,
                     "messages": messages
                 }
-                if max_output_tokens := self._get_max_output_tokens(model_name):
+                if max_output_tokens := self._get_max_output_tokens(model_name, parameters):
                     payload["max_tokens"] = max_output_tokens
 
         safe_log_url = self._sanitize_request_log_url(final_url)
@@ -4054,6 +6162,7 @@ class FigurineProPlugin(Star):
                 resolution,
                 aspect_ratio,
                 force_aspect_ratio,
+                parameters,
             )
         else:
             body_type = "application/json"
@@ -4227,7 +6336,8 @@ class FigurineProPlugin(Star):
                             request_id=request_id,
                         )
 
-                    url_or_b64 = self._extract_image_url_from_response(data)
+                    candidates = self._extract_image_urls_from_response(data)
+                    url_or_b64 = candidates[0] if candidates else None
 
                     if not url_or_b64:
                         # 检查是否启用"无图片时返回完整响应"选项
@@ -4251,34 +6361,44 @@ class FigurineProPlugin(Star):
                             request_id=request_id,
                         )
 
-                    if url_or_b64.startswith("data:"):
-                        try:
-                            b64 = url_or_b64.split(",", 1)[-1]
-                            return (base64.b64decode(b64), http_status)
-                        except Exception as e:
-                            return make_error(
-                                "image_decode_error",
-                                f"图片Base64解码失败: {e}",
-                                http_status,
-                                detail=str(e),
-                                request_id=request_id,
-                            )
-                    else:
-                        # 尝试下载图片，如果下载失败则返回图片链接
-                        downloaded_image = await self.iwf._download_image(url_or_b64)
+                    decode_error: Exception | None = None
+                    download_failed_urls: List[str] = []
+
+                    for candidate in candidates:
+                        if candidate.startswith("data:"):
+                            try:
+                                return (self._decode_data_url_image(candidate), http_status)
+                            except Exception as e:
+                                decode_error = e
+                                logger.warning(f"图片Base64解码失败({e})，尝试下一个候选")
+                                continue
+
+                        downloaded_image = await self.iwf._download_image(candidate)
                         if downloaded_image:
                             return (downloaded_image, http_status)
-                        else:
-                            logger.warning(f"图片获取未完成，返回图片链接: {url_or_b64}")
-                            return make_error(
-                                "download_error",
-                                "图片获取未完成，请手动访问链接查看。",
-                                http_status,
-                                detail=f"图片获取未完成，请手动访问链接查看: {url_or_b64}",
-                                provider_message="图片获取未完成，请手动访问链接查看。",
-                                image_url=url_or_b64,
-                                request_id=request_id,
-                            )
+                        download_failed_urls.append(candidate)
+
+                    # 所有候选均失败：优先返回可手动访问的图片链接，其次返回解码错误
+                    if download_failed_urls:
+                        failed_url = download_failed_urls[0]
+                        logger.warning(f"图片获取未完成，返回图片链接: {failed_url}")
+                        return make_error(
+                            "download_error",
+                            "图片获取未完成，请手动访问链接查看。",
+                            http_status,
+                            detail=f"图片获取未完成，请手动访问链接查看: {failed_url}",
+                            provider_message="图片获取未完成，请手动访问链接查看。",
+                            image_url=failed_url,
+                            request_id=request_id,
+                        )
+
+                    return make_error(
+                        "image_decode_error",
+                        f"图片Base64解码失败: {decode_error}",
+                        http_status,
+                        detail=str(decode_error),
+                        request_id=request_id,
+                    )
 
         except asyncio.TimeoutError:
             return make_error("timeout", "请求超时", 0)
@@ -4313,6 +6433,9 @@ class FigurineProPlugin(Star):
 
         cmd = command_token
         if not cmd:
+            return
+        if cmd in self.RESERVED_COMMAND_NAMES:
+            logger.warning(f"通用消息处理器忽略专用命令: {cmd}")
             return
 
         if cmd in self._get_preset_list_commands():
@@ -4369,21 +6492,10 @@ class FigurineProPlugin(Star):
                 )
 
         elif base_cmd in self.prompt_map:
-            val = self.prompt_map.get(base_cmd)
-            if val and val != "[内置预设]":
-                user_prompt = val
-                if append_text:
-                    user_prompt = user_prompt + append_text
-                    logger.info(f"将追加内容'{append_text}'添加到预设prompt后面")
-
-        if not user_prompt and not is_bnn:
-            cmd_map = self.BUILT_IN_CMD_MAP
-            if base_cmd in cmd_map:
-                key = cmd_map[base_cmd]
-                user_prompt = self.prompt_map.get(key) or self.prompt_map.get(base_cmd)
-                if append_text:
-                    user_prompt = user_prompt + append_text
-                    logger.info(f"将追加内容'{append_text}'添加到映射命令prompt后面")
+            user_prompt = self.prompt_map[base_cmd]
+            if append_text:
+                user_prompt = user_prompt + append_text
+                logger.info(f"将追加内容'{append_text}'添加到预设 prompt 后面")
 
         if not user_prompt:
             if not is_bnn:
@@ -4478,14 +6590,29 @@ class FigurineProPlugin(Star):
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
         candidate_models = self._get_model_failover_candidates(model_in_use)
         initial_actual_model = candidate_models[0]
+        candidate_contexts = [
+            self._get_request_context(model_in_use, candidate_model, bool(images_to_process))
+            for candidate_model in candidate_models
+        ]
+        initial_request_context = candidate_contexts[0]
+        initial_request_context["image_bytes_list"] = self._limit_reference_images(
+            initial_actual_model,
+            images_to_process,
+            initial_request_context["parameters"],
+        )
         max_per_invocation_cost = max(
             self._get_required_invocation_cost(
-                candidate_model,
+                context["actual_model"],
                 requested_resolution,
-                image_bytes_list=images_to_process,
+                image_bytes_list=self._limit_reference_images(
+                    context["actual_model"],
+                    images_to_process,
+                    context["parameters"],
+                ),
                 aspect_ratio=requested_aspect_ratio,
+                parameters=context["parameters"],
             )
-            for candidate_model in candidate_models
+            for context in candidate_contexts
         )
         required_cost = max_per_invocation_cost * batch_count
         allowed, deduction_source, deny_message = self._resolve_generation_access(
@@ -4505,6 +6632,7 @@ class FigurineProPlugin(Star):
         endpoint_display = self._get_endpoint_display_for_request(
             initial_actual_model,
             has_images=bool(images_to_process),
+            source_model=model_in_use,
         )
         show_model_info = self.conf.get("show_model_info", False)
 
@@ -4550,11 +6678,17 @@ class FigurineProPlugin(Star):
 
         # 超限参考图阶梯扣次提示（按首个候选模型估算；实际按各批次命中的模型结算）
         extra_cost_preview = self._get_extra_reference_image_cost(
-            initial_actual_model, images_to_process
+            initial_actual_model,
+            self._limit_reference_images(
+                initial_actual_model,
+                images_to_process,
+                candidate_contexts[0]["parameters"],
+            ),
+            candidate_contexts[0]["parameters"],
         )
         if extra_cost_preview > 0:
             global_limit_preview = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
-            params_preview = self._get_model_parameter_map().get((initial_actual_model or "").strip())
+            params_preview = candidate_contexts[0]["parameters"]
             soft_preview = min(
                 _normalize_nonnegative_int((params_preview or {}).get("reference_image_limit", 0)),
                 global_limit_preview,
@@ -4568,6 +6702,39 @@ class FigurineProPlugin(Star):
 
         batch_semaphore = asyncio.Semaphore(max_batch_concurrency)
 
+        async def _record_failover_attempt(
+            failed_model: str,
+            failed_result: Any,
+            failed_status: int,
+            succeeded: bool,
+        ):
+            failed_context = self._get_request_context(
+                model_in_use,
+                failed_model,
+                bool(images_to_process),
+            )
+            failed_context["image_bytes_list"] = self._limit_reference_images(
+                failed_model,
+                images_to_process,
+                failed_context["parameters"],
+            )
+            await self._settle_usage_generation(
+                event=event,
+                source="chat",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_in_use,
+                actual_model=failed_context["actual_model"],
+                has_images=bool(failed_context["image_bytes_list"]),
+                outcome="failed",
+                http_status=failed_status,
+                output_count=0,
+                charged_units=0,
+                deduction_source=None,
+                note="热备切换前的中间失败",
+                request_context=failed_context,
+            )
+
         async def _call_api_with_batch_limit(batch_index: int):
             async with batch_semaphore:
                 task_start_time = datetime.now()
@@ -4578,7 +6745,8 @@ class FigurineProPlugin(Star):
                         override_model=override_model_name,
                         resolution=requested_resolution,
                         aspect_ratio=requested_aspect_ratio,
-                        return_actual_model=True,
+                        return_request_context=True,
+                        on_attempt=_record_failover_attempt,
                     )
                 except Exception as exc:
                     result = exc
@@ -4598,11 +6766,28 @@ class FigurineProPlugin(Star):
         first_error = None
         first_error_status = 0
         first_error_model = initial_actual_model
+        first_error_context: Optional[Dict[str, Any]] = None
 
         for completed_task in asyncio.as_completed(tasks):
             index, result, elapsed = await completed_task
 
             if isinstance(result, Exception):
+                await self._settle_usage_generation(
+                    event=event,
+                    source="chat",
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    logical_model=model_in_use,
+                    actual_model=initial_request_context["actual_model"],
+                    has_images=bool(initial_request_context["image_bytes_list"]),
+                    outcome="failed",
+                    http_status=0,
+                    output_count=0,
+                    charged_units=0,
+                    deduction_source=None,
+                    note="聊天生成系统错误",
+                    request_context=initial_request_context,
+                )
                 if first_error is None:
                     first_error = {
                         "type": "system_error",
@@ -4610,19 +6795,25 @@ class FigurineProPlugin(Star):
                         "detail": str(result),
                     }
                     first_error_status = 0
+                    first_error_context = initial_request_context
                 continue
 
-            res, http_status, actual_model = result
+            res, http_status, request_context = result
+            actual_model = request_context["actual_model"]
+            candidate_images = request_context["image_bytes_list"]
+            parameters = request_context["parameters"]
             invocation_cost = self._get_required_invocation_cost(
                 actual_model,
                 requested_resolution,
-                image_bytes_list=images_to_process,
+                image_bytes_list=candidate_images,
                 aspect_ratio=requested_aspect_ratio,
+                parameters=parameters,
             )
             should_deduct = self._should_deduct_generation_result(
                 res,
                 http_status,
                 actual_model,
+                parameters,
             )
             deduction_amount = (
                 invocation_cost
@@ -4630,20 +6821,31 @@ class FigurineProPlugin(Star):
                 else self._get_violation_deduction_cost(
                     actual_model,
                     requested_resolution,
-                    images_to_process,
+                    candidate_images,
+                    parameters,
+                    aspect_ratio=requested_aspect_ratio,
                 )
             )
             should_send_content_policy_warning = self._should_send_content_policy_warning(
                 http_status,
                 res,
             )
-            if should_deduct:
-                await self._deduct_generation_cost(
-                    deduction_source,
-                    sender_id,
-                    group_id,
-                    deduction_amount,
-                )
+            outcome = "success" if isinstance(res, bytes) else "failed"
+            await self._settle_usage_generation(
+                event=event,
+                source="chat",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_in_use,
+                actual_model=actual_model,
+                has_images=bool(candidate_images),
+                outcome=outcome,
+                http_status=http_status,
+                output_count=1 if isinstance(res, bytes) else 0,
+                charged_units=deduction_amount if should_deduct else 0,
+                deduction_source=deduction_source if should_deduct else None,
+                request_context=request_context,
+            )
 
             if not isinstance(res, bytes):
                 if should_send_content_policy_warning:
@@ -4661,6 +6863,7 @@ class FigurineProPlugin(Star):
                     first_error = res
                     first_error_status = http_status
                     first_error_model = actual_model
+                    first_error_context = request_context
                 continue
 
             success_count += 1
@@ -4700,7 +6903,7 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            yield self._reply_chain_result(event, [Image.fromBytes(res), Plain(message_text)])
+            yield self._build_image_result(event, res, message_text)
 
         total_elapsed = (datetime.now() - start_time).total_seconds()
         if content_policy_violation_detected:
@@ -4735,7 +6938,7 @@ class FigurineProPlugin(Star):
                 first_error,
                 first_error_status,
                 model=first_error_model,
-                api_mode=self._get_api_route_for_model(first_error_model),
+                api_mode=(first_error_context or initial_request_context)["api_route"],
                 prompt=user_prompt,
                 image_count=len(images_to_process),
             )
@@ -4810,9 +7013,20 @@ class FigurineProPlugin(Star):
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
         candidate_models = self._get_model_failover_candidates(model_in_use)
         initial_actual_model = candidate_models[0]
+        initial_request_context = self._get_request_context(
+            model_in_use,
+            initial_actual_model,
+            False,
+        )
         required_cost = max(
-            self._get_required_invocation_cost(candidate_model)
-            for candidate_model in candidate_models
+            self._get_required_invocation_cost(
+                context["actual_model"],
+                parameters=context["parameters"],
+            )
+            for context in (
+                self._get_request_context(model_in_use, candidate_model, False)
+                for candidate_model in candidate_models
+            )
         )
         allowed, deduction_source, deny_message = self._resolve_generation_access(
             event,
@@ -4828,7 +7042,11 @@ class FigurineProPlugin(Star):
         display_prompt = prompt[:10] + "..." if len(prompt) > 10 else prompt
         mode_prefix = ""
         
-        endpoint_display = self._get_endpoint_display_for_request(initial_actual_model, has_images=False)
+        endpoint_display = self._get_endpoint_display_for_request(
+            initial_actual_model,
+            has_images=False,
+            source_model=model_in_use,
+        )
         show_model_info = self.conf.get("show_model_info", False)
         
         # 检查是否有自定义文生图开始消息模板
@@ -4849,36 +7067,118 @@ class FigurineProPlugin(Star):
         
         yield self._reply_plain_result(event, info_str)
 
+        async def _record_text_to_image_failover_attempt(
+            failed_model: str,
+            failed_result: Any,
+            failed_status: int,
+            succeeded: bool,
+        ):
+            failed_context = self._get_request_context(
+                model_in_use,
+                failed_model,
+                False,
+            )
+            await self._settle_usage_generation(
+                event=event,
+                source="chat",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_in_use,
+                actual_model=failed_context["actual_model"],
+                has_images=False,
+                outcome="failed",
+                http_status=failed_status,
+                output_count=0,
+                charged_units=0,
+                deduction_source=None,
+                note="热备切换前的中间失败",
+                request_context=failed_context,
+            )
+
         start_time = datetime.now()
-        res, http_status, actual_model = await self._call_api(
-            [],
-            prompt,
-            override_model=override_model_name,
-            return_actual_model=True,
-        )
+        try:
+            res, http_status, request_context = await self._call_api(
+                [],
+                prompt,
+                override_model=override_model_name,
+                return_request_context=True,
+                on_attempt=_record_text_to_image_failover_attempt,
+            )
+        except Exception as exc:
+            elapsed = (datetime.now() - start_time).total_seconds()
+            await self._settle_usage_generation(
+                event=event,
+                source="chat",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=model_in_use,
+                actual_model=initial_request_context["actual_model"],
+                has_images=False,
+                outcome="failed",
+                http_status=0,
+                output_count=0,
+                charged_units=0,
+                deduction_source=None,
+                note="文生图系统错误",
+                request_context=initial_request_context,
+            )
+            msg = self._format_error_message(
+                "生成失败",
+                elapsed,
+                {"error_type": "system_error", "message": str(exc)},
+                0,
+                model=initial_request_context["actual_model"],
+                api_mode=initial_request_context["api_route"],
+                prompt=prompt,
+                image_count=0,
+            )
+            if show_model_info:
+                msg += f"\n模型: {initial_actual_model}"
+            yield self._reply_plain_result(event, msg)
+            event.stop_event()
+            return
         elapsed = (datetime.now() - start_time).total_seconds()
-        invocation_cost = self._get_required_invocation_cost(actual_model)
+        actual_model = request_context["actual_model"]
+        parameters = request_context["parameters"]
+        invocation_cost = self._get_required_invocation_cost(
+            actual_model,
+            image_bytes_list=request_context["image_bytes_list"],
+            parameters=parameters,
+        )
         should_deduct = self._should_deduct_generation_result(
             res,
             http_status,
             actual_model,
+            parameters,
         )
         deduction_amount = (
             invocation_cost
             if isinstance(res, bytes)
-            else self._get_violation_deduction_cost(actual_model)
+            else self._get_violation_deduction_cost(
+                actual_model,
+                parameters=parameters,
+            )
         )
         should_send_content_policy_warning = self._should_send_content_policy_warning(
             http_status,
             res,
         )
-        if should_deduct:
-            await self._deduct_generation_cost(
-                deduction_source,
-                sender_id,
-                group_id,
-                deduction_amount,
-            )
+        outcome = "success" if isinstance(res, bytes) else "failed"
+        await self._settle_usage_generation(
+            event=event,
+            source="chat",
+            sender_id=sender_id,
+            group_id=group_id,
+            logical_model=model_in_use,
+            actual_model=actual_model,
+            has_images=False,
+            outcome=outcome,
+            http_status=http_status,
+            output_count=1 if isinstance(res, bytes) else 0,
+            charged_units=deduction_amount if should_deduct else 0,
+            deduction_source=deduction_source if should_deduct else None,
+            request_context=request_context,
+        )
 
         if isinstance(res, bytes):
             await self._record_daily_usage(sender_id, group_id)
@@ -4910,7 +7210,7 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            yield self._reply_chain_result(event, [Image.fromBytes(res), Plain(message_text)])
+            yield self._build_image_result(event, res, message_text)
         else:
             if should_send_content_policy_warning:
                 msg = self._get_content_policy_warning_message(
@@ -4936,7 +7236,7 @@ class FigurineProPlugin(Star):
                     res,
                     http_status,
                     model=actual_model,
-                    api_mode=self._get_api_route_for_model(actual_model),
+                    api_mode=request_context["api_route"],
                     prompt=prompt,
                     image_count=0,
                 )
@@ -4969,31 +7269,41 @@ class FigurineProPlugin(Star):
             return
 
         key, new_value = map(str.strip, clean_msg.split(":", 1))
+        current_presets = self._normalized_preset_items()
+        try:
+            key = self._dashboard_command_name(key, "预设指令")
+            existing_commands = {
+                preset["command"]
+                for preset in current_presets
+                if preset["command"] != key
+            }
+            if conflict_message := self._preset_command_conflict_message(
+                key,
+                preset_commands=existing_commands,
+            ):
+                raise ValueError(conflict_message)
+            if not new_value or len(new_value) > 20_000:
+                raise ValueError("预设提示词不能为空且不能超过 20000 字符")
+        except ValueError as exc:
+            yield self._reply_plain_result(event, f"❌ {exc}")
+            return
 
-        prompt_list = self.conf.get("prompt_list", [])
-        if not isinstance(prompt_list, list):
-            prompt_list = []
-
+        schema_aliases = self._schema_default_preset_aliases()
         found = False
-        for idx, item in enumerate(prompt_list):
-            if isinstance(item, dict):
-                item_key = str(item.get("command") or item.get("指令") or "").strip()
-                if item_key == key:
-                    prompt_list[idx] = {"__template_key": "preset", "command": key, "prompt": new_value}
-                    found = True
-                    break
-            elif isinstance(item, str) and item.strip().startswith(key + ":"):
-                prompt_list[idx] = f"{key}:{new_value}"
+        for preset in current_presets:
+            if preset["command"] == key:
+                preset["prompt"] = new_value
                 found = True
                 break
-
         if not found:
-            prompt_list.append({"__template_key": "preset", "command": key, "prompt": new_value})
+            preset = {"__template_key": "preset", "command": key, "prompt": new_value}
+            if alias := schema_aliases.get(key):
+                preset["legacy_alias"] = alias
+            current_presets.append(preset)
 
-        self.conf["prompt_list"] = prompt_list
+        self.conf["prompt_list"] = current_presets
         try:
-            if hasattr(self.conf, "save"):
-                self.conf.save()
+            await self._persist_configuration()
         except Exception as e:
             logger.error(f"保存配置失败: {e}")
 
@@ -5053,9 +7363,10 @@ class FigurineProPlugin(Star):
 
         built_in = []
         custom = []
+        default_commands = self._get_default_preset_commands()
 
-        for key, val in self.prompt_map.items():
-            if val == "[内置预设]":
+        for key in self.prompt_map:
+            if key in default_commands:
                 built_in.append(key)
             else:
                 custom.append(key)
@@ -5525,8 +7836,14 @@ class FigurineProPlugin(Star):
             max_r = int(self.conf.get("checkin_random_reward_max", 5))
             reward = random.randint(1, max(1, max_r))
 
-        self.user_counts[uid] = self._get_user_count(uid) + reward
-        await self._save_user_counts()
+        await self._adjust_usage_balance(
+            event=event,
+            subject_type="user",
+            subject_id=uid,
+            amount=reward,
+            source="checkin",
+            note="每日签到奖励",
+        )
         self.user_checkin_data[uid] = today
         await self._save_user_checkin_data()
 
@@ -5558,9 +7875,16 @@ class FigurineProPlugin(Star):
 
         if target:
             old_cnt = self._get_user_count(target)
-            new_cnt = old_cnt + count
-            self.user_counts[target] = new_cnt
-            await self._save_user_counts()
+            new_cnt = await self._adjust_usage_balance(
+                event=event,
+                subject_type="user",
+                subject_id=target,
+                amount=count,
+                source="chat_admin",
+                actor=self._norm_id(event.get_sender_id()),
+                note="聊天管理员增加用户次数",
+                snapshot_identity=False,
+            )
 
             msg = f"✅ 已为用户 {target} 增加 {count} 次。\n"
             msg += f"📊 变动: {old_cnt} + {count} = {new_cnt}\n"
@@ -5585,9 +7909,16 @@ class FigurineProPlugin(Star):
             gid, count = self._norm_id(match.group(1)), int(match.group(2))
 
             old_cnt = self._get_group_count(gid)
-            new_cnt = old_cnt + count
-            self.group_counts[gid] = new_cnt
-            await self._save_group_counts()
+            new_cnt = await self._adjust_usage_balance(
+                event=event,
+                subject_type="group",
+                subject_id=gid,
+                amount=count,
+                source="chat_admin",
+                actor=self._norm_id(event.get_sender_id()),
+                note="聊天管理员增加群组次数",
+                snapshot_identity=False,
+            )
 
             msg = f"✅ 已为群 {gid} 增加 {count} 次。\n"
             msg += f"📊 变动: {old_cnt} + {count} = {new_cnt}\n"
@@ -5622,4 +7953,11 @@ class FigurineProPlugin(Star):
     async def terminate(self):
         if self.iwf:
             await self.iwf.terminate()
+        if self.usage_store:
+            try:
+                await self.usage_store.close()
+            except Exception as exc:
+                logger.warning(f"关闭用量账本失败: {exc}")
+            finally:
+                self.usage_store = None
         logger.info("[FigurinePro] 插件已终止")

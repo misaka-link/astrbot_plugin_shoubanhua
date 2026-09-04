@@ -103,8 +103,12 @@ def _install_import_stubs():
 
 def _load_plugin_module():
     _install_import_stubs()
-    module_path = Path(__file__).resolve().parents[1] / "main.py"
-    spec = importlib.util.spec_from_file_location("extra_quota_test_plugin", module_path)
+    plugin_dir = Path(__file__).resolve().parents[1]
+    package_name = "extra_quota_test_plugin"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(plugin_dir)]
+    sys.modules[package_name] = package
+    spec = importlib.util.spec_from_file_location(f"{package_name}.main", plugin_dir / "main.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

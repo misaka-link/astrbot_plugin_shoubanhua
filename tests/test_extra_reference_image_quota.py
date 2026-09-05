@@ -188,6 +188,19 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
         ])
         self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 100)
 
+    def test_zero_charge_per_step_is_free(self):
+        """每阶梯加费显式填 0 表示阶梯免费。"""
+        plugin = self.make_plugin([
+            {
+                "model": "m",
+                "reference_image_limit": 2,
+                "extra_reference_image_quota": 2,
+                "extra_reference_image_charge": 0,
+            },
+        ])
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 0)
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 7), 0)
+
     def test_extra_is_independent_of_base_charge_amount(self):
         """阶梯加费按阶梯数计算，不随 charge_amount 放大。"""
         plugin = self.make_plugin([

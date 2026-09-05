@@ -1133,6 +1133,16 @@ class FigurineProPlugin(Star):
         return number
 
     @staticmethod
+    def _dashboard_float(value: Any, field_name: str, minimum: float, maximum: float) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} 必须是数字") from exc
+        if not minimum <= number <= maximum:
+            raise ValueError(f"{field_name} 必须在 {minimum} 到 {maximum} 之间")
+        return round(number, 3)
+
+    @staticmethod
     def _dashboard_schema_path() -> Path:
         return Path(__file__).with_name("_conf_schema.json")
 
@@ -1233,7 +1243,7 @@ class FigurineProPlugin(Star):
             if key in self._dashboard_special_setting_keys() or not isinstance(spec, dict):
                 continue
             setting_type = str(spec.get("type") or "string")
-            if setting_type not in {"bool", "int", "string", "text", "list"}:
+            if setting_type not in {"bool", "int", "float", "string", "text", "list"}:
                 continue
             value = self.conf.get(key, copy.deepcopy(spec.get("default")))
             is_sensitive_proxy = key == "proxy_url" and self._dashboard_proxy_url_is_sensitive(value)
@@ -1246,6 +1256,7 @@ class FigurineProPlugin(Star):
                 "default": copy.deepcopy(spec.get("default")),
                 "min": spec.get("min"),
                 "max": spec.get("max"),
+                "step": spec.get("step"),
                 "options": copy.deepcopy(spec.get("options", [])),
                 "item_type": str((spec.get("items") or {}).get("type") or "string"),
                 "reload_required": key in reload_required,
@@ -1277,6 +1288,10 @@ class FigurineProPlugin(Star):
                 minimum = int(setting["min"]) if setting["min"] is not None else -1_000_000_000
                 maximum = int(setting["max"]) if setting["max"] is not None else 1_000_000_000
                 result[key] = self._dashboard_int(value, label, minimum, maximum)
+            elif field_type == "float":
+                minimum = float(setting["min"]) if setting["min"] is not None else -1_000_000_000
+                maximum = float(setting["max"]) if setting["max"] is not None else 1_000_000_000
+                result[key] = self._dashboard_float(value, label, minimum, maximum)
             elif field_type in {"string", "text"}:
                 normalized = str(value or "").strip()
                 if len(normalized) > (20_000 if field_type == "text" else 1_000):
@@ -1378,10 +1393,10 @@ class FigurineProPlugin(Star):
         fields = [
             {"name": "reference_image_limit", "label": "参考图数量限制", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
             {"name": "extra_reference_image_quota", "label": "超限参考图阶梯额度", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
-            {"name": "extra_reference_image_charge", "label": "超限参考图每阶梯加费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001},
-            {"name": "charge_amount", "label": "该模型单次生成扣费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001},
-            {"name": "charge_amount_2k", "label": "2K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001},
-            {"name": "charge_amount_4k", "label": "4K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001},
+            {"name": "extra_reference_image_charge", "label": "超限参考图每阶梯加费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "charge_amount", "label": "该模型单次生成扣费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001, "float": True},
+            {"name": "charge_amount_2k", "label": "2K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "charge_amount_4k", "label": "4K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
             {"name": "deduct_on_violation", "label": "违规是否扣费", "group": "基础与额度", "type": "boolean", "default": False},
             {"name": "max_output_tokens", "label": "最大输出/思考 Token", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 1000000},
             {"name": "default_resolution", "label": "默认分辨率", "group": "基础与额度", "type": "text", "default": "auto", "max_length": 64},
@@ -1636,7 +1651,10 @@ class FigurineProPlugin(Star):
                 if field_type == "boolean":
                     normalized[name] = self._dashboard_bool(raw_value, field["label"])
                 elif field_type == "number":
-                    normalized[name] = self._dashboard_int(raw_value, field["label"], field["min"], field["max"])
+                    if field.get("float"):
+                        normalized[name] = self._dashboard_float(raw_value, field["label"], field["min"], field["max"])
+                    else:
+                        normalized[name] = self._dashboard_int(raw_value, field["label"], field["min"], field["max"])
                 elif field_type == "select":
                     normalized_value = str(raw_value or field["default"]).strip()
                     if normalized_value not in field["options"]:
@@ -3190,7 +3208,8 @@ class FigurineProPlugin(Star):
                 "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
                 "reference_image_limit": _normalize_nonnegative_int(reference_image_limit),
                 "extra_reference_image_quota": _normalize_nonnegative_int(extra_reference_image_quota),
-                "extra_reference_image_charge": _normalize_charge_amount(extra_reference_image_charge, 1.0),
+                # 阶梯加费允许显式 0（每阶梯免费）；仅在字段缺失时回退默认 1 元
+                "extra_reference_image_charge": max(0, yuan_to_amount(extra_reference_image_charge)),
                 "enable_grok_parameters": enabled_field == "enable_grok_parameters",
                 "grok_resolution": normalize_grok_resolution(grok_resolution),
                 "grok_adaptive_aspect_ratio": normalize_bool(grok_adaptive_aspect_ratio),
@@ -3664,9 +3683,9 @@ class FigurineProPlugin(Star):
         if excess <= 0:
             return 0
         steps = (excess + quota - 1) // quota  # 阶梯数（向上取整）
-        charge_per_step = _normalize_nonnegative_int(parameters.get("extra_reference_image_charge", 0))
-        if charge_per_step <= 0:
-            charge_per_step = yuan_to_amount(1.0)
+        raw_charge = parameters.get("extra_reference_image_charge")
+        # 字段缺失（未归一化的旧参数）回退默认 1 元/阶梯；显式 0 表示阶梯免费
+        charge_per_step = yuan_to_amount(1.0) if raw_charge is None else _normalize_nonnegative_int(raw_charge)
         return steps * charge_per_step
 
     def _get_max_reference_image_side(self, image_bytes_list: Optional[List[bytes]]) -> int:

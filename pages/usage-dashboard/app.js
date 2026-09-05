@@ -1118,8 +1118,11 @@
               ${setting.hint ? `<span class="setting-hint">${escapeHtml(setting.hint)}</span>` : ""}
             </label>
           `;
-        } else if (type === "int" || type === "integer" || type === "number") {
+        } else if (type === "int" || type === "integer" || type === "number" || type === "float") {
           item.className = "setting-item";
+          const stepAttr = setting.step !== undefined && setting.step !== null
+            ? `step="${setting.step}"`
+            : (type === "float" ? 'step="0.001"' : "");
           item.innerHTML = `
             <div class="field-label-row">
               <label class="field-label">${escapeHtml(setting.label || setting.key)}</label>
@@ -1128,7 +1131,8 @@
             <input class="field-input font-mono" type="number" data-setting-key="${setting.key}"
               value="${val ?? setting.default ?? 0}"
               ${setting.min !== undefined ? `min="${setting.min}"` : ""}
-              ${setting.max !== undefined ? `max="${setting.max}"` : ""}>
+              ${setting.max !== undefined ? `max="${setting.max}"` : ""}
+              ${stepAttr}>
             ${setting.hint ? `<span class="setting-hint">${escapeHtml(setting.hint)}</span>` : ""}
           `;
         } else if (setting.options && Array.isArray(setting.options) && setting.options.length > 0) {
@@ -1652,6 +1656,7 @@
           inputEl.value = val ?? field.default ?? 0;
           if (field.min !== undefined) inputEl.min = String(field.min);
           if (field.max !== undefined) inputEl.max = String(field.max);
+          if (field.step !== undefined && field.step !== null) inputEl.step = String(field.step);
 
           item.append(labelEl, inputEl);
         } else if (fieldType === "select" || (field.options && Array.isArray(field.options) && field.options.length > 0)) {

@@ -281,6 +281,32 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertTrue(parameters["recover-grok"]["enable_grok_parameters"])
         self.assertEqual(parameters["none"]["parameter_mode"], "none")
 
+    def test_dashboard_normalize_keeps_float_charge_amounts(self):
+        plugin = self.make_dashboard_plugin()
+
+        normalized = plugin._dashboard_normalize_model_parameters([{
+            "model": "m1",
+            "charge_amount": 0.08,
+            "charge_amount_2k": 0,
+            "extra_reference_image_charge": 0,
+        }], {"m1"})[0]
+
+        self.assertEqual(normalized["charge_amount"], 0.08)
+        self.assertEqual(normalized["charge_amount_2k"], 0)
+        self.assertEqual(normalized["extra_reference_image_charge"], 0)
+
+        with self.assertRaises(ValueError):
+            plugin._dashboard_normalize_model_parameters([{
+                "model": "m1",
+                "charge_amount": 0,
+            }], {"m1"})
+
+    def test_dashboard_float_validator_rounds_and_bounds(self):
+        self.assertEqual(FigurineProPlugin._dashboard_float(0.08004, "价格", 0.001, 100000), 0.08)
+        self.assertEqual(FigurineProPlugin._dashboard_float(0, "价格", 0, 100000), 0)
+        with self.assertRaises(ValueError):
+            FigurineProPlugin._dashboard_float(0.0001, "价格", 0.001, 100000)
+
     def test_dashboard_normalizes_one_parameter_mode_without_losing_values(self):
         plugin = self.make_dashboard_plugin()
 

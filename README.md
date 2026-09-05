@@ -103,6 +103,8 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 插件提供 `pages/usage-dashboard/` 管理页面，AstrBot 发现插件页面后可在插件 Web 页面中打开“用量与模型路由”。页面包含概览、用户、群组、配置和独立预设提示词视图：可查看成功输出、本次消耗（元）、失败扣费、模型/端点分布、当前余额和用量明细账本；明细支持按天筛选、按结果筛选（全部/成功/失败）和翻页（默认每页 15 条，可选 15/30/50/100），也可调整用户或群组余额，维护全部插件普通设置、敏感连接配置、模型目录与路由、自定义触发词、指令模型绑定、热备、模型提示词模板和按端点自动筛选的模型参数。
 
+管理页面前端采用 React 18 + TypeScript + Vite + Ant Design 5 构建（与 astrbot_plugin_qq_group_daily_analysis 的控制台同一套方案）：AntD 设计语言（`#1677ff` 主色、紧凑卡片、卡片式 Tab、自动跟随宿主暗黑主题），源码位于仓库 `dashboard/` 目录。二次开发需在装有 Node.js ≥ 18 的机器上执行 `pnpm install && pnpm build`，构建产物直接输出到 `pages/usage-dashboard/`；构建执行时会替换该目录下的旧版原生 JS 页面，未执行构建前旧版页面继续生效。
+
 页面访问由 AstrBot WebUI 的登录会话控制，插件不再维护额外的 `web_dashboard_admin_usernames` 用户名白名单。网页调整余额时，当前 AstrBot 后台用户名仍会作为账本操作人记录。
 
 用量账本保存到插件数据目录的 `usage_history.json`（金额单位为「厘」，1 厘 = 0.001 元），余额同步写入 `user_balances.json` 与 `group_balances.json`。升级到 v2.0.0 后首次启动时自动迁移，无需手工处理：旧版按次的 `user_counts.json` / `group_counts.json` 与 v1 账本按迁移汇率（`LEGACY_COUNT_TO_YUAN`，即 **1 次 = 0.04 元**）自动换算成金额并标记迁移记录，余额立即物化为 `user_balances.json` / `group_balances.json`，旧文件保留为备份不会删除，重复启动不会二次换算。账本更新采用“写入临时文件后原子替换”的方式，不创建或写入 SQLite/WAL 文件。首次升级时，如果尚不存在 `usage_history.json` 但检测到旧 `usage_history.sqlite3`，插件会只读导入余额、身份快照和全部账本事件并按同一汇率换算；导入成功后旧 SQLite 文件会保留为备份，不会自动删除；确认 `usage_history.json` 完整后可由管理员自行归档或删除。旧版 `daily_stats.json` 只能迁移为“旧版日汇总”，不包含真实请求时间、模型、路由、扣费或单次请求详情，也不会伪造这些数据。新版本启用后会记录聊天命令、LLM 生图工具、热备中间失败、签到和管理员调整的账本事件。

@@ -12,6 +12,7 @@ import {
   Space,
   Switch,
   Table,
+  Tabs,
   Tag,
   Typography,
   App as AntApp,

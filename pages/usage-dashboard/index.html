@@ -1,627 +1,88 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>手办化 Pro - 用量与配置管理</title>
-  <link rel="stylesheet" href="./style.css">
-</head>
-<body>
-  <div class="shell">
-    <header class="topbar">
-      <div class="brand-area">
-        <div class="brand-tag">
-          <span class="tag-indicator"></span>
-          <span>手办化 Pro</span>
-        </div>
-        <h1 class="brand-title">用量与配置管理</h1>
-      </div>
-
-      <div class="date-filter" aria-label="统计时间范围">
-        <div class="filter-group">
-          <label for="start-date" class="filter-label">起始</label>
-          <input id="start-date" class="filter-input" type="date">
-        </div>
-        <span class="filter-divider">至</span>
-        <div class="filter-group">
-          <label for="end-date" class="filter-label">截止</label>
-          <input id="end-date" class="filter-input" type="date">
-        </div>
-        <button id="refresh-button" class="button button-refresh" type="button" title="刷新当前视图数据" aria-label="刷新当前视图数据">
-          <span class="btn-symbol">↻</span>
-          <span class="btn-text">刷新</span>
-        </button>
-      </div>
-    </header>
-
-    <div id="status" class="status-bar" role="status" aria-live="polite"></div>
-
-    <nav class="nav-tabs" aria-label="管理视图导航">
-      <button class="tab is-active" data-view="overview" type="button">
-        <span class="tab-label">概览统计</span>
-      </button>
-      <button class="tab" data-view="users" type="button">
-        <span class="tab-label">用户用量</span>
-      </button>
-      <button class="tab" data-view="groups" type="button">
-        <span class="tab-label">群组用量</span>
-      </button>
-      <button class="tab" data-view="presets" type="button">
-        <span class="tab-label">预设管理</span>
-        <span id="presets-dirty-badge" class="dirty-dot" title="有未保存的预设更改" hidden></span>
-      </button>
-      <button class="tab" data-view="config" type="button">
-        <span class="tab-label">配置管理</span>
-        <span id="config-dirty-badge" class="dirty-dot" title="有未保存的配置更改" hidden></span>
-      </button>
-    </nav>
-
-    <!-- Overview View -->
-    <section id="overview-view" class="view is-active" aria-label="概览统计">
-      <div id="metrics" class="metrics-grid"></div>
-
-      <div class="split-grid">
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">每日趋势</h2>
-              <span class="panel-subtitle">生成输出与本次消耗趋势对比</span>
-            </div>
-            <div class="trend-legend">
-              <span class="legend-item"><span class="legend-box is-output"></span>成功输出</span>
-              <span class="legend-item"><span class="legend-box is-charge"></span>本次消耗(元)</span>
-            </div>
-          </div>
-          <div id="trend" class="trend-container" aria-label="每日生成与消耗趋势"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">模型与路由明细</h2>
-              <span class="panel-subtitle">各实际模型与路由通道调用汇总</span>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table usage-table usage-model-table">
-              <colgroup>
-                <col class="usage-model-name-col">
-                <col class="usage-model-route-col">
-                <col class="usage-number-col">
-                <col class="usage-number-col">
-                <col class="usage-number-col">
-              </colgroup>
-              <thead>
-                <tr>
-                  <th>实际模型</th>
-                  <th>路由通道</th>
-                  <th class="text-right">成功输出</th>
-                  <th class="text-right">本次消耗(元)</th>
-                  <th class="text-right">尝试次数</th>
-                </tr>
-              </thead>
-              <tbody id="model-breakdown"></tbody>
-            </table>
-          </div>
-        </section>
-      </div>
-
-      <section class="panel">
-        <div class="panel-header">
-          <div class="header-content">
-            <h2 class="panel-title">最近活动记录</h2>
-            <span class="panel-subtitle">用量消耗与余额变更审计明细，可按天筛选、按结果筛选并翻页</span>
-          </div>
-          <div class="events-toolbar">
-            <input id="events-day" class="field-input" type="date" aria-label="按天筛选日期" title="按天筛选（留空时跟随顶部时间范围）">
-            <select id="events-outcome" class="field-input" aria-label="按结果筛选">
-              <option value="">全部</option>
-              <option value="success">成功</option>
-              <option value="failed">失败</option>
-            </select>
-            <select id="events-page-size" class="field-input" aria-label="每页条数">
-              <option value="15" selected>15 条/页</option>
-              <option value="30">30 条/页</option>
-              <option value="50">50 条/页</option>
-              <option value="100">100 条/页</option>
-            </select>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table class="data-table usage-table usage-events-table">
-            <colgroup>
-              <col class="usage-event-time-col">
-              <col class="usage-event-user-col">
-              <col class="usage-event-group-col">
-              <col class="usage-event-source-col">
-              <col class="usage-event-model-col">
-              <col class="usage-event-route-col">
-              <col class="usage-event-outcome-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-event-balance-col">
-            </colgroup>
-            <thead>
-              <tr>
-                <th>时间</th>
-                <th>用户</th>
-                <th>群组</th>
-                <th>事件 / 来源</th>
-                <th>模型 (逻辑 → 实际)</th>
-                <th>路由通道</th>
-                <th>执行结果</th>
-                <th class="text-right">产出</th>
-                <th class="text-right">扣费(元)</th>
-                <th class="text-right">余额变动(元)</th>
-              </tr>
-            </thead>
-            <tbody id="recent-events"></tbody>
-          </table>
-        </div>
-        <div id="events-pagination" class="pagination-bar"></div>
-      </section>
-    </section>
-
-    <!-- Users View -->
-    <section id="users-view" class="view" aria-label="用户用量">
-      <div class="toolbar">
-        <div class="search-wrap">
-          <input id="user-search" class="search-input" type="search" placeholder="输入 QQ 号或昵称搜索...">
-        </div>
-        <button id="user-search-button" class="button primary" type="button">查询用户</button>
-      </div>
-      <section class="panel">
-        <div class="table-wrap">
-          <table class="data-table usage-table usage-users-table">
-            <colgroup>
-              <col class="usage-identity-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-action-col">
-            </colgroup>
-            <thead>
-              <tr>
-                <th>用户</th>
-                <th class="text-right">成功输出</th>
-                <th class="text-right">本次消耗(元)</th>
-                <th class="text-right">个人余额(元)</th>
-                <th class="text-center">操作</th>
-              </tr>
-            </thead>
-            <tbody id="users-table"></tbody>
-          </table>
-        </div>
-        <div id="users-pagination" class="pagination-bar"></div>
-      </section>
-    </section>
-
-    <!-- Groups View -->
-    <section id="groups-view" class="view" aria-label="群组用量">
-      <div class="toolbar">
-        <div class="search-wrap">
-          <input id="group-search" class="search-input" type="search" placeholder="输入群号或群名称搜索...">
-        </div>
-        <button id="group-search-button" class="button primary" type="button">查询群组</button>
-      </div>
-      <section class="panel">
-        <div class="table-wrap">
-          <table class="data-table usage-table usage-groups-table">
-            <colgroup>
-              <col class="usage-identity-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-number-col">
-              <col class="usage-action-col">
-            </colgroup>
-            <thead>
-              <tr>
-                <th>群组信息</th>
-                <th class="text-right">成功输出</th>
-                <th class="text-right">本次消耗(元)</th>
-                <th class="text-right">活跃用户数</th>
-                <th class="text-right">群公用余额(元)</th>
-                <th class="text-center">操作</th>
-              </tr>
-            </thead>
-            <tbody id="groups-table"></tbody>
-          </table>
-        </div>
-        <div id="groups-pagination" class="pagination-bar"></div>
-      </section>
-    </section>
-
-    <!-- Presets View (Independent Tab) -->
-    <section id="presets-view" class="view" aria-label="预设管理">
-      <div class="config-topbar">
-        <div class="config-state-indicator">
-          <span id="presets-dirty-icon" class="status-indicator-dot is-synced"></span>
-          <span id="presets-dirty-text" class="status-indicator-text">预设已与服务器同步</span>
-          <span id="presets-revision-badge" class="badge badge-code" title="当前预设版本 Revision">rev: -</span>
-        </div>
-        <div class="config-actions">
-          <div class="search-wrap preset-search-wrap">
-            <input id="preset-search-input" class="search-input" type="search" placeholder="过滤预设指令或提示词...">
-          </div>
-          <button id="presets-refresh-btn" class="button secondary" type="button" title="重新获取服务器最新预设">
-            <span class="btn-symbol">⟳</span> 重新加载
-          </button>
-          <button id="add-preset-btn" class="button secondary" type="button" title="添加新的预设条目">
-            <span class="btn-symbol">+</span> 添加预设
-          </button>
-          <button id="presets-save-btn" class="button primary" type="button" title="保存所有预设更改" aria-label="保存预设">
-            <span class="btn-symbol">💾</span> 保存预设
-          </button>
-        </div>
-      </div>
-
-      <div id="presets-conflict-alert" class="config-conflict-banner" hidden>
-        <span class="conflict-icon">⚠</span>
-        <div class="conflict-content">
-          <strong>预设冲突：</strong>服务器端预设已被其他页面或操作更新。请重新加载以获取最新预设。
-        </div>
-        <button id="presets-conflict-reload-btn" class="button secondary button-sm" type="button">重新加载最新预设</button>
-      </div>
-
-      <section class="panel">
-        <div class="panel-header">
-          <div class="header-content">
-            <h2 class="panel-title">预设提示词列表</h2>
-            <span class="panel-subtitle">自定义快捷指令与专属系统提示词预设（独立管理与存储）</span>
-          </div>
-        </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th style="width: 220px;">预设指令名</th>
-                <th>提示词内容 (Prompt)</th>
-                <th class="text-center" style="width: 70px;">操作</th>
-              </tr>
-            </thead>
-            <tbody id="presets-table-body"></tbody>
-          </table>
-        </div>
-      </section>
-    </section>
-
-    <!-- Configuration View -->
-    <section id="config-view" class="view" aria-label="配置管理">
-      <div class="config-topbar">
-        <div class="config-state-indicator">
-          <span id="config-dirty-icon" class="status-indicator-dot is-synced"></span>
-          <span id="config-dirty-text" class="status-indicator-text">配置已与服务器同步</span>
-          <span id="config-revision-badge" class="badge badge-code" title="当前配置版本 Revision">rev: -</span>
-        </div>
-        <div class="config-actions">
-          <button id="config-refresh-btn" class="button secondary" type="button" title="重新获取服务器最新配置">
-            <span class="btn-symbol">⟳</span> 重新加载
-          </button>
-          <button id="config-save-btn" class="button primary" type="button" title="保存所有配置更改" aria-label="保存配置（顶部操作栏）">
-            <span class="btn-symbol">💾</span> 保存配置
-          </button>
-        </div>
-      </div>
-
-      <div id="config-conflict-alert" class="config-conflict-banner" hidden>
-        <span class="conflict-icon">⚠</span>
-        <div class="conflict-content">
-          <strong>配置冲突：</strong>服务器端配置已被其他页面或操作更新。请重新加载以获取最新配置。
-        </div>
-        <button id="conflict-reload-btn" class="button secondary button-sm" type="button">重新加载最新配置</button>
-      </div>
-
-      <form id="config-form" class="config-form">
-        <!-- 1. 全局连接与服务地址 -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">全局连接与服务地址</h2>
-              <span class="panel-subtitle">配置全局默认生效模型及统一服务接口地址 (Generic 与 Gemini 兼容路由共享此服务地址与 Key 池)</span>
-            </div>
-          </div>
-          <div class="form-grid connection-grid">
-            <div class="form-group">
-              <label for="config-default-model" class="field-label">默认生效模型 <span class="required-star">*</span></label>
-              <select id="config-default-model" class="field-select font-mono" required></select>
-            </div>
-            <div id="config-generic-url-group" class="form-group">
-              <label for="config-generic-url" class="field-label">服务接口地址 (Generic / Shared Base URL)</label>
-              <input id="config-generic-url" class="field-input font-mono" type="url" placeholder="https://api.openai.com/v1 或服务根地址">
-            </div>
-          </div>
-        </section>
-
-        <!-- 2. 敏感配置与密钥凭据 (Dedicated Sensitive Panel) -->
-        <section class="panel sensitive-panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">敏感配置与密钥凭据</h2>
-              <span class="panel-subtitle">API Key 池与代理安全管理（只写存储，服务器不回传明文密钥）</span>
-            </div>
-          </div>
-          <div class="sensitive-body">
-            <!-- Generic API Key Pool -->
-            <div class="sensitive-card">
-              <div class="sensitive-card-header">
-                <div class="sensitive-status-wrap">
-                  <span class="field-label">API Key 密钥池</span>
-                  <div id="sensitive-keys-badge" class="key-badge">
-                    <span class="key-indicator"></span>
-                    <span class="key-title">状态:</span>
-                    <strong id="sensitive-keys-state">未配置</strong>
-                    <span id="sensitive-keys-count" class="badge badge-code" style="margin-left: 4px;">0 个 Key</span>
-                  </div>
-                </div>
-              </div>
-              <div class="sensitive-card-content">
-                <textarea id="sensitive-keys-input" class="field-textarea font-mono" rows="2" placeholder="输入一个或多个 API Key（支持每行一个，或逗号/空格分隔）..."></textarea>
-                <div class="sensitive-btn-row">
-                  <button id="key-action-append-btn" class="button secondary button-sm" type="button" title="向现有 Key 池中追加新 Key">
-                    <span class="btn-symbol">+</span> 追加 Key
-                  </button>
-                  <button id="key-action-replace-btn" class="button secondary button-sm" type="button" title="使用上方输入的 Key 完全替换现有 Key 池">
-                    <span class="btn-symbol">↻</span> 替换 Key 池
-                  </button>
-                  <button id="key-action-clear-btn" class="button secondary button-sm button-danger-hover" type="button" title="清空全部已配置的 Key">
-                    <span class="btn-symbol">✕</span> 清空 Key 池
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div id="sensitive-service-url-card" class="sensitive-card">
-              <div class="sensitive-card-header">
-                <div class="sensitive-status-wrap">
-                  <span class="field-label">认证共享服务地址</span>
-                  <div id="sensitive-service-url-badge" class="key-badge">
-                    <span class="key-indicator"></span>
-                    <span class="key-title">状态:</span>
-                    <strong id="sensitive-service-url-state">未配置</strong>
-                  </div>
-                </div>
-              </div>
-              <div class="sensitive-card-content">
-                <input id="sensitive-service-url-input" class="field-input font-mono" type="text" placeholder="https://user:token@gateway.example/v1 或带 token 的服务地址">
-                <div class="sensitive-btn-row">
-                  <button id="service-url-action-replace-btn" class="button secondary button-sm" type="button">
-                    <span class="btn-symbol">💾</span> 保存认证地址
-                  </button>
-                  <button id="service-url-action-clear-btn" class="button secondary button-sm button-danger-hover" type="button">
-                    <span class="btn-symbol">✕</span> 清除认证地址
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <!-- Credential Proxy Control -->
-            <div id="sensitive-proxy-card" class="sensitive-card" hidden>
-              <div class="sensitive-card-header">
-                <div class="sensitive-status-wrap">
-                  <span class="field-label">专属代理凭据 (带认证)</span>
-                  <div id="sensitive-proxy-badge" class="key-badge">
-                    <span class="key-indicator"></span>
-                    <span class="key-title">状态:</span>
-                    <strong id="sensitive-proxy-state">未配置</strong>
-                  </div>
-                </div>
-              </div>
-              <div class="sensitive-card-content">
-                <input id="sensitive-proxy-input" class="field-input font-mono" type="text" placeholder="socks5://user:pass@127.0.0.1:1080 或 http://user:pass@host:port">
-                <div class="sensitive-btn-row">
-                  <button id="proxy-action-replace-btn" class="button secondary button-sm" type="button">
-                    <span class="btn-symbol">💾</span> 保存代理凭据
-                  </button>
-                  <button id="proxy-action-clear-btn" class="button secondary button-sm button-danger-hover" type="button">
-                    <span class="btn-symbol">✕</span> 清除代理凭据
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <!-- 3. 模型目录与路由通道能力 -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">模型目录与路由通道能力</h2>
-              <span class="panel-subtitle">配置所有受支持模型及其所属的 API 通道（Gemini 路由与 Generic 通道互斥）</span>
-            </div>
-            <button id="add-model-btn" class="button secondary" type="button">
-              <span class="btn-symbol">+</span> 添加模型
-            </button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table routing-table">
-              <thead>
-                <tr>
-                  <th>模型名称</th>
-                  <th class="text-center" style="width: 100px;">Gemini 路由</th>
-                  <th class="text-center" style="width: 100px;">Chat 对话</th>
-                  <th class="text-center" style="width: 120px;">Generations 生图</th>
-                  <th class="text-center" style="width: 100px;">Edits 垫图</th>
-                  <th class="text-center" style="width: 70px;">操作</th>
-                </tr>
-              </thead>
-              <tbody id="config-models-table"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 4. 自定义触发词 & 指令模型绑定 -->
-        <div class="split-grid">
-          <!-- 自定义触发词 -->
-          <section class="panel">
-            <div class="panel-header">
-              <div class="header-content">
-                <h2 class="panel-title">自定义触发词</h2>
-                <span class="panel-subtitle">除内置指令外的额外响应触发词（至少保留 1 项）</span>
-              </div>
-            </div>
-            <div class="prefix-container">
-              <div id="config-prefixes-list" class="prefix-tags-wrap"></div>
-              <div class="prefix-add-row">
-                <input id="new-prefix-input" class="field-input font-mono" placeholder="输入新触发词，如 anime 或 二次元手办" maxlength="32">
-                <button id="add-prefix-btn" class="button secondary button-sm" type="button">
-                  <span class="btn-symbol">+</span> 添加触发词
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <!-- 指令模型绑定 -->
-          <section class="panel">
-            <div class="panel-header">
-              <div class="header-content">
-                <h2 class="panel-title">指令模型绑定</h2>
-                <span class="panel-subtitle">为特定指令单独定向分配模型</span>
-              </div>
-              <button id="add-binding-btn" class="button secondary" type="button">
-                <span class="btn-symbol">+</span> 添加绑定
-              </button>
-            </div>
-            <div class="table-wrap">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>指令名</th>
-                    <th>目标生效模型</th>
-                    <th class="text-center" style="width: 70px;">操作</th>
-                  </tr>
-                </thead>
-                <tbody id="config-bindings-table"></tbody>
-              </table>
-            </div>
-          </section>
-        </div>
-
-        <!-- 5. 热备降级映射 -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">热备降级映射</h2>
-              <span class="panel-subtitle">当主模型故障或限流时自动按优先级重试降级模型（优先级越高越先尝试）</span>
-            </div>
-            <button id="add-mapping-btn" class="button secondary" type="button">
-              <span class="btn-symbol">+</span> 添加降级映射
-            </button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th>源模型</th>
-                  <th>降级目标模型</th>
-                  <th style="width: 120px;">优先级</th>
-                  <th class="text-center" style="width: 70px;">操作</th>
-                </tr>
-              </thead>
-              <tbody id="config-mappings-table"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 6. 模型提示词模板 -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">模型提示词模板</h2>
-              <span class="panel-subtitle">按具体模型或全局 (ALL) 定制的基础提示词包装模板</span>
-            </div>
-            <button id="add-template-btn" class="button secondary" type="button">
-              <span class="btn-symbol">+</span> 添加模板
-            </button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table">
-              <thead>
-                <tr>
-                  <th style="width: 200px;">适用模型</th>
-                  <th>模板内容 (Prompt Template)</th>
-                  <th class="text-center" style="width: 70px;">操作</th>
-                </tr>
-              </thead>
-              <tbody id="config-templates-table"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- 7. 模型专属参数配置 -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">模型专属参数配置</h2>
-              <span class="panel-subtitle">为特定模型独立配置生成参数、分辨率、扣费金额及厂商专属特性（根据当前通道能力动态过滤适用字段）</span>
-            </div>
-            <button id="add-parameter-btn" class="button secondary" type="button">
-              <span class="btn-symbol">+</span> 添加模型参数条目
-            </button>
-          </div>
-          <div id="config-parameters-list" class="parameters-cards-wrap"></div>
-        </section>
-
-        <!-- 8. 插件高级与运行设置 (Dynamic Full Plugin Settings) -->
-        <section class="panel">
-          <div class="panel-header">
-            <div class="header-content">
-              <h2 class="panel-title">插件功能与运行设置</h2>
-              <span class="panel-subtitle">基于元数据动态渲染的高级基础、网络、权限、计费、签到与错误提示配置</span>
-            </div>
-          </div>
-          <div id="config-dynamic-settings" class="dynamic-settings-wrap"></div>
-        </section>
-
-        <!-- Form Actions Bar -->
-        <div class="form-actions-bar">
-          <button id="config-save-btn-bottom" class="button primary button-lg" type="submit" aria-label="保存配置（表单底部）">
-            <span class="btn-symbol">💾</span> 保存配置
-          </button>
-        </div>
-      </form>
-    </section>
-  </div>
-
-  <!-- Adjust Balance Dialog -->
-  <dialog id="adjust-dialog" class="custom-dialog">
-    <form id="adjust-form" method="dialog" class="dialog-form">
-      <div class="dialog-header">
-        <h2 id="adjust-title" class="dialog-title">调整余额</h2>
-        <button class="icon-button close-dialog-btn" value="cancel" type="button" aria-label="关闭">✕</button>
-      </div>
-
-      <div class="dialog-body">
-        <input id="adjust-subject-type" type="hidden">
-        <input id="adjust-subject-id" type="hidden">
-
-        <div class="subject-card">
-          <span class="subject-label">调整目标</span>
-          <p id="adjust-subject" class="subject-val">-</p>
-        </div>
-
-        <div class="dialog-field">
-          <label for="adjust-amount" class="field-label">
-            变更金额(元) <span class="field-hint">(正数为增加，负数为扣减，精确到 0.001)</span>
-          </label>
-          <input id="adjust-amount" class="field-input font-mono" type="number" step="0.001" min="-100000" max="100000" required placeholder="如 0.5 或 -0.2">
-        </div>
-
-        <div class="dialog-field">
-          <label for="adjust-note" class="field-label">
-            审计备注 <span class="field-hint">(可选，记录在账本明细中)</span>
-          </label>
-          <textarea id="adjust-note" class="field-textarea" maxlength="500" rows="3" placeholder="填写本次额度调整原因，最多 500 字..."></textarea>
-        </div>
-      </div>
-
-      <div class="dialog-footer">
-        <button id="adjust-cancel-btn" class="button secondary" type="button" value="cancel">取消</button>
-        <button class="button primary" value="default" type="submit">确认调整</button>
-      </div>
-    </form>
-  </dialog>
-
-  <script type="module" src="./app.js"></script>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <title>手办化Pro 控制台</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        min-height: 100%;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+        -webkit-text-size-adjust: 100%;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: manipulation;
+      }
+      * {
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+      button,
+      a,
+      input,
+      select,
+      textarea {
+        touch-action: manipulation !important;
+        cursor: pointer;
+      }
+      .font-mono {
+        font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular,
+          Menlo, Monaco, Consolas, "Liberation Mono", monospace !important;
+      }
+      * {
+        scrollbar-width: thin;
+        scrollbar-color: rgba(148, 163, 184, 0.4) transparent;
+      }
+      ::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: rgba(148, 163, 184, 0.35);
+        border-radius: 9999px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: rgba(148, 163, 184, 0.6);
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var params = new URLSearchParams(window.location.search);
+          var themeVal = params.get("theme");
+          var isDark = false;
+          if (themeVal === "dark" || params.get("isDark") === "true") {
+            isDark = true;
+          } else if (themeVal === "light" || params.get("isDark") === "false") {
+            isDark = false;
+          } else if (localStorage.getItem("astrbot_plugin_theme_is_dark") === "true") {
+            isDark = true;
+          }
+          if (isDark) {
+            document.documentElement.style.background = "#000000";
+            document.documentElement.style.color = "#ffffff";
+          } else {
+            document.documentElement.style.background = "#f5f5f5";
+            document.documentElement.style.color = "#000000";
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <script type="module" crossorigin src="./assets/index.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
 </html>

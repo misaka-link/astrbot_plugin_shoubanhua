@@ -281,6 +281,23 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertTrue(parameters["recover-grok"]["enable_grok_parameters"])
         self.assertEqual(parameters["none"]["parameter_mode"], "none")
 
+    def test_dashboard_model_parameter_items_display_yuan_not_milli(self):
+        plugin = self.make_dashboard_plugin()
+        plugin.conf["model_parameter_list"] = [{
+            "model": "m1",
+            "parameter_mode": "gpt",
+            "charge_amount": 0.04,
+            "charge_amount_2k": 0.08,
+            "extra_reference_image_charge": 0,
+        }]
+
+        items = {item["model"]: item for item in plugin._dashboard_model_parameter_items()}
+        entry = items["m1"]
+        # 回显必须是「元」，不能把运行时「厘」直接抛给配置页
+        self.assertEqual(entry["charge_amount"], 0.04)
+        self.assertEqual(entry["charge_amount_2k"], 0.08)
+        self.assertEqual(entry["extra_reference_image_charge"], 0)
+
     def test_dashboard_normalize_keeps_float_charge_amounts(self):
         plugin = self.make_dashboard_plugin()
 

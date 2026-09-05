@@ -31,6 +31,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from .usage_store import (
     LEGACY_COUNT_TO_YUAN,
     UsageStore,
+    amount_to_yuan,
     format_amount,
     yuan_to_amount,
 )
@@ -1518,7 +1519,10 @@ class FigurineProPlugin(Star):
 
     def _dashboard_model_parameter_items(self) -> List[Dict[str, Any]]:
         raw_entries = self._get_raw_model_parameter_entry_map()
-        known_fields = {field["name"] for field in self._dashboard_parameter_fields()}
+        fields = self._dashboard_parameter_fields()
+        known_fields = {field["name"] for field in fields}
+        # 金额字段在运行时归一化Map中是「厘」，回显给配置页时必须换算回「元」
+        money_fields = {field["name"] for field in fields if field.get("float")}
         reserved_keys = {
             "__template_key", "model", "模型", "model_name", "模型名", "parameter_mode",
         }
@@ -1530,7 +1534,11 @@ class FigurineProPlugin(Star):
                 for key, value in raw_entry.items()
                 if key not in known_fields and key not in reserved_keys
             }
-            items.append({"model": model, **extensions, **parameters})
+            display = dict(parameters)
+            for key in money_fields:
+                if display.get(key) is not None:
+                    display[key] = amount_to_yuan(display[key])
+            items.append({"model": model, **extensions, **display})
         return items
 
     def _dashboard_configuration_values(self) -> Dict[str, Any]:

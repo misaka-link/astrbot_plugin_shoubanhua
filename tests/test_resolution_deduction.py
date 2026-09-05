@@ -480,6 +480,56 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertNotIn("quality", seedream_payload)
         self.assertNotIn("moderation", seedream_payload)
 
+    def test_gpt_background_parameter_sent_only_when_configured(self):
+        entry = {
+            "model": "m",
+            "parameter_mode": "gpt",
+            "quality": "high",
+            "moderation": "low",
+        }
+        plugin = self.make_plugin([entry])
+
+        # 默认 auto：不发送 background，行为与旧版一致
+        payload = plugin._build_generic_images_payload("m", "prompt", [], parameters=plugin._get_model_parameter_map()["m"])
+        self.assertNotIn("background", payload)
+        self.assertNotIn("output_format", payload)
+
+        # transparent：发送 background 并锁定 png 输出
+        plugin.conf["model_parameter_list"] = [{**entry, "gpt_background": "transparent"}]
+        payload = plugin._build_generic_images_payload("m", "prompt", [], parameters=plugin._get_model_parameter_map()["m"])
+        self.assertEqual(payload["background"], "transparent")
+        self.assertEqual(payload["output_format"], "png")
+
+        # opaque：只发送 background
+        plugin.conf["model_parameter_list"] = [{**entry, "gpt_background": "opaque"}]
+        payload = plugin._build_generic_images_payload("m", "prompt", [], parameters=plugin._get_model_parameter_map()["m"])
+        self.assertEqual(payload["background"], "opaque")
+        self.assertNotIn("output_format", payload)
+
+        # 非法值归一化为 auto
+        plugin.conf["model_parameter_list"] = [{**entry, "gpt_background": "bogus"}]
+        payload = plugin._build_generic_images_payload("m", "prompt", [], parameters=plugin._get_model_parameter_map()["m"])
+        self.assertNotIn("background", payload)
+
+    def test_dashboard_select_accepts_labelled_options(self):
+        plugin = self.make_dashboard_plugin()
+
+        normalized = plugin._dashboard_normalize_model_parameters([{
+            "model": "m1",
+            "parameter_mode": "gpt",
+            "quality": "high",
+            "moderation": "low",
+            "gpt_background": "transparent",
+        }], {"m1"})[0]
+        self.assertEqual(normalized["gpt_background"], "transparent")
+
+        with self.assertRaises(ValueError):
+            plugin._dashboard_normalize_model_parameters([{
+                "model": "m1",
+                "parameter_mode": "gpt",
+                "gpt_background": "bogus",
+            }], {"m1"})
+
     def test_usage_endpoint_details_preserves_inherited_source_route(self):
         plugin = self.make_plugin([],
             gemini_model_list=[],

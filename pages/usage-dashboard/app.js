@@ -1669,9 +1669,11 @@
           inputEl = document.createElement("select");
           inputEl.className = "field-select font-mono";
           inputEl.dataset.field = field.name;
-          inputEl.innerHTML = (field.options || []).map((opt) =>
-            `<option value="${escapeHtml(opt)}"${String(opt) === String(val) ? " selected" : ""}>${escapeHtml(opt)}</option>`
-          ).join("");
+          inputEl.innerHTML = (field.options || []).map((opt) => {
+            const optionValue = typeof opt === "object" && opt !== null ? opt.value : opt;
+            const optionLabel = typeof opt === "object" && opt !== null ? (opt.label || opt.value) : opt;
+            return `<option value="${escapeHtml(String(optionValue))}"${String(optionValue) === String(val) ? " selected" : ""}>${escapeHtml(String(optionLabel))}</option>`;
+          }).join("");
 
           item.append(labelEl, inputEl);
         } else {

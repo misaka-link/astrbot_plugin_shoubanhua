@@ -183,6 +183,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `不传递 n 参数`：默认关闭。仅在选择 GPT 模式且模型走 Images Generations / Edits 路由时生效。开启后请求中不发送 `n`；关闭时保持发送 `n=1`。主要用于兼容无法正确解析 Images Edits multipart 表单 `n` 字段的上游接口；不影响插件的单次生成行为或 `*2` 等批量请求数。
 - `质量`：可选 `low`、`medium`、`high`、`auto`，默认 `auto`。
 - `审核`：可选 `auto`、`low`。`auto` 为标准过滤；`low` 的过滤限制较少。
+- `背景`：可选 `auto`、`transparent`、`opaque`，默认 `auto`。`auto`：不发送 `background` 参数，由模型按提示词自动决定背景，与旧版行为一致；`transparent`：请求透明背景（gpt-image-2 预览功能，仅支持 png/webp 输出，插件会自动改用 png 输出，第三方中转是否生效取决于网关透传）；`opaque`：强制不透明背景。仅 GPT 参数模式生效，generations 与 edits 请求都会发送。
 - `自适应比例`：默认关闭。开启后，带图的 Images 请求会读取第一张图片宽高比并计算满足 Images API 约束的 `size` 参数。
 - `自适应比例分辨率`：可选 `1K`、`2K`、`4K`，默认 `1K`。开启自适应比例后默认使用此值；命令中的 `x1/x2/x4` 可临时覆盖。
 - `1K超限自动转2K`：默认关闭。开启后，当有效自适应分辨率为 `1K` 且初次计算出的 `size` 任一边超过 `1024` 时，插件会改按 `2K` 重新计算并提交 `size`；本次请求也按全局 `resolution_2k_cost` 结算。它与“强制限制分辨率”互斥；两项同时开启时，本项优先并自动按关闭强制限制处理。

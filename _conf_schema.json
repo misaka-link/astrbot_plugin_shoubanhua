@@ -218,6 +218,17 @@
                         "default": "auto",
                         "hint": "auto（默认）：标准过滤，旨在限制创建某些类别的潜在不适合年龄的内容；low：过滤限制较少。"
                     },
+                    "gpt_background": {
+                        "label": "背景",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "transparent",
+                            "opaque"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 GPT 参数模式生效，generations 与 edits 请求都会发送。auto（默认）：不发送 background 参数，由模型按提示词自动决定背景，与旧版行为一致；transparent：透明背景（gpt-image-2 预览功能，仅支持 png/webp 输出，插件会自动改用 png 输出，第三方中转是否生效取决于网关透传）；opaque：强制不透明背景。"
+                    },
                     "adaptive_aspect_ratio": {
                         "label": "自适应比例",
                         "type": "bool",

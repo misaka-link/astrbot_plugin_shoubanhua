@@ -1406,6 +1406,11 @@ class FigurineProPlugin(Star):
             {"name": "omit_n_parameter", "label": "不传递 n 参数", "group": "GPT", "type": "boolean", "default": False},
             {"name": "quality", "label": "质量", "group": "GPT", "type": "select", "default": "auto", "options": ["low", "medium", "high", "auto"]},
             {"name": "moderation", "label": "审核", "group": "GPT", "type": "select", "default": "auto", "options": ["auto", "low"]},
+            {"name": "gpt_background", "label": "背景", "group": "GPT", "type": "select", "default": "auto", "options": [
+                {"value": "auto", "label": "auto（自动：不发送参数，由模型按提示词决定）"},
+                {"value": "transparent", "label": "transparent（透明背景，仅 png/webp 输出）"},
+                {"value": "opaque", "label": "opaque（不透明背景）"},
+            ]},
             {"name": "adaptive_aspect_ratio", "label": "自适应比例", "group": "GPT", "type": "boolean", "default": False},
             {"name": "adaptive_resolution", "label": "自适应比例分辨率", "group": "GPT", "type": "select", "default": "1K", "options": ["1K", "2K", "4K"]},
             {"name": "auto_upgrade_1k_adaptive_resolution", "label": "1K超限自动转2K", "group": "GPT", "type": "boolean", "default": False},
@@ -1433,7 +1438,7 @@ class FigurineProPlugin(Star):
         ]
         generic_image_fields = {
             "default_resolution", "send_default_size", "enable_gpt_parameters", "omit_n_parameter",
-            "quality", "moderation", "adaptive_aspect_ratio", "adaptive_resolution",
+            "quality", "moderation", "gpt_background", "adaptive_aspect_ratio", "adaptive_resolution",
             "auto_upgrade_1k_adaptive_resolution", "force_resolution_limit",
         }
         gemini_fields = {
@@ -1464,6 +1469,7 @@ class FigurineProPlugin(Star):
             "omit_n_parameter": "enable_gpt_parameters",
             "quality": "enable_gpt_parameters",
             "moderation": "enable_gpt_parameters",
+            "gpt_background": "enable_gpt_parameters",
             "adaptive_aspect_ratio": "enable_gpt_parameters",
             "adaptive_resolution": "enable_gpt_parameters",
             "auto_upgrade_1k_adaptive_resolution": "enable_gpt_parameters",
@@ -1665,7 +1671,11 @@ class FigurineProPlugin(Star):
                         normalized[name] = self._dashboard_int(raw_value, field["label"], field["min"], field["max"])
                 elif field_type == "select":
                     normalized_value = str(raw_value or field["default"]).strip()
-                    if normalized_value not in field["options"]:
+                    option_values = {
+                        option["value"] if isinstance(option, dict) else option
+                        for option in field["options"]
+                    }
+                    if normalized_value not in option_values:
                         raise ValueError(f"{field['label']} 取值无效")
                     normalized[name] = normalized_value
                 else:
@@ -3099,6 +3109,10 @@ class FigurineProPlugin(Star):
                 "1", "true", "yes", "on", "enable", "enabled", "是", "开启",
             }
 
+        def normalize_gpt_background(value: Any) -> str:
+            normalized = str(value or "auto").strip().lower()
+            return normalized if normalized in {"auto", "transparent", "opaque"} else "auto"
+
         def normalize_resolution(value: Any) -> str:
             normalized = str(value or "1K").strip().upper()
             return normalized if normalized in self.ADAPTIVE_RESOLUTION_LONG_EDGES else "1K"
@@ -3162,6 +3176,7 @@ class FigurineProPlugin(Star):
                 model: Any,
                 quality: Any = "auto",
                 moderation: Any = "auto",
+                gpt_background: Any = "auto",
                 adaptive_aspect_ratio: Any = False,
                 adaptive_resolution: Any = "1K",
                 auto_upgrade_1k_adaptive_resolution: Any = False,
@@ -3209,6 +3224,7 @@ class FigurineProPlugin(Star):
                 "parameter_mode": parameter_mode,
                 "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
+                "gpt_background": normalize_gpt_background(gpt_background),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
                 "adaptive_resolution": normalize_resolution(adaptive_resolution),
                 "auto_upgrade_1k_adaptive_resolution": auto_upgrade_1k,
@@ -3257,6 +3273,7 @@ class FigurineProPlugin(Star):
                         model_name,
                         get_value(parameters, "quality", "质量", default="auto"),
                         get_value(parameters, "moderation", "审核", default="auto"),
+                        get_value(parameters, "gpt_background", "GPT背景", "背景", default="auto"),
                         get_value(parameters, "adaptive_aspect_ratio", "自适应比例", default=False),
                         get_value(
                             parameters,
@@ -3437,6 +3454,7 @@ class FigurineProPlugin(Star):
                 item.get("model") or item.get("模型") or item.get("model_name") or item.get("模型名"),
                 get_value(item, "quality", "质量", default="auto"),
                 get_value(item, "moderation", "审核", default="auto"),
+                get_value(item, "gpt_background", "GPT背景", "背景", default="auto"),
                 get_value(item, "adaptive_aspect_ratio", "自适应比例", default=False),
                 get_value(
                     item,
@@ -3625,10 +3643,17 @@ class FigurineProPlugin(Star):
         parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_gpt_parameters"):
             return {}
-        return {
+        result = {
             "quality": parameters["quality"],
             "moderation": parameters["moderation"],
         }
+        background = parameters.get("gpt_background") or "auto"
+        if background != "auto":
+            result["background"] = background
+            if background == "transparent":
+                # 透明背景仅支持 png/webp 输出，显式锁定 png，避免网关默认 jpeg
+                result["output_format"] = "png"
+        return result
 
     def _get_max_output_tokens(
             self,

@@ -8,15 +8,17 @@ export interface TrendPoint {
 
 interface TrendChartProps {
   items: TrendPoint[];
+  granularity?: "day" | "hour";
 }
 
 const HEIGHT = 180;
 const PADDING = { top: 16, right: 16, bottom: 30, left: 30 };
 
 /** 每日成功输出与本次消耗双折线（纯 SVG，跟随参考项目的轻量趋势看板） */
-export default function TrendChart({ items }: TrendChartProps) {
+export default function TrendChart({ items, granularity = "day" }: TrendChartProps) {
   const geometry = useMemo(() => {
-    const width = Math.max(360, items.length * 56 + PADDING.left + PADDING.right);
+    const perPoint = granularity === "hour" ? 34 : 56;
+    const width = Math.max(360, items.length * perPoint + PADDING.left + PADDING.right);
     const plotWidth = width - PADDING.left - PADDING.right;
     const plotHeight = HEIGHT - PADDING.top - PADDING.bottom;
     const peak = Math.max(
@@ -42,6 +44,13 @@ export default function TrendChart({ items }: TrendChartProps) {
   const { width, peak, xAt, yAt } = geometry;
   const buildPoints = (key: "outputs" | "charged_amount") =>
     items.map((item, index) => `${xAt(index)},${yAt(item[key])}`).join(" ");
+
+  const labelOf = (bucket: string) =>
+    granularity === "hour"
+      ? `${bucket.slice(5, 10)} ${bucket.slice(11, 13)}时`
+      : bucket.slice(5);
+  const tooltipOf = (bucket: string) =>
+    granularity === "hour" ? `${bucket.slice(0, 10)} ${bucket.slice(11, 13)}:00` : bucket;
 
   return (
     <svg
@@ -80,7 +89,7 @@ export default function TrendChart({ items }: TrendChartProps) {
         return (
           <g key={item.date}>
             <title>
-              {`${item.date}\n成功输出: ${item.outputs}\n本次消耗: ${Number(
+              {`${tooltipOf(item.date)}\n成功输出: ${item.outputs}\n本次消耗: ${Number(
                 (item.charged_amount / 1000).toFixed(3)
               )} 元`}
             </title>
@@ -101,7 +110,7 @@ export default function TrendChart({ items }: TrendChartProps) {
                 fontSize={10}
                 fill="#8c8c8c"
               >
-                {String(item.date || "").slice(5)}
+                {labelOf(item.date)}
               </text>
             )}
           </g>

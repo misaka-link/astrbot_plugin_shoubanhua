@@ -247,6 +247,32 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         saved = json.loads(self.history_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["balances"]["user"]["10003"], 0)
 
+    async def test_overview_supports_hourly_granularity(self):
+        for minute in ("09:15:00", "09:45:00", "10:05:00"):
+            await self.store.settle_generation(
+                timestamp=f"2026-08-16T{minute}",
+                source="chat",
+                user_id="10001",
+                group_id=None,
+                logical_model="m",
+                actual_model="granularity-model",
+                api_route="generic",
+                endpoint_type="images_generations",
+                mode="文生图",
+                outcome="success",
+                output_count=1,
+                deduction_source=None,
+            )
+
+        hourly = await self.store.get_overview(granularity="hour")
+        buckets = {item["date"]: item["outputs"] for item in hourly["trend"]}
+        self.assertEqual(buckets.get("2026-08-16T09"), 2)
+        self.assertEqual(buckets.get("2026-08-16T10"), 1)
+
+        daily = await self.store.get_overview(granularity="day")
+        daily_buckets = {item["date"]: item["outputs"] for item in daily["trend"]}
+        self.assertEqual(daily_buckets.get("2026-08-16"), 3)
+
     async def test_list_events_filters_by_outcome(self):
         for index, (outcome, status) in enumerate(
             (("success", 200), ("failed", 400), ("success", 200), ("failed", 400))

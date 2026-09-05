@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import dayjs from "dayjs";
 import {
+  Avatar,
   Card,
   Col,
   Row,
@@ -18,6 +20,7 @@ import {
   CloseCircleOutlined,
   ExperimentOutlined,
   ReloadOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
 import { apiGet } from "@/shared/api/bridge";
 import { RANGE_PRESETS, toRange } from "@/shared/lib/rangePresets";
@@ -48,6 +51,7 @@ interface EventRow {
   user_id: string;
   group_id: string;
   user_nickname?: string;
+  user_avatar_url?: string;
   group_name?: string;
   logical_model: string;
   actual_model: string;
@@ -110,6 +114,13 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
   const [eventDay, setEventDay] = useState<string>("");
   const [eventOutcome, setEventOutcome] = useState<string>("");
 
+  // 短范围（今天/24小时/48小时，跨度 ≤3 天）自动切换为小时粒度趋势
+  const granularity = useMemo<"day" | "hour">(() => {
+    if (!range.start || !range.end) return "day";
+    const days = dayjs(range.end).diff(dayjs(range.start), "day") + 1;
+    return days <= 3 ? "hour" : "day";
+  }, [range]);
+
   const rangeParams = useCallback(
     (extra: Record<string, unknown> = {}) => ({
       ...(range.start ? { start: range.start } : {}),
@@ -127,7 +138,7 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
         summary: OverviewSummary;
         trend: TrendPoint[];
         models: ModelRow[];
-      }>("usage/overview", rangeParams());
+      }>("usage/overview", { ...rangeParams(), granularity });
       setSummary(data.summary || null);
       setTrend(data.trend || []);
       setModels(data.models || []);
@@ -136,7 +147,7 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
     } finally {
       setLoading(false);
     }
-  }, [rangeParams]);
+  }, [rangeParams, granularity]);
 
   const loadEvents = useCallback(async () => {
     try {
@@ -174,24 +185,36 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
     {
       title: "用户",
       dataIndex: "user_id",
-      width: 150,
-      render: (value: string, row: EventRow) =>
-        value ? (
-          <PrivacyText value={row.user_nickname ? `${row.user_nickname} (${value})` : value} mask="userId" />
-        ) : (
-          "-"
-        ),
+      width: 170,
+      render: (value: string, row: EventRow) => {
+        if (!value) return "-";
+        const label = row.user_nickname ? `${row.user_nickname} (${value})` : value;
+        return (
+          <Space size={6}>
+            <Avatar size={22} src={row.user_avatar_url || undefined}>
+              {value.slice(0, 1)}
+            </Avatar>
+            <PrivacyText value={label} mask="userId" />
+          </Space>
+        );
+      },
     },
     {
       title: "群组",
       dataIndex: "group_id",
-      width: 150,
-      render: (value: string, row: EventRow) =>
-        value ? (
-          <PrivacyText value={row.group_name ? `${row.group_name} (${value})` : value} mask="groupId" />
-        ) : (
-          "-"
-        ),
+      width: 170,
+      render: (value: string, row: EventRow) => {
+        if (!value) return "-";
+        const label = row.group_name ? `${row.group_name} (${value})` : value;
+        return (
+          <Space size={6}>
+            <Avatar size={22} src={`https://p.qlogo.cn/gh/${value}/${value}/100`}>
+              {value.slice(0, 1)}
+            </Avatar>
+            <PrivacyText value={label} mask="groupId" />
+          </Space>
+        );
+      },
     },
     {
       title: "事件",
@@ -313,7 +336,14 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
       {/* 趋势看板 */}
       <Card
         size="small"
-        title="每日趋势"
+        title={
+          <Space size={8}>
+            {granularity === "hour" ? "每小时趋势" : "每日趋势"}
+            <Tag color={granularity === "hour" ? "blue" : "default"}>
+              {granularity === "hour" ? "按小时" : "按天"}
+            </Tag>
+          </Space>
+        }
         extra={
           <Space size={12}>
             <span style={{ fontSize: 11, color: "#8c8c8c" }}>
@@ -329,7 +359,7 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
           </Space>
         }
       >
-        <TrendChart items={trend} />
+        <TrendChart items={trend} granularity={granularity} />
       </Card>
 
       {/* 模型与路由明细 */}

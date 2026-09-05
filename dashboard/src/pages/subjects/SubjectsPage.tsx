@@ -14,7 +14,7 @@ import {
   Typography,
   App as AntApp,
 } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, TeamOutlined } from "@ant-design/icons";
 import { apiGet, apiPost } from "@/shared/api/bridge";
 import { RANGE_PRESETS, toRange } from "@/shared/lib/rangePresets";
 import { fmtYuan } from "@/shared/lib/format";
@@ -135,7 +135,11 @@ export default function SubjectsPage({
               <Avatar size={28} src={row.avatar_url || QQ_AVATAR(id)}>
                 {(name || id).slice(0, 1)}
               </Avatar>
-            ) : null}
+            ) : (
+              <Avatar size={28} src={`https://p.qlogo.cn/gh/${id}/${id}/100`} icon={<TeamOutlined />}>
+                {(name || id).slice(0, 1)}
+              </Avatar>
+            )}
             <Space direction="vertical" size={0}>
               <Text strong>{name || (isUser ? `QQ ${id}` : `群 ${id}`)}</Text>
               <Text type="secondary" className="font-mono" style={{ fontSize: 11 }}>

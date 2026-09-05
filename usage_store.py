@@ -601,7 +601,9 @@ class UsageStore:
                 raise
             return {"before": before, "after": after, "applied_delta": applied_delta}
 
-    async def get_overview(self, start: str | None = None, end: str | None = None) -> dict[str, Any]:
+    async def get_overview(
+        self, start: str | None = None, end: str | None = None, granularity: str = "day"
+    ) -> dict[str, Any]:
         async with self._lock:
             events = self._filtered_events(self._require_data(), start, end)
             summary = {
@@ -615,7 +617,8 @@ class UsageStore:
             for event in events:
                 if event["is_legacy"] or event["event_kind"] != "generation":
                     continue
-                date = event["occurred_at"][:10]
+                # granularity=hour 时按小时分桶（短范围趋势），默认按天
+                date = event["occurred_at"][:13] if granularity == "hour" else event["occurred_at"][:10]
                 trend = trend_by_date.setdefault(date, {"date": date, "outputs": 0, "charged_amount": 0})
                 if event["outcome"] == "success":
                     trend["outputs"] += event["output_count"]

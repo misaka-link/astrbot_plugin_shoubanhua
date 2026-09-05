@@ -845,7 +845,10 @@ class FigurineProPlugin(Star):
         try:
             start = self._dashboard_date_value(self._dashboard_query_value("start"))
             end = self._dashboard_date_value(self._dashboard_query_value("end"), end=True)
-            data = await self.usage_store.get_overview(start, end)
+            granularity = str(self._dashboard_query_value("granularity", "day")).strip().lower()
+            if granularity not in {"day", "hour"}:
+                raise ValueError("granularity 仅支持 day / hour")
+            data = await self.usage_store.get_overview(start, end, granularity=granularity)
             return self._dashboard_json({"ok": True, **data})
         except ValueError as exc:
             return self._dashboard_error(str(exc), 400)

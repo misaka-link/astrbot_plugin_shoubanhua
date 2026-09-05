@@ -305,9 +305,9 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertNotIn("元", plain)
         self.assertEqual(len(priced.splitlines()), 2)
         # bnn 未绑定 → 默认模型 m1，无参数条目 → 默认 1 元
-        self.assertIn("m1（1 元）", priced)
+        self.assertIn("m1（1）", priced)
         # gpt2 → m-paid 走热备 m-hot，按候选最高价 0.08 元展示
-        self.assertIn("gpt2 -> m-paid（0.08 元）", priced)
+        self.assertIn("gpt2 -> m-paid（0.08）", priced)
 
     def test_dashboard_model_parameter_items_display_yuan_not_milli(self):
         plugin = self.make_dashboard_plugin()

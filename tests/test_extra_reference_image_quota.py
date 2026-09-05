@@ -164,11 +164,16 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
         self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 2), 0)
 
     def test_tier_ladder_matches_spec(self):
-        """limit=2, quota=2, 默认每阶梯 0.04 元: 3/4→40, 5/6→80, 7→120."""
+        """limit=2, quota=2, 每阶梯 1 元: 3/4→1000, 5/6→2000, 7→3000."""
         plugin = self.make_plugin([
-            {"model": "m", "reference_image_limit": 2, "extra_reference_image_quota": 2},
+            {
+                "model": "m",
+                "reference_image_limit": 2,
+                "extra_reference_image_quota": 2,
+                "extra_reference_image_charge": 1,
+            },
         ])
-        cases = {3: 40, 4: 40, 5: 80, 6: 80, 7: 120}
+        cases = {3: 1000, 4: 1000, 5: 2000, 6: 2000, 7: 3000}
         for count, expected in cases.items():
             with self.subTest(count=count):
                 self.assertEqual(
@@ -201,6 +206,14 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
         self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 0)
         self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 7), 0)
 
+    def test_ladder_default_is_free(self):
+        """未配置加费金额时默认 0：超出阶梯不额外扣费。"""
+        plugin = self.make_plugin([
+            {"model": "m", "reference_image_limit": 2, "extra_reference_image_quota": 2},
+        ])
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 7), 0)
+        self.assertEqual(plugin._get_required_invocation_cost("m", image_bytes_list=[b"x"] * 7), 1000)
+
     def test_extra_is_independent_of_base_charge_amount(self):
         """阶梯加费按阶梯数计算，不随 charge_amount 放大。"""
         plugin = self.make_plugin([
@@ -209,28 +222,31 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
                 "reference_image_limit": 2,
                 "extra_reference_image_quota": 2,
                 "charge_amount": 5,
+                "extra_reference_image_charge": 1,
             },
         ])
-        # 5 张 → 2 阶梯 → 额外 2×40 厘（不随 charge_amount=5000 放大）
-        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 80)
+        # 5 张 → 2 阶梯 → 额外 2×1000 厘（不随 charge_amount=5000 放大）
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 2000)
 
     def test_global_hard_cap_clamps_sent_count(self):
         """传入超过 max_images_count 时，按硬上限计算 sent。"""
         plugin = self.make_plugin(
-            [{"model": "m", "reference_image_limit": 2, "extra_reference_image_quota": 2}],
+            [{"model": "m", "reference_image_limit": 2, "extra_reference_image_quota": 2,
+              "extra_reference_image_charge": 1}],
             max_images_count=4,
         )
         # sent = min(10, 4) = 4; soft = min(2, 4) = 2; excess = 2; tiers = 1
-        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 10), 40)
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 10), 1000)
 
     def test_legacy_dict_config_with_chinese_labels(self):
         plugin = self.make_plugin({
             "m": {
                 "参考图数量限制": 2,
                 "超限参考图阶梯额度": 2,
+                "超限参考图每阶梯加费": 1,
             },
         })
-        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 80)
+        self.assertEqual(plugin._get_extra_reference_image_charge("m", [b"x"] * 5), 2000)
 
     # ---- _limit_reference_images -----------------------------------------
 
@@ -269,11 +285,12 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
                 "reference_image_limit": 2,
                 "extra_reference_image_quota": 2,
                 "charge_amount": 1,
+                "extra_reference_image_charge": 1,
             },
         ])
-        # 5 张图：base=1000 + extra=2×40 = 1080
+        # 5 张图：base=1000 + extra=2×1000 = 3000
         cost = plugin._get_required_invocation_cost("m", image_bytes_list=[b"x"] * 5)
-        self.assertEqual(cost, 1080)
+        self.assertEqual(cost, 3000)
 
     def test_violation_cost_includes_extra(self):
         plugin = self.make_plugin([
@@ -282,14 +299,15 @@ class ExtraReferenceImageQuotaTests(unittest.TestCase):
                 "reference_image_limit": 2,
                 "extra_reference_image_quota": 2,
                 "charge_amount": 1,
+                "extra_reference_image_charge": 1,
             },
         ])
-        # 违规也收 extra：base=1000 + extra=2×40 = 1080
+        # 违规也收 extra：base=1000 + extra=2×1000 = 3000
         cost = plugin._get_violation_deduction_cost(
             "m",
             image_bytes_list=[b"x"] * 5,
         )
-        self.assertEqual(cost, 1080)
+        self.assertEqual(cost, 3000)
 
     def test_violation_cost_without_images_has_no_extra(self):
         plugin = self.make_plugin([

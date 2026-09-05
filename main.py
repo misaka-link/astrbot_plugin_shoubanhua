@@ -1394,7 +1394,7 @@ class FigurineProPlugin(Star):
         fields = [
             {"name": "reference_image_limit", "label": "参考图数量限制", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
             {"name": "extra_reference_image_quota", "label": "超限参考图阶梯额度", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
-            {"name": "extra_reference_image_charge", "label": "超限参考图每阶梯加费(元)", "group": "基础与额度", "type": "number", "default": 0.04, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "extra_reference_image_charge", "label": "超限参考图每阶梯加费(元)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
             {"name": "charge_amount", "label": "该模型单次生成扣费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001, "float": True},
             {"name": "charge_amount_2k", "label": "2K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
             {"name": "charge_amount_4k", "label": "4K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
@@ -3339,7 +3339,7 @@ class FigurineProPlugin(Star):
                         ),
                         get_value(parameters, "reference_image_limit", "参考图数量限制", default=0),
                         get_value(parameters, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
-                        get_value(parameters, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=LEGACY_COUNT_TO_YUAN),
+                        get_value(parameters, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=0),
                         get_value(
                             parameters,
                             "enable_grok_parameters",
@@ -3519,7 +3519,7 @@ class FigurineProPlugin(Star):
                 ),
                 get_value(item, "reference_image_limit", "参考图数量限制", default=0),
                 get_value(item, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
-                get_value(item, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=LEGACY_COUNT_TO_YUAN),
+                get_value(item, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=0),
                 get_value(
                     item,
                     "enable_grok_parameters",
@@ -3671,7 +3671,7 @@ class FigurineProPlugin(Star):
     ) -> int:
         """超限参考图阶梯额外加费（厘，不含基础扣费）。
 
-        每阶梯额外加收 extra_reference_image_charge（默认 0.04 元，对应旧版每阶梯 1 次），与模型
+        每阶梯额外加收 extra_reference_image_charge（默认 0，即超出阶梯不额外加费），与模型
         charge_amount、分辨率升级均无关。仅当 reference_image_limit>0 且
         extra_reference_image_quota>0 时启用；二者任一为 0 则本功能完全不触发（返回 0）。
         """
@@ -3693,7 +3693,7 @@ class FigurineProPlugin(Star):
         steps = (excess + quota - 1) // quota  # 阶梯数（向上取整）
         raw_charge = parameters.get("extra_reference_image_charge")
         # 字段缺失（未归一化的旧参数）回退默认 1 元/阶梯；显式 0 表示阶梯免费
-        charge_per_step = yuan_to_amount(LEGACY_COUNT_TO_YUAN) if raw_charge is None else _normalize_nonnegative_int(raw_charge)
+        charge_per_step = _normalize_nonnegative_int(parameters.get("extra_reference_image_charge"))
         return steps * charge_per_step
 
     def _get_max_reference_image_side(self, image_bytes_list: Optional[List[bytes]]) -> int:

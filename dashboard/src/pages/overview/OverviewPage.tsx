@@ -20,6 +20,7 @@ import {
   ReloadOutlined,
 } from "@ant-design/icons";
 import { apiGet } from "@/shared/api/bridge";
+import { RANGE_PRESETS, toRange } from "@/shared/lib/rangePresets";
 import { fmtYuan, formatDateTime } from "@/shared/lib/format";
 import { PrivacyText } from "@/shared/ui/PrivacyText";
 import TrendChart, { type TrendPoint } from "./TrendChart";
@@ -321,12 +322,8 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
             </span>
             <DatePicker.RangePicker
               size="small"
-              onChange={(dates) => {
-                setRange({
-                  start: dates?.[0]?.format("YYYY-MM-DD") || "",
-                  end: dates?.[1]?.format("YYYY-MM-DD") || "",
-                });
-              }}
+              presets={RANGE_PRESETS}
+              onChange={(dates) => setRange(toRange(dates))}
               allowEmpty={[true, true]}
             />
           </Space>

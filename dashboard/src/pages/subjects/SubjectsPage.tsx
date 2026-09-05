@@ -16,6 +16,7 @@ import {
 } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import { apiGet, apiPost } from "@/shared/api/bridge";
+import { RANGE_PRESETS, toRange } from "@/shared/lib/rangePresets";
 import { fmtYuan } from "@/shared/lib/format";
 import { PrivacyText } from "@/shared/ui/PrivacyText";
 
@@ -224,12 +225,10 @@ export default function SubjectsPage({
             />
             <DatePicker.RangePicker
               size="small"
+              presets={RANGE_PRESETS}
               onChange={(dates) => {
                 setPage(1);
-                setRange({
-                  start: dates?.[0]?.format("YYYY-MM-DD") || "",
-                  end: dates?.[1]?.format("YYYY-MM-DD") || "",
-                });
+                setRange(toRange(dates));
               }}
               allowEmpty={[true, true]}
             />

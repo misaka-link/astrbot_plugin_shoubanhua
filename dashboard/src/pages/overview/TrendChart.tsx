@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
+import * as echarts from "echarts/core";
+import { LineChart } from "echarts/charts";
+import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
+import { SVGRenderer } from "echarts/renderers";
+import EChartsReactCore from "echarts-for-react/lib/core";
+import { useTheme } from "@/shared/lib/theme";
 
 export interface TrendPoint {
   date: string;
@@ -11,130 +17,203 @@ interface TrendChartProps {
   granularity?: "day" | "hour";
 }
 
-const HEIGHT = 180;
-const PADDING = { top: 16, right: 16, bottom: 30, left: 34 };
-const MIN_WIDTH = 320;
+echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, SVGRenderer]);
 
 /**
- * 每日/每小时双折线趋势（纯 SVG）。
- * 宽度取自容器实测像素，绘制尺寸与 viewBox 一致，杜绝比例拉伸错位；
- * 容器过窄时横向滚动而不是压缩图形。
+ * 每日/每小时成功输出与本次消耗双轴趋势（ECharts，样式对齐参考项目的可观测趋势看板）。
+ * 左轴：成功输出（张）；右轴：本次消耗（元）。短范围自动切小时粒度。
  */
 export default function TrendChart({ items, granularity = "day" }: TrendChartProps) {
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState(0);
+  const { isDark } = useTheme();
 
-  useEffect(() => {
-    const element = wrapRef.current;
-    if (!element) return;
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setContainerWidth(entry.contentRect.width);
-      }
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+  const axisLabelColor = isDark ? "#8b949e" : "#64748b";
+  const axisLineColor = isDark ? "#30363d" : "#e2e8f0";
+  const splitLineColor = isDark ? "#21262d" : "#f1f5f9";
+  const tooltipBg = isDark ? "rgba(22, 27, 34, 0.96)" : "rgba(255, 255, 255, 0.98)";
+  const tooltipBorder = isDark ? "#30363d" : "#e2e8f0";
+  const tooltipText = isDark ? "#c9d1d9" : "#1e293b";
+  const titleColor = isDark ? "#ffffff" : "#0f172a";
 
-  const width = Math.max(MIN_WIDTH, Math.floor(containerWidth));
-  const plotWidth = width - PADDING.left - PADDING.right;
-  const plotHeight = HEIGHT - PADDING.top - PADDING.bottom;
-  const count = items.length;
+  const labels = useMemo(
+    () =>
+      items.map((item) =>
+        granularity === "hour"
+          ? `${item.date.slice(5, 10)} ${item.date.slice(11, 13)}时`
+          : item.date.slice(5)
+      ),
+    [items, granularity]
+  );
 
-  const geometry = useMemo(() => {
-    const peak = Math.max(1, ...items.map((item) => Math.max(item.outputs, item.charged_amount)));
-    const xAt = (index: number) =>
-      count <= 1
-        ? PADDING.left + plotWidth / 2
-        : PADDING.left + (plotWidth * index) / (count - 1);
-    const yAt = (amount: number) => PADDING.top + plotHeight - (amount / peak) * plotHeight;
-    return { peak, xAt, yAt };
-  }, [items, count, plotWidth, plotHeight]);
+  const option = useMemo(() => {
+    const outputs = items.map((item) => item.outputs);
+    const yuan = items.map((item) => Number((item.charged_amount / 1000).toFixed(3)));
+    const fullTitle = (index: number) => {
+      const bucket = items[index]?.date || "";
+      return granularity === "hour"
+        ? `${bucket.slice(0, 10)} ${bucket.slice(11, 13)}:00`
+        : bucket;
+    };
+    const symbolCount = items.length;
 
-  const labelOf = (bucket: string) =>
-    granularity === "hour"
-      ? `${bucket.slice(5, 10)} ${bucket.slice(11, 13)}时`
-      : bucket.slice(5);
-  const tooltipOf = (bucket: string) =>
-    granularity === "hour" ? `${bucket.slice(0, 10)} ${bucket.slice(11, 13)}:00` : bucket;
+    return {
+      backgroundColor: "transparent",
+      tooltip: {
+        trigger: "axis" as const,
+        backgroundColor: tooltipBg,
+        borderColor: tooltipBorder,
+        borderWidth: 1,
+        padding: [8, 12],
+        textStyle: { color: tooltipText, fontSize: 12 },
+        formatter: (params: Array<{ dataIndex: number }>) => {
+          if (!params || params.length === 0) return "";
+          const index = params[0].dataIndex;
+          const item = items[index];
+          if (!item) return "";
+          const yuanText = Number((item.charged_amount / 1000).toFixed(3));
+          return `
+            <div style="font-weight:600;font-family:monospace;font-size:12px;margin-bottom:6px;color:${titleColor};">
+              ${fullTitle(index)}
+            </div>
+            <div style="font-size:12px;color:#2563eb;margin-bottom:3px;">
+              成功输出: <b>${item.outputs}</b> 张
+            </div>
+            <div style="font-size:12px;color:#fa8c16;">
+              本次消耗: <b>${yuanText}</b> 元
+            </div>
+          `;
+        },
+      },
+      legend: {
+        top: 0,
+        right: 0,
+        itemWidth: 14,
+        itemHeight: 8,
+        textStyle: { color: axisLabelColor, fontSize: 11 },
+      },
+      grid: { top: 32, right: 56, bottom: 24, left: 44 },
+      xAxis: {
+        type: "category" as const,
+        boundaryGap: false,
+        data: labels,
+        axisLine: { lineStyle: { color: axisLineColor } },
+        axisTick: { show: false },
+        axisLabel: {
+          color: axisLabelColor,
+          fontSize: 11,
+          fontFamily: "'JetBrains Mono', Consolas, -apple-system, sans-serif",
+        },
+      },
+      yAxis: [
+        {
+          type: "value" as const,
+          minInterval: 1,
+          splitLine: { lineStyle: { color: splitLineColor, type: "dashed" as const } },
+          axisLabel: {
+            color: axisLabelColor,
+            fontSize: 11,
+            fontFamily: "'JetBrains Mono', Consolas, -apple-system, sans-serif",
+          },
+        },
+        {
+          type: "value" as const,
+          splitLine: { show: false },
+          axisLabel: {
+            color: axisLabelColor,
+            fontSize: 11,
+            fontFamily: "'JetBrains Mono', Consolas, -apple-system, sans-serif",
+            formatter: (value: number) => Number(value.toFixed(3)),
+          },
+        },
+      ],
+      series: [
+        {
+          name: "成功输出(张)",
+          type: "line" as const,
+          smooth: true,
+          showSymbol: symbolCount <= 40,
+          symbolSize: 6,
+          data: outputs,
+          lineStyle: { width: 2, color: "#1677ff" },
+          itemStyle: { color: "#1677ff" },
+          areaStyle: {
+            color: {
+              type: "linear" as const,
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(22, 119, 255, 0.35)" },
+                { offset: 0.8, color: "rgba(22, 119, 255, 0.06)" },
+                { offset: 1, color: "rgba(22, 119, 255, 0)" },
+              ],
+            },
+          },
+        },
+        {
+          name: "本次消耗(元)",
+          type: "line" as const,
+          smooth: true,
+          showSymbol: false,
+          symbolSize: 6,
+          yAxisIndex: 1,
+          data: yuan,
+          lineStyle: { width: 2, color: "#fa8c16" },
+          itemStyle: { color: "#fa8c16" },
+          areaStyle: {
+            color: {
+              type: "linear" as const,
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: "rgba(250, 140, 22, 0.25)" },
+                { offset: 0.8, color: "rgba(250, 140, 22, 0.05)" },
+                { offset: 1, color: "rgba(250, 140, 22, 0)" },
+              ],
+            },
+          },
+        },
+      ],
+    };
+  }, [
+    items,
+    granularity,
+    labels,
+    tooltipBg,
+    tooltipBorder,
+    tooltipText,
+    titleColor,
+    axisLabelColor,
+    axisLineColor,
+    splitLineColor,
+  ]);
 
   if (!items.length) {
     return (
-      <div ref={wrapRef} style={{ width: "100%", padding: "24px 0", textAlign: "center", color: "#8c8c8c" }}>
+      <div
+        style={{
+          height: 220,
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "#8c8c8c",
+        }}
+      >
         所选时间范围内暂无趋势统计数据
       </div>
     );
   }
 
-  const { peak, xAt, yAt } = geometry;
-  const buildPoints = (key: "outputs" | "charged_amount") =>
-    items.map((item, index) => `${xAt(index)},${yAt(item[key])}`).join(" ");
-  const labelEvery = Math.max(1, Math.ceil(count / 8));
-
   return (
-    <div ref={wrapRef} style={{ width: "100%", overflowX: "auto" }}>
-      <svg
-        width={width}
-        height={HEIGHT}
-        viewBox={`0 0 ${width} ${HEIGHT}`}
-        role="img"
-        aria-label="成功输出与本次消耗趋势"
-        style={{ display: "block" }}
-      >
-        {Array.from({ length: 5 }, (_, step) => {
-          const y = PADDING.top + (plotHeight * step) / 4;
-          return (
-            <line
-              key={step}
-              x1={PADDING.left}
-              x2={width - PADDING.right}
-              y1={y}
-              y2={y}
-              stroke="rgba(148, 163, 184, 0.25)"
-              strokeDasharray="3 3"
-            />
-          );
-        })}
-
-        <polyline points={buildPoints("outputs")} fill="none" stroke="#1677ff" strokeWidth="1.8" />
-        <polyline
-          points={buildPoints("charged_amount")}
-          fill="none"
-          stroke="#fa8c16"
-          strokeWidth="1.8"
-        />
-
-        {items.map((item, index) => {
-          const x = xAt(index);
-          return (
-            <g key={item.date}>
-              <title>
-                {`${tooltipOf(item.date)}\n成功输出: ${item.outputs}\n本次消耗: ${Number(
-                  (item.charged_amount / 1000).toFixed(3)
-                )} 元`}
-              </title>
-              <circle cx={x} cy={yAt(item.outputs)} r={3.5} fill="#1677ff" />
-              <rect
-                x={x - 3}
-                y={yAt(item.charged_amount) - 3}
-                width={6}
-                height={6}
-                rx={1}
-                fill="#fa8c16"
-              />
-              {(index % labelEvery === 0 || index === count - 1) && (
-                <text x={x} y={HEIGHT - 9} textAnchor="middle" fontSize={10} fill="#8c8c8c">
-                  {labelOf(item.date)}
-                </text>
-              )}
-            </g>
-          );
-        })}
-
-        <text x={PADDING.left} y={12} fontSize={10} fill="#8c8c8c">
-          峰值 {peak}
-        </text>
-      </svg>
-    </div>
+    <EChartsReactCore
+      echarts={echarts}
+      option={option}
+      notMerge
+      style={{ height: 240, width: "100%" }}
+      opts={{ renderer: "svg" }}
+    />
   );
 }

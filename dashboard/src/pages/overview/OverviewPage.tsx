@@ -346,10 +346,6 @@ export default function OverviewPage({ refreshSignal }: { refreshSignal: number 
         }
         extra={
           <Space size={12}>
-            <span style={{ fontSize: 11, color: "#8c8c8c" }}>
-              <span style={{ color: "#1677ff" }}>■</span> 成功输出
-              <span style={{ color: "#fa8c16", marginLeft: 8 }}>■</span> 本次消耗(厘)
-            </span>
             <DatePicker.RangePicker
               size="small"
               presets={RANGE_PRESETS}

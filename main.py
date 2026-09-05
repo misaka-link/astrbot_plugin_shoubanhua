@@ -5615,12 +5615,25 @@ class FigurineProPlugin(Star):
             should_deduct: bool,
             charged_amount: int,
     ) -> str:
-        """本次生成实际花费的展示文本：免费 / 0 元 / 实际扣费金额。"""
+        """默认 caption 用：本次实际花费（带单位）。"""
         if deduction_source == "free":
             return "免费"
         if should_deduct and charged_amount > 0:
             return f"{format_amount(charged_amount)} 元"
         return "0 元"
+
+    def _get_generation_cost_value(
+            self,
+            deduction_source: Optional[str],
+            should_deduct: bool,
+            charged_amount: int,
+    ) -> str:
+        """{cost} 变量用：本次实际花费（仅数字，不带单位；免费时为 免费）。"""
+        if deduction_source == "free":
+            return "免费"
+        if should_deduct and charged_amount > 0:
+            return format_amount(charged_amount)
+        return "0"
 
     def _resolve_generation_access(
         self,
@@ -7051,9 +7064,10 @@ class FigurineProPlugin(Star):
                 )
                 group_balance_text = self._get_group_balance_text(deduction_source, group_id)
                 cost_text = self._get_generation_cost_text(deduction_source, should_deduct, deduction_amount)
+                cost_value = self._get_generation_cost_value(deduction_source, should_deduct, deduction_amount)
 
                 # 替换占位符
-                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_text).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency))
+                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_value).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency))
             else:
                 # 使用默认消息格式
                 status_text = "生成成功"
@@ -7367,9 +7381,10 @@ class FigurineProPlugin(Star):
                 )
                 group_balance_text = self._get_group_balance_text(deduction_source, group_id)
                 cost_text = self._get_generation_cost_text(deduction_source, should_deduct, deduction_amount)
+                cost_value = self._get_generation_cost_value(deduction_source, should_deduct, deduction_amount)
 
                 # 替换占位符（文生图没有携带图片，image_count为0）
-                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_prompt).replace("{image_count}", "0").replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_text).replace("{prompt}", prompt[:50])
+                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_prompt).replace("{image_count}", "0").replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_value).replace("{prompt}", prompt[:50])
             else:
                 # 使用默认消息格式
                 status_text = "生成成功"

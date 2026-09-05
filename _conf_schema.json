@@ -1109,7 +1109,7 @@
     "custom_success_message": {
         "description": "【自定义提示】生成成功提示模板",
         "type": "text",
-        "hint": "生成成功后随图片发送的文字模板。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前图片耗时秒数，{remaining}=扣费后的剩余余额文本，{prompt}=提示词前50字。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=当前返回第几张，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
+        "hint": "生成成功后随图片发送的文字模板。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前图片耗时秒数，{remaining}=扣费后的剩余余额文本，{cost}=本次生成实际消耗的金额（管理员/白名单免费时显示“免费”），{prompt}=提示词前50字。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=当前返回第几张，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
         "default": ""
     },
     "custom_img2img_start_message": {

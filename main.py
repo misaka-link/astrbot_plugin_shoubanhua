@@ -12,7 +12,7 @@ import random
 import re
 import unicodedata
 from dataclasses import field as dataclass_field
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, Any, List, Optional, Tuple
@@ -28,7 +28,12 @@ from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Reply, Plain, Node, Nodes
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
-from .usage_store import UsageStore
+from .usage_store import (
+    LEGACY_COUNT_TO_YUAN,
+    UsageStore,
+    format_amount,
+    yuan_to_amount,
+)
 
 PLUGIN_LOGGER_NAME = "astrbot.plugin.astrbot_plugin_shoubanhua"
 PLUGIN_LOG_HANDLER_MARKER = "astrbot_plugin_shoubanhua_file_handler"
@@ -79,12 +84,14 @@ def _plugin_logger(data_dir: Path):
                 return plugin_logger
             plugin_logger.removeHandler(handler)
             handler.close()
-        handler = RotatingFileHandler(
+        handler = TimedRotatingFileHandler(
             resolved_path,
-            maxBytes=5 * 1024 * 1024,
-            backupCount=5,
+            when="midnight",
+            backupCount=30,
             encoding="utf-8",
+            delay=True,
         )
+        handler.suffix = "%Y-%m-%d"
         setattr(handler, PLUGIN_LOG_HANDLER_MARKER, True)
         handler.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -238,6 +245,12 @@ def _normalize_nonnegative_int(value: Any, default: int = 0) -> int:
     return max(0, number)
 
 
+def _normalize_charge_amount(value: Any, default_yuan: float) -> int:
+    """金额配置（元）→ 厘；无效或为 0 时回退默认值。"""
+    amount = yuan_to_amount(value)
+    return amount if amount > 0 else yuan_to_amount(default_yuan)
+
+
 def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None) -> aiohttp.ClientTimeout:
     connect_seconds = max(1, connect_seconds)
     if read_seconds is None:
@@ -254,8 +267,8 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
 @register(
     "astrbot_plugin_shoubanhua",
     "shskjw",
-    "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件",
-    "1.8.0",
+    "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
+    "2.0.0",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -263,7 +276,7 @@ class FigurineProPlugin(Star):
         "切换模型", "SwitchModel", "模型列表", "文生图",
         "手办化预设增加", "手办化预设查看",
         "预设图片清理", "预设图片统计", "手办化今日统计", "手办化签到",
-        "手办化增加用户次数", "手办化增加群组次数", "手办化查询次数",
+        "手办化增加用户余额", "手办化增加群组余额", "手办化查询余额",
     })
 
     GENERIC_ENDPOINT_PATHS = {
@@ -665,8 +678,11 @@ class FigurineProPlugin(Star):
         self.plugin_data_dir = StarTools.get_data_dir()
         self.log = _plugin_logger(self.plugin_data_dir)
 
-        self.user_counts_file = self.plugin_data_dir / "user_counts.json"
-        self.group_counts_file = self.plugin_data_dir / "group_counts.json"
+        # 余额以「厘」为单位（1 厘 = 0.001 元）；旧版按次的 user_counts.json/group_counts.json 首次启动时自动迁移
+        self.user_balances_file = self.plugin_data_dir / "user_balances.json"
+        self.group_balances_file = self.plugin_data_dir / "group_balances.json"
+        self.legacy_user_counts_file = self.plugin_data_dir / "user_counts.json"
+        self.legacy_group_counts_file = self.plugin_data_dir / "group_counts.json"
         self.user_checkin_file = self.plugin_data_dir / "user_checkin.json"
         self.daily_stats_file = self.plugin_data_dir / "daily_stats.json"
         self.usage_store_file = self.plugin_data_dir / "usage_history.json"
@@ -674,8 +690,8 @@ class FigurineProPlugin(Star):
         self.preset_images_file = self.plugin_data_dir / "preset_images.json"
         self.preset_images_dir = self.plugin_data_dir / "preset_images"
 
-        self.user_counts: Dict[str, int] = {}
-        self.group_counts: Dict[str, int] = {}
+        self.user_balances: Dict[str, int] = {}
+        self.group_balances: Dict[str, int] = {}
         self.user_checkin_data: Dict[str, str] = {}
         self.daily_stats: Dict[str, Any] = {}
         self.usage_store: Optional[UsageStore] = None
@@ -719,8 +735,8 @@ class FigurineProPlugin(Star):
             max_download_bytes=self.max_download_bytes,
         )
 
-        await self._load_user_counts()
-        await self._load_group_counts()
+        await self._load_user_balances()
+        await self._load_group_balances()
         await self._load_user_checkin_data()
         await self._load_daily_stats()
         await self._initialize_usage_store()
@@ -749,23 +765,18 @@ class FigurineProPlugin(Star):
     async def _initialize_usage_store(self):
         try:
             store = UsageStore(self.usage_store_file, self.legacy_usage_store_file)
-            await store.initialize(self.user_counts, self.group_counts, self.daily_stats)
-            balances = await store.merge_balance_sources(self.user_counts, self.group_counts)
-            merged_users = balances["user"]
-            merged_groups = balances["group"]
-            user_changed = merged_users != self.user_counts
-            group_changed = merged_groups != self.group_counts
-            self.user_counts = merged_users
-            self.group_counts = merged_groups
-            if user_changed:
-                await self._save_user_counts()
-            if group_changed:
-                await self._save_group_counts()
+            await store.initialize(self.user_balances, self.group_balances, self.daily_stats)
+            balances = await store.merge_balance_sources(self.user_balances, self.group_balances)
+            self.user_balances = balances["user"]
+            self.group_balances = balances["group"]
+            # 启动即落盘余额：旧 user_counts.json 按汇率迁移后立即物化为 user_balances.json
+            await self._save_user_balances()
+            await self._save_group_balances()
             self.usage_store = store
             self.log.info("JSON 用量账本已就绪: %s", self.usage_store_file)
         except Exception as exc:
             self.usage_store = None
-            self.log.error(f"用量账本初始化失败，将继续使用 JSON 次数数据: {exc}")
+            self.log.error(f"用量账本初始化失败，将继续使用 JSON 余额数据: {exc}")
 
     def _dashboard_error(self, message: str, status: int = 403):
         if error_response:
@@ -811,7 +822,7 @@ class FigurineProPlugin(Star):
             ("usage/users", self._web_usage_users, ["GET"], "查询手办化用户用量"),
             ("usage/groups", self._web_usage_groups, ["GET"], "查询手办化群组用量"),
             ("usage/events", self._web_usage_events, ["GET"], "查询手办化用量账本"),
-            ("usage/adjust", self._web_usage_adjust, ["POST"], "调整手办化次数"),
+            ("usage/adjust", self._web_usage_adjust, ["POST"], "调整手办化余额"),
             ("configuration", self._web_dashboard_configuration_get, ["GET"], "查询手办化仪表盘配置"),
             ("configuration", self._web_dashboard_configuration_save, ["POST"], "保存手办化仪表盘配置"),
             ("configuration/sensitive", self._web_dashboard_sensitive_get, ["GET"], "查询手办化敏感配置状态"),
@@ -887,8 +898,9 @@ class FigurineProPlugin(Star):
                 user_id=self._norm_id(self._dashboard_query_value("user_id", "")),
                 group_id=self._norm_id(self._dashboard_query_value("group_id", "")),
                 model=str(self._dashboard_query_value("model", "")).strip(),
+                outcome=str(self._dashboard_query_value("outcome", "")).strip().lower(),
                 page=self._dashboard_page_value(self._dashboard_query_value("page", 1)),
-                page_size=self._dashboard_page_value(self._dashboard_query_value("page_size", 30), 30),
+                page_size=self._dashboard_page_value(self._dashboard_query_value("page_size", 15), 15),
             )
             return self._dashboard_json({"ok": True, **data})
         except ValueError as exc:
@@ -902,12 +914,13 @@ class FigurineProPlugin(Star):
             body = await request.json(default={})
             subject_type = str(body.get("subject_type") or "").strip()
             subject_id = self._norm_id(body.get("subject_id"))
-            amount = int(body.get("amount"))
+            amount_yuan = float(body.get("amount"))
+            amount = yuan_to_amount(amount_yuan)
             note = str(body.get("note") or "").strip()[:500]
             if subject_type not in {"user", "group"} or not subject_id:
                 raise ValueError("目标类型或 ID 无效")
-            if not -100000 <= amount <= 100000 or amount == 0:
-                raise ValueError("调整次数必须在 -100000 到 100000 之间且不能为 0")
+            if not -100000 <= amount_yuan <= 100000 or amount == 0:
+                raise ValueError("调整金额必须在 -100000 到 100000 元之间且不能为 0（精确到 0.001）")
             actor = self._norm_id(getattr(request, "username", ""))
             balance = await self._adjust_usage_balance(
                 event=None,
@@ -916,14 +929,14 @@ class FigurineProPlugin(Star):
                 amount=amount,
                 source="web_admin",
                 actor=actor,
-                note=note or "网页管理员调整次数",
+                note=note or "网页管理员调整余额",
             )
             return self._dashboard_json({"ok": True, "balance": balance})
         except (TypeError, ValueError) as exc:
             return self._dashboard_error(str(exc), 400)
         except Exception as exc:
-            logger.error(f"网页调整次数失败: {exc}")
-            return self._dashboard_error("调整次数失败", 500)
+            logger.error(f"网页调整余额失败: {exc}")
+            return self._dashboard_error("调整余额失败", 500)
 
     @staticmethod
     def _dashboard_string_list(value: Any, field_name: str) -> List[str]:
@@ -1365,10 +1378,11 @@ class FigurineProPlugin(Star):
         fields = [
             {"name": "reference_image_limit", "label": "参考图数量限制", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
             {"name": "extra_reference_image_quota", "label": "超限参考图阶梯额度", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 14},
-            {"name": "deduction_count", "label": "该模型扣除次数", "group": "基础与额度", "type": "number", "default": 1, "min": 1, "max": 100},
-            {"name": "deduction_count_2k", "label": "2K扣除次数", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100},
-            {"name": "deduction_count_4k", "label": "4K扣除次数", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100},
-            {"name": "deduct_on_violation", "label": "违规是否扣次数", "group": "基础与额度", "type": "boolean", "default": False},
+            {"name": "extra_reference_image_charge", "label": "超限参考图每阶梯加费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001},
+            {"name": "charge_amount", "label": "该模型单次生成扣费(元)", "group": "基础与额度", "type": "number", "default": 1, "min": 0.001, "max": 100000, "step": 0.001},
+            {"name": "charge_amount_2k", "label": "2K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001},
+            {"name": "charge_amount_4k", "label": "4K单次扣费(元，0=继承全局)", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001},
+            {"name": "deduct_on_violation", "label": "违规是否扣费", "group": "基础与额度", "type": "boolean", "default": False},
             {"name": "max_output_tokens", "label": "最大输出/思考 Token", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 1000000},
             {"name": "default_resolution", "label": "默认分辨率", "group": "基础与额度", "type": "text", "default": "auto", "max_length": 64},
             {"name": "send_default_size", "label": "默认传递 size", "group": "基础与额度", "type": "boolean", "default": False},
@@ -2294,7 +2308,7 @@ class FigurineProPlugin(Star):
                 outcome="failed",
                 http_status=failed_status,
                 output_count=0,
-                charged_units=0,
+                charged_amount=0,
                 deduction_source=None,
                 note="LLM 工具热备切换前的中间失败",
                 request_context=failed_context,
@@ -2344,7 +2358,7 @@ class FigurineProPlugin(Star):
                     outcome="failed",
                     http_status=0,
                     output_count=0,
-                    charged_units=0,
+                    charged_amount=0,
                     deduction_source=None,
                     note="LLM 工具系统错误",
                     request_context=initial_request_context,
@@ -2379,7 +2393,7 @@ class FigurineProPlugin(Star):
                     outcome="failed",
                     http_status=http_status,
                     output_count=0,
-                    charged_units=0,
+                    charged_amount=0,
                     deduction_source=None,
                     request_context=request_context,
                 )
@@ -2398,7 +2412,7 @@ class FigurineProPlugin(Star):
                 outcome="success",
                 http_status=http_status,
                 output_count=1,
-                charged_units=0,
+                charged_amount=0,
                 deduction_source=None,
                 request_context=request_context,
             )
@@ -3086,6 +3100,24 @@ class FigurineProPlugin(Star):
                     return item[key]
             return default
 
+        def get_charge_value(
+                item: Dict[str, Any],
+                *keys: str,
+                legacy_keys: Tuple[str, ...] = (),
+                default: Any = 0.0,
+        ) -> Any:
+            """读取金额（元）配置；仅命中 legacy_keys（旧「次数」键）时按迁移汇率换算成元。"""
+            for key in keys:
+                if key in item and item[key] is not None:
+                    return item[key]
+            for key in legacy_keys:
+                if key in item and item[key] is not None:
+                    try:
+                        return float(item[key]) * LEGACY_COUNT_TO_YUAN
+                    except (TypeError, ValueError):
+                        return default
+            return default
+
         def add_item(
                 model: Any,
                 quality: Any = "auto",
@@ -3096,9 +3128,9 @@ class FigurineProPlugin(Star):
                 default_resolution: Any = "auto",
                 send_default_size: Any = False,
                 max_output_tokens: Any = 0,
-                deduction_count: Any = 1,
-                deduction_count_2k: Any = 0,
-                deduction_count_4k: Any = 0,
+                charge_amount: Any = 1,
+                charge_amount_2k: Any = 0,
+                charge_amount_4k: Any = 0,
                 deduct_on_violation: Any = False,
                 force_resolution_limit: Any = False,
                 enable_gpt_parameters: Any = False,
@@ -3109,6 +3141,7 @@ class FigurineProPlugin(Star):
                 gemini_aspect_ratio: Any = "auto",
                 reference_image_limit: Any = 0,
                 extra_reference_image_quota: Any = 0,
+                extra_reference_image_charge: Any = 1.0,
                 enable_grok_parameters: Any = False,
                 grok_resolution: Any = "2k",
                 grok_adaptive_aspect_ratio: Any = False,
@@ -3142,9 +3175,9 @@ class FigurineProPlugin(Star):
                 "default_resolution": normalize_default_resolution(default_resolution),
                 "send_default_size": normalize_bool(send_default_size),
                 "max_output_tokens": _normalize_nonnegative_int(max_output_tokens),
-                "deduction_count": _normalize_positive_int(deduction_count, 1),
-                "deduction_count_2k": _normalize_nonnegative_int(deduction_count_2k),
-                "deduction_count_4k": _normalize_nonnegative_int(deduction_count_4k),
+                "charge_amount": _normalize_charge_amount(charge_amount, 1.0),
+                "charge_amount_2k": max(0, yuan_to_amount(charge_amount_2k)),
+                "charge_amount_4k": max(0, yuan_to_amount(charge_amount_4k)),
                 "deduct_on_violation": normalize_bool(deduct_on_violation),
                 "force_resolution_limit": (
                     normalize_bool(force_resolution_limit) and not auto_upgrade_1k
@@ -3157,6 +3190,7 @@ class FigurineProPlugin(Star):
                 "gemini_aspect_ratio": normalize_gemini_aspect_ratio(gemini_aspect_ratio),
                 "reference_image_limit": _normalize_nonnegative_int(reference_image_limit),
                 "extra_reference_image_quota": _normalize_nonnegative_int(extra_reference_image_quota),
+                "extra_reference_image_charge": _normalize_charge_amount(extra_reference_image_charge, 1.0),
                 "enable_grok_parameters": enabled_field == "enable_grok_parameters",
                 "grok_resolution": normalize_grok_resolution(grok_resolution),
                 "grok_adaptive_aspect_ratio": normalize_bool(grok_adaptive_aspect_ratio),
@@ -3206,12 +3240,28 @@ class FigurineProPlugin(Star):
                             "思考Token限制",
                             default=0,
                         ),
-                        get_value(parameters, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
-                        get_value(parameters, "deduction_count_2k", "2K扣除次数", "2K扣除", default=0),
-                        get_value(parameters, "deduction_count_4k", "4K扣除次数", "4K扣除", default=0),
+                        get_charge_value(
+                            parameters,
+                            "charge_amount", "该模型单次扣费", "单次扣费", "扣费金额",
+                            legacy_keys=("deduction_count", "该模型扣除次数", "扣除次数"),
+                            default=1.0,
+                        ),
+                        get_charge_value(
+                            parameters,
+                            "charge_amount_2k", "2K单次扣费", "2K扣费",
+                            legacy_keys=("deduction_count_2k", "2K扣除次数", "2K扣除"),
+                            default=0.0,
+                        ),
+                        get_charge_value(
+                            parameters,
+                            "charge_amount_4k", "4K单次扣费", "4K扣费",
+                            legacy_keys=("deduction_count_4k", "4K扣除次数", "4K扣除"),
+                            default=0.0,
+                        ),
                         get_value(
                             parameters,
                             "deduct_on_violation",
+                            "违规是否扣费",
                             "违规是否扣次数",
                             "违规扣次",
                             default=False,
@@ -3262,6 +3312,7 @@ class FigurineProPlugin(Star):
                         ),
                         get_value(parameters, "reference_image_limit", "参考图数量限制", default=0),
                         get_value(parameters, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
+                        get_value(parameters, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=1.0),
                         get_value(
                             parameters,
                             "enable_grok_parameters",
@@ -3369,12 +3420,28 @@ class FigurineProPlugin(Star):
                     "思考Token限制",
                     default=0,
                 ),
-                get_value(item, "deduction_count", "该模型扣除次数", "扣除次数", default=1),
-                get_value(item, "deduction_count_2k", "2K扣除次数", "2K扣除", default=0),
-                get_value(item, "deduction_count_4k", "4K扣除次数", "4K扣除", default=0),
+                get_charge_value(
+                    item,
+                    "charge_amount", "该模型单次扣费", "单次扣费", "扣费金额",
+                    legacy_keys=("deduction_count", "该模型扣除次数", "扣除次数"),
+                    default=1.0,
+                ),
+                get_charge_value(
+                    item,
+                    "charge_amount_2k", "2K单次扣费", "2K扣费",
+                    legacy_keys=("deduction_count_2k", "2K扣除次数", "2K扣除"),
+                    default=0.0,
+                ),
+                get_charge_value(
+                    item,
+                    "charge_amount_4k", "4K单次扣费", "4K扣费",
+                    legacy_keys=("deduction_count_4k", "4K扣除次数", "4K扣除"),
+                    default=0.0,
+                ),
                 get_value(
                     item,
                     "deduct_on_violation",
+                    "违规是否扣费",
                     "违规是否扣次数",
                     "违规扣次",
                     default=False,
@@ -3425,6 +3492,7 @@ class FigurineProPlugin(Star):
                 ),
                 get_value(item, "reference_image_limit", "参考图数量限制", default=0),
                 get_value(item, "extra_reference_image_quota", "超限参考图阶梯额度", default=0),
+                get_value(item, "extra_reference_image_charge", "超限参考图每阶梯加费", "阶梯加费金额", default=1.0),
                 get_value(
                     item,
                     "enable_grok_parameters",
@@ -3568,17 +3636,17 @@ class FigurineProPlugin(Star):
             return image_bytes_list[:global_limit]
         return image_bytes_list[:self._get_reference_image_limit(model_name, parameters)]
 
-    def _get_extra_reference_image_cost(
+    def _get_extra_reference_image_charge(
             self,
             model_name: str,
             image_bytes_list: Optional[List[bytes]],
             parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
-        """超限参考图阶梯额外扣次（不含基础扣次）。
+        """超限参考图阶梯额外加费（厘，不含基础扣费）。
 
-        每阶梯固定额外扣除 1 次，与模型 deduction_count、分辨率升级均无关。
-        仅当 reference_image_limit>0 且 extra_reference_image_quota>0 时启用；
-        二者任一为 0 则本功能完全不触发（返回 0）。
+        每阶梯额外加收 extra_reference_image_charge（默认 1 元），与模型
+        charge_amount、分辨率升级均无关。仅当 reference_image_limit>0 且
+        extra_reference_image_quota>0 时启用；二者任一为 0 则本功能完全不触发（返回 0）。
         """
         if not image_bytes_list:
             return 0
@@ -3595,7 +3663,11 @@ class FigurineProPlugin(Star):
         excess = sent - soft_limit
         if excess <= 0:
             return 0
-        return (excess + quota - 1) // quota  # 阶梯数（向上取整）= 额外扣次
+        steps = (excess + quota - 1) // quota  # 阶梯数（向上取整）
+        charge_per_step = _normalize_nonnegative_int(parameters.get("extra_reference_image_charge", 0))
+        if charge_per_step <= 0:
+            charge_per_step = yuan_to_amount(1.0)
+        return steps * charge_per_step
 
     def _get_max_reference_image_side(self, image_bytes_list: Optional[List[bytes]]) -> int:
         """遍历所有参考图，返回任一边长的最大值；读取失败跳过；无图返回 0。"""
@@ -3613,7 +3685,7 @@ class FigurineProPlugin(Star):
                 max_side = max(max_side, width, height)
         return max_side
 
-    def _get_resolution_deduction_tier(
+    def _get_resolution_charge_tier(
             self,
             model_name: str,
             resolution: Optional[str] = None,
@@ -3621,7 +3693,7 @@ class FigurineProPlugin(Star):
             parameters: Optional[Dict[str, Any]] = None,
             aspect_ratio: Optional[str] = None,
     ) -> Optional[str]:
-        """判定本次请求应使用的分辨率扣次档位。
+        """判定本次请求应使用的分辨率扣费档位。
 
         4K > 2K > 无。4K 档由模型分辨率设置或命令 x4 触发（暂不按边长检测）；
         2K 档由参考图任一边长 > 2000、模型分辨率设置 2K、命令 x2，
@@ -3689,29 +3761,35 @@ class FigurineProPlugin(Star):
                 return False
         return True
 
-    def _get_tiered_deduction_cost(
+    def _global_charge_amount(self, key: str, default_yuan: float) -> int:
+        """全局档位扣费配置（元）→ 厘；无效或 ≤0 时回退默认值。"""
+        amount = yuan_to_amount(self.conf.get(key, default_yuan))
+        return amount if amount > 0 else yuan_to_amount(default_yuan)
+
+    def _get_tiered_charge_amount(
             self,
             model_name: str,
             tier: Optional[str],
             parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
-        """按档位返回单次扣次：命中 2K/4K 时替换基础扣次，未命中时为基础扣次。
+        """按档位返回单次生成扣费（厘，1厘=0.001元）：命中 2K/4K 时替换基础扣费。
 
-        模型「2K/4K扣除次数」>0 时使用模型配置，否则回退全局
-        resolution_2k_cost / resolution_4k_cost（默认 2 / 4）。
+        模型「2K/4K单次扣费」>0 时使用模型配置，否则回退全局
+        resolution_2k_cost / resolution_4k_cost（默认 2 / 4 元）。
         """
         parameters = self._parameters_for_request(model_name, parameters)
         if tier == "4K":
-            model_cost = _normalize_nonnegative_int((parameters or {}).get("deduction_count_4k", 0))
+            model_cost = _normalize_nonnegative_int((parameters or {}).get("charge_amount_4k", 0))
             if model_cost > 0:
                 return model_cost
-            return _normalize_positive_int(self.conf.get("resolution_4k_cost", 4), 4)
+            return self._global_charge_amount("resolution_4k_cost", 4)
         if tier == "2K":
-            model_cost = _normalize_nonnegative_int((parameters or {}).get("deduction_count_2k", 0))
+            model_cost = _normalize_nonnegative_int((parameters or {}).get("charge_amount_2k", 0))
             if model_cost > 0:
                 return model_cost
-            return _normalize_positive_int(self.conf.get("resolution_2k_cost", 2), 2)
-        return _normalize_positive_int((parameters or {}).get("deduction_count", 1), 1)
+            return self._global_charge_amount("resolution_2k_cost", 2)
+        base_cost = _normalize_nonnegative_int((parameters or {}).get("charge_amount", 0))
+        return base_cost if base_cost > 0 else yuan_to_amount(1.0)
 
     @classmethod
     def _get_nearest_gemini_aspect_ratio(
@@ -4707,16 +4785,16 @@ class FigurineProPlugin(Star):
         outcome: str,
         http_status: int,
         output_count: int,
-        charged_units: int,
+        charged_amount: int,
         deduction_source: Optional[str],
         note: str = "",
         request_context: Optional[Dict[str, Any]] = None,
     ):
         identity_snapshot = await self._snapshot_event_identity(event, sender_id, group_id)
         if not self.usage_store:
-            if charged_units:
+            if charged_amount:
                 await self._deduct_generation_cost(
-                    deduction_source, sender_id, group_id, charged_units
+                    deduction_source, sender_id, group_id, charged_amount
                 )
             return
         api_route, endpoint_type = self._get_usage_endpoint_details(
@@ -4739,7 +4817,7 @@ class FigurineProPlugin(Star):
                 outcome=outcome,
                 http_status=http_status,
                 output_count=output_count,
-                charged_units=charged_units,
+                charged_amount=charged_amount,
                 deduction_source=deduction_source,
                 note=note,
                 **identity_snapshot,
@@ -4748,16 +4826,16 @@ class FigurineProPlugin(Star):
             subject_type = settlement.get("balance_subject_type")
             subject_id = settlement.get("balance_subject_id")
             if resulting_balance is not None and subject_type == "user" and subject_id:
-                self.user_counts[subject_id] = int(resulting_balance)
-                await self._save_user_counts()
+                self.user_balances[subject_id] = int(resulting_balance)
+                await self._save_user_balances()
             elif resulting_balance is not None and subject_type == "group" and subject_id:
-                self.group_counts[subject_id] = int(resulting_balance)
-                await self._save_group_counts()
+                self.group_balances[subject_id] = int(resulting_balance)
+                await self._save_group_balances()
         except Exception as exc:
-            logger.error(f"记录用量账本失败，回退 JSON 扣次: {exc}")
-            if charged_units:
+            logger.error(f"记录用量账本失败，回退 JSON 扣费: {exc}")
+            if charged_amount:
                 await self._deduct_generation_cost(
-                    deduction_source, sender_id, group_id, charged_units
+                    deduction_source, sender_id, group_id, charged_amount
                 )
 
     async def _adjust_usage_balance(
@@ -4774,7 +4852,7 @@ class FigurineProPlugin(Star):
     ) -> int:
         subject_id = self._norm_id(subject_id)
         if not subject_id:
-            raise ValueError("次数目标不能为空")
+            raise ValueError("余额调整目标不能为空")
         group_id = subject_id if subject_type == "group" else ""
         user_id = subject_id if subject_type == "user" else ""
         identity_snapshot: Dict[str, str] = {}
@@ -4796,22 +4874,22 @@ class FigurineProPlugin(Star):
                 )
                 balance = int(result["after"])
                 if subject_type == "user":
-                    self.user_counts[subject_id] = balance
-                    await self._save_user_counts()
+                    self.user_balances[subject_id] = balance
+                    await self._save_user_balances()
                 else:
-                    self.group_counts[subject_id] = balance
-                    await self._save_group_counts()
+                    self.group_balances[subject_id] = balance
+                    await self._save_group_balances()
                 return balance
             except Exception as exc:
-                logger.error(f"调整次数账本失败，回退 JSON: {exc}")
+                logger.error(f"调整余额账本失败，回退 JSON: {exc}")
         if subject_type == "user":
-            balance = max(0, self._get_user_count(subject_id) + amount)
-            self.user_counts[subject_id] = balance
-            await self._save_user_counts()
+            balance = max(0, self._get_user_balance(subject_id) + amount)
+            self.user_balances[subject_id] = balance
+            await self._save_user_balances()
         else:
-            balance = max(0, self._get_group_count(subject_id) + amount)
-            self.group_counts[subject_id] = balance
-            await self._save_group_counts()
+            balance = max(0, self._get_group_balance(subject_id) + amount)
+            self.group_balances[subject_id] = balance
+            await self._save_group_balances()
         return balance
 
     def _get_maintenance_message(self) -> Optional[str]:
@@ -5314,12 +5392,12 @@ class FigurineProPlugin(Star):
 
     def _build_limit_exhausted_message(self, group_id: Optional[str]) -> str:
         if group_id and self.conf.get("enable_group_limit", False):
-            msg = "❌ 本群或您的使用次数已用尽 (优先扣除群次数)。"
+            msg = "❌ 本群或您的余额已不足 (优先扣除群余额)。"
         else:
-            msg = "❌ 您的使用次数已用完。"
+            msg = "❌ 您的余额已不足。"
 
         if self.conf.get("enable_checkin", False) and self.conf.get("enable_user_limit", True):
-            msg += "\n📅 可发送 \"#手办化签到\" 获取次数（触发前缀/唤醒请按实际配置调整）。"
+            msg += "\n📅 可发送 \"#手办化签到\" 获取余额（触发前缀/唤醒请按实际配置调整）。"
 
         return msg
 
@@ -5332,18 +5410,18 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
             parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
-        tier = self._get_resolution_deduction_tier(
+        tier = self._get_resolution_charge_tier(
             model_name,
             resolution,
             image_bytes_list,
             parameters,
             aspect_ratio,
         )
-        return self._get_tiered_deduction_cost(
+        return self._get_tiered_charge_amount(
             model_name,
             tier,
             parameters,
-        ) + self._get_extra_reference_image_cost(
+        ) + self._get_extra_reference_image_charge(
             model_name,
             image_bytes_list,
             parameters,
@@ -5357,19 +5435,19 @@ class FigurineProPlugin(Star):
             parameters: Optional[Dict[str, Any]] = None,
             aspect_ratio: Optional[str] = None,
     ) -> int:
-        """违规失败按实际调用模型的扣次档位结算（含超限参考图阶梯额外扣次）。"""
-        tier = self._get_resolution_deduction_tier(
+        """违规失败按实际调用模型的扣费档位结算（含超限参考图阶梯额外加费）。"""
+        tier = self._get_resolution_charge_tier(
             model_name,
             resolution,
             image_bytes_list,
             parameters,
             aspect_ratio,
         )
-        return self._get_tiered_deduction_cost(
+        return self._get_tiered_charge_amount(
             model_name,
             tier,
             parameters,
-        ) + self._get_extra_reference_image_cost(
+        ) + self._get_extra_reference_image_charge(
             model_name,
             image_bytes_list,
             parameters,
@@ -5435,11 +5513,11 @@ class FigurineProPlugin(Star):
             amount: int,
     ):
         if deduction_source == "group" and group_id:
-            await self._decrease_group_count(group_id, amount)
+            await self._deduct_group_balance(group_id, amount)
         elif deduction_source == "user":
-            await self._decrease_user_count(sender_id, amount)
+            await self._deduct_user_balance(sender_id, amount)
 
-    def _get_remaining_count_text(
+    def _get_remaining_balance_text(
             self,
             deduction_source: Optional[str],
             sender_id: str,
@@ -5450,10 +5528,12 @@ class FigurineProPlugin(Star):
 
         remaining_parts = []
         if self.conf.get("enable_user_limit", True):
-            remaining_parts.append(str(self._get_user_count(sender_id)))
+            remaining_parts.append(format_amount(self._get_user_balance(sender_id)))
         if group_id and self.conf.get("enable_group_limit", False):
-            remaining_parts.append(f"群{self._get_group_count(group_id)}")
-        return "/".join(remaining_parts) if remaining_parts else "∞"
+            remaining_parts.append(f"群{format_amount(self._get_group_balance(group_id))}")
+        if not remaining_parts:
+            return "∞"
+        return "/".join(remaining_parts) + " 元"
 
     def _resolve_generation_access(
         self,
@@ -5486,11 +5566,11 @@ class FigurineProPlugin(Star):
             return False, None, None
 
         if group_id and self.conf.get("enable_group_limit", False):
-            if self._get_group_count(group_id) >= required_cost:
+            if self._get_group_balance(group_id) >= required_cost:
                 return True, "group", None
 
         if self.conf.get("enable_user_limit", True):
-            if self._get_user_count(sender_id) >= required_cost:
+            if self._get_user_balance(sender_id) >= required_cost:
                 return True, "user", None
 
         if not self.conf.get("enable_group_limit", False) and not self.conf.get("enable_user_limit", True):
@@ -6676,8 +6756,8 @@ class FigurineProPlugin(Star):
                 f"端点: {endpoint_display}"
             )
 
-        # 超限参考图阶梯扣次提示（按首个候选模型估算；实际按各批次命中的模型结算）
-        extra_cost_preview = self._get_extra_reference_image_cost(
+        # 超限参考图阶梯加费提示（按首个候选模型估算；实际按各批次命中的模型结算）
+        extra_cost_preview = self._get_extra_reference_image_charge(
             initial_actual_model,
             self._limit_reference_images(
                 initial_actual_model,
@@ -6695,7 +6775,7 @@ class FigurineProPlugin(Star):
             )
             excess_preview = max(0, min(len(images_to_process), global_limit_preview) - soft_preview)
             info_msg += (
-                f"\n🎨 检测到 {excess_preview} 张参考图超出软限，本次每批次将额外扣除 {extra_cost_preview} 次。"
+                f"\n🎨 检测到 {excess_preview} 张参考图超出软限，本次每批次将额外加收 {format_amount(extra_cost_preview)} 元。"
             )
 
         yield self._reply_plain_result(event, info_msg)
@@ -6729,7 +6809,7 @@ class FigurineProPlugin(Star):
                 outcome="failed",
                 http_status=failed_status,
                 output_count=0,
-                charged_units=0,
+                charged_amount=0,
                 deduction_source=None,
                 note="热备切换前的中间失败",
                 request_context=failed_context,
@@ -6783,7 +6863,7 @@ class FigurineProPlugin(Star):
                     outcome="failed",
                     http_status=0,
                     output_count=0,
-                    charged_units=0,
+                    charged_amount=0,
                     deduction_source=None,
                     note="聊天生成系统错误",
                     request_context=initial_request_context,
@@ -6842,7 +6922,7 @@ class FigurineProPlugin(Star):
                 outcome=outcome,
                 http_status=http_status,
                 output_count=1 if isinstance(res, bytes) else 0,
-                charged_units=deduction_amount if should_deduct else 0,
+                charged_amount=deduction_amount if should_deduct else 0,
                 deduction_source=deduction_source if should_deduct else None,
                 request_context=request_context,
             )
@@ -6875,7 +6955,7 @@ class FigurineProPlugin(Star):
             # 检查是否有自定义成功消息模板
             custom_success_template = self.conf.get("custom_success_message", "").strip()
             if custom_success_template:
-                remaining_text = self._get_remaining_count_text(
+                remaining_text = self._get_remaining_balance_text(
                     deduction_source,
                     sender_id,
                     group_id,
@@ -6891,12 +6971,12 @@ class FigurineProPlugin(Star):
                     caption_parts.append(f"批次: {index}/{batch_count}")
 
                 if deduction_source == 'free':
-                    caption_parts.append("剩余: ∞")
+                    caption_parts.append("余额: ∞")
                 else:
                     if group_id and self.conf.get("enable_group_limit", False):
-                        caption_parts.append(f"本群剩余: {self._get_group_count(group_id)}")
+                        caption_parts.append(f"本群余额: {format_amount(self._get_group_balance(group_id))} 元")
                     if self.conf.get("enable_user_limit", True):
-                        caption_parts.append(f"用户剩余: {self._get_user_count(sender_id)}")
+                        caption_parts.append(f"用户余额: {format_amount(self._get_user_balance(sender_id))} 元")
 
                 if show_model_info:
                     caption_parts.append(f"模型: {actual_model}")
@@ -6913,7 +6993,7 @@ class FigurineProPlugin(Star):
                 label=display_label,
                 image_count=len(images_to_process),
                 elapsed=float(warning_context.get("elapsed") or total_elapsed),
-                remaining=self._get_remaining_count_text(
+                remaining=self._get_remaining_balance_text(
                     deduction_source,
                     sender_id,
                     group_id,
@@ -6925,7 +7005,7 @@ class FigurineProPlugin(Star):
                 max_batch_concurrency=max_batch_concurrency,
             )
             if failed_deduction_amount and deduction_source in ["group", "user"]:
-                warning_message += f"\n本次违规已扣除次数：{failed_deduction_amount} 次"
+                warning_message += f"\n本次违规已扣除费用：{format_amount(failed_deduction_amount)} 元"
             yield self._reply_plain_result(
                 event,
                 warning_message,
@@ -6943,14 +7023,14 @@ class FigurineProPlugin(Star):
                 image_count=len(images_to_process),
             )
             if failed_deduction_amount and deduction_source in ["group", "user"]:
-                msg += f"\n(失败状态码命中扣次设置，已扣除 {failed_deduction_amount} 次)"
+                msg += f"\n(失败状态码命中扣费设置，已扣除 {format_amount(failed_deduction_amount)} 元)"
             if show_model_info:
                 msg += f"\n模型: {first_error_model}"
             yield self._reply_plain_result(event, msg)
         elif success_count < batch_count:
             summary = f"⚠️ 批量生成完成：成功 {success_count}/{batch_count}，失败 {batch_count - success_count} 次。"
             if failed_deduction_amount and deduction_source in ["group", "user"]:
-                summary += f"\n其中失败请求按错误码设置扣除 {failed_deduction_amount} 次。"
+                summary += f"\n其中失败请求按错误码设置扣除 {format_amount(failed_deduction_amount)} 元。"
             yield self._reply_plain_result(event, summary)
 
         event.stop_event()
@@ -7089,7 +7169,7 @@ class FigurineProPlugin(Star):
                 outcome="failed",
                 http_status=failed_status,
                 output_count=0,
-                charged_units=0,
+                charged_amount=0,
                 deduction_source=None,
                 note="热备切换前的中间失败",
                 request_context=failed_context,
@@ -7117,7 +7197,7 @@ class FigurineProPlugin(Star):
                 outcome="failed",
                 http_status=0,
                 output_count=0,
-                charged_units=0,
+                charged_amount=0,
                 deduction_source=None,
                 note="文生图系统错误",
                 request_context=initial_request_context,
@@ -7175,7 +7255,7 @@ class FigurineProPlugin(Star):
             outcome=outcome,
             http_status=http_status,
             output_count=1 if isinstance(res, bytes) else 0,
-            charged_units=deduction_amount if should_deduct else 0,
+            charged_amount=deduction_amount if should_deduct else 0,
             deduction_source=deduction_source if should_deduct else None,
             request_context=request_context,
         )
@@ -7186,7 +7266,7 @@ class FigurineProPlugin(Star):
             # 检查是否有自定义成功消息模板
             custom_success_template = self.conf.get("custom_success_message", "").strip()
             if custom_success_template:
-                remaining_text = self._get_remaining_count_text(
+                remaining_text = self._get_remaining_balance_text(
                     deduction_source,
                     sender_id,
                     group_id,
@@ -7199,12 +7279,12 @@ class FigurineProPlugin(Star):
                 status_text = "生成成功"
                 caption_parts = [f"✅ {status_text} ({elapsed:.2f}s)"]
                 if deduction_source == 'free':
-                    caption_parts.append("剩余: ∞")
+                    caption_parts.append("余额: ∞")
                 else:
                     if group_id and self.conf.get("enable_group_limit", False):
-                        caption_parts.append(f"本群剩余: {self._get_group_count(group_id)}")
+                        caption_parts.append(f"本群余额: {format_amount(self._get_group_balance(group_id))} 元")
                     if self.conf.get("enable_user_limit", True):
-                        caption_parts.append(f"用户剩余: {self._get_user_count(sender_id)}")
+                        caption_parts.append(f"用户余额: {format_amount(self._get_user_balance(sender_id))} 元")
                 if show_model_info:
                     caption_parts.append(f"模型: {actual_model}")
 
@@ -7218,7 +7298,7 @@ class FigurineProPlugin(Star):
                     label=display_prompt,
                     image_count=0,
                     elapsed=elapsed,
-                    remaining=self._get_remaining_count_text(
+                    remaining=self._get_remaining_balance_text(
                         deduction_source,
                         sender_id,
                         group_id,
@@ -7227,7 +7307,7 @@ class FigurineProPlugin(Star):
                     reason=self._get_content_policy_warning_reason(res),
                 )
                 if should_deduct and deduction_source in ["group", "user"]:
-                    msg += f"\n本次违规已扣除次数：{deduction_amount} 次"
+                    msg += f"\n本次违规已扣除费用：{format_amount(deduction_amount)} 元"
             else:
                 status_text = "生成失败"
                 msg = self._format_error_message(
@@ -7243,7 +7323,7 @@ class FigurineProPlugin(Star):
                 if show_model_info:
                     msg += f"\n模型: {actual_model}"
                 if should_deduct and deduction_source in ["group", "user"]:
-                    msg += f"\n(失败状态码命中扣次设置，已扣除 {deduction_amount} 次)"
+                    msg += f"\n(失败状态码命中扣费设置，已扣除 {format_amount(deduction_amount)} 元)"
             yield self._reply_plain_result(event, msg)
 
         event.stop_event()
@@ -7504,63 +7584,83 @@ class FigurineProPlugin(Star):
 
     # ---------------- 统计与存储 ----------------
 
-    async def _load_user_counts(self):
-        if not self.user_counts_file.exists():
-            self.user_counts = {}
-            return
-        try:
-            content = await asyncio.to_thread(self.user_counts_file.read_text, "utf-8")
-            self.user_counts = json.loads(content)
-        except:
-            self.user_counts = {}
+    async def _load_user_balances(self):
+        self.user_balances = await self._load_balance_data(
+            self.user_balances_file, self.legacy_user_counts_file
+        )
 
-    async def _save_user_counts(self):
+    async def _load_group_balances(self):
+        self.group_balances = await self._load_balance_data(
+            self.group_balances_file, self.legacy_group_counts_file
+        )
+
+    async def _load_balance_data(self, balance_file: Path, legacy_counts_file: Path) -> Dict[str, int]:
+        """优先读取余额文件（厘）；不存在时迁移旧「次数」文件（次 × 汇率 → 厘）。"""
+        legacy = not balance_file.exists()
+        source = legacy_counts_file if legacy else balance_file
+        if not source.exists():
+            return {}
         try:
-            data = json.dumps(self.user_counts, indent=4)
-            await asyncio.to_thread(self.user_counts_file.write_text, data, "utf-8")
+            content = await asyncio.to_thread(source.read_text, "utf-8")
+            values = json.loads(content)
+        except Exception:
+            return {}
+        if not isinstance(values, dict):
+            return {}
+        balances: Dict[str, int] = {}
+        for subject_id, value in values.items():
+            key = str(subject_id or "").strip()
+            if not key:
+                continue
+            raw = _normalize_nonnegative_int(value)
+            if legacy:
+                balances[key] = yuan_to_amount(raw * LEGACY_COUNT_TO_YUAN)
+            else:
+                balances[key] = raw
+        return balances
+
+    async def _save_user_balances(self):
+        try:
+            data = json.dumps(self.user_balances, indent=4)
+            await asyncio.to_thread(self.user_balances_file.write_text, data, "utf-8")
         except:
             pass
 
-    def _get_user_count(self, uid: str) -> int:
-        return self.user_counts.get(self._norm_id(uid), 0)
+    def _get_user_balance(self, uid: str) -> int:
+        return self.user_balances.get(self._norm_id(uid), 0)
 
-    async def _decrease_user_count(self, uid: str, amount: int = 1):
+    async def _deduct_user_balance(self, uid: str, amount: int = 0):
         uid = self._norm_id(uid)
-        count = self._get_user_count(uid)
-        if amount <= 0 or count <= 0:
+        balance = self._get_user_balance(uid)
+        if amount <= 0 or balance <= 0:
             return
-        deduction = min(amount, count)
-        self.user_counts[uid] = count - deduction
-        await self._save_user_counts()
+        deduction = min(amount, balance)
+        self.user_balances[uid] = balance - deduction
+        await self._save_user_balances()
 
-    async def _load_group_counts(self):
-        if not self.group_counts_file.exists():
-            self.group_counts = {}
-            return
-        try:
-            content = await asyncio.to_thread(self.group_counts_file.read_text, "utf-8")
-            self.group_counts = json.loads(content)
-        except:
-            self.group_counts = {}
+    async def _load_group_balances(self):
+        self.group_balances = await self._load_balance_data(
+            self.group_balances_file, self.legacy_group_counts_file
+        )
 
-    async def _save_group_counts(self):
+    async def _save_group_balances(self):
         try:
-            data = json.dumps(self.group_counts, indent=4)
-            await asyncio.to_thread(self.group_counts_file.write_text, data, "utf-8")
+            data = json.dumps(self.group_balances, indent=4)
+            await asyncio.to_thread(self.group_balances_file.write_text, data, "utf-8")
         except:
             pass
 
-    def _get_group_count(self, group_id: str) -> int:
-        return self.group_counts.get(self._norm_id(group_id), 0)
+    def _get_group_balance(self, group_id: str) -> int:
+        return self.group_balances.get(self._norm_id(group_id), 0)
 
-    async def _decrease_group_count(self, group_id: str, amount: int = 1):
+    async def _deduct_group_balance(self, group_id: str, amount: int = 0):
         gid = self._norm_id(group_id)
-        count = self._get_group_count(gid)
-        if amount <= 0 or count <= 0:
+        balance = self._get_group_balance(gid)
+        if amount <= 0 or balance <= 0:
             return
-        deduction = min(amount, count)
-        self.group_counts[gid] = count - deduction
-        await self._save_group_counts()
+        deduction = min(amount, balance)
+        self.group_balances[gid] = balance - deduction
+        await self._save_group_balances()
 
     async def _load_user_checkin_data(self):
         if not self.user_checkin_file.exists():
@@ -7797,17 +7897,17 @@ class FigurineProPlugin(Star):
 
         msg = f"📊 **手办化今日统计 ({today})**\n"
         msg += "--------------------\n"
-        msg += "👥 **群组消耗排行**:\n"
+        msg += "👥 **群组生成排行**:\n"
         if groups_sorted:
             for i, (gid, count) in enumerate(groups_sorted):
-                msg += f"{i + 1}. 群{gid}: {count}次\n"
+                msg += f"{i + 1}. 群{gid}: {count}张\n"
         else:
             msg += "(无数据)\n"
 
-        msg += "\n👤 **用户消耗排行**:\n"
+        msg += "\n👤 **用户生成排行**:\n"
         if users_sorted:
             for i, (uid, count) in enumerate(users_sorted):
-                msg += f"{i + 1}. {uid}: {count}次\n"
+                msg += f"{i + 1}. {uid}: {count}张\n"
         else:
             msg += "(无数据)\n"
 
@@ -7828,12 +7928,12 @@ class FigurineProPlugin(Star):
         today = datetime.now().strftime("%Y-%m-%d")
 
         if self.user_checkin_data.get(uid) == today:
-            yield event.plain_result(f"已签到。剩余: {self._get_user_count(uid)}")
+            yield event.plain_result(f"已签到。当前余额: {format_amount(self._get_user_balance(uid))} 元")
             return
 
-        reward = int(self.conf.get("checkin_fixed_reward", 3))
+        reward = _normalize_charge_amount(self.conf.get("checkin_fixed_reward", 3), 3)
         if self.conf.get("enable_random_checkin", False):
-            max_r = int(self.conf.get("checkin_random_reward_max", 5))
+            max_r = _normalize_charge_amount(self.conf.get("checkin_random_reward_max", 5), 5)
             reward = random.randint(1, max(1, max_r))
 
         await self._adjust_usage_balance(
@@ -7847,10 +7947,10 @@ class FigurineProPlugin(Star):
         self.user_checkin_data[uid] = today
         await self._save_user_checkin_data()
 
-        yield event.plain_result(f"🎉 签到成功 +{reward}次。")
+        yield event.plain_result(f"🎉 签到成功 +{format_amount(reward)} 元。")
 
-    @filter.command("手办化增加用户次数", prefix_optional=True)
-    async def on_add_user_counts(self, event: AstrMessageEvent):
+    @filter.command("手办化增加用户余额", prefix_optional=True)
+    async def on_add_user_balance(self, event: AstrMessageEvent):
         if maintenance_message := self._get_maintenance_message():
             yield self._reply_plain_result(event, maintenance_message)
             event.stop_event()
@@ -7861,41 +7961,46 @@ class FigurineProPlugin(Star):
 
         text = event.message_str.strip()
         at_seg = next((s for s in event.message_obj.message if isinstance(s, At)), None)
-        target, count = None, 0
+        target, amount = None, 0
 
         if at_seg:
             target = self._norm_id(at_seg.qq)
-            match = re.search(r"(\d+)\s*$", text)
+            match = re.search(r"(\d+(?:\.\d{1,3})?)\s*$", text)
             if match:
-                count = int(match.group(1))
+                amount = yuan_to_amount(match.group(1))
         else:
-            match = re.search(r"(\d+)\s+(\d+)", text)
+            match = re.search(r"(\d+)\s+(\d+(?:\.\d{1,3})?)", text)
             if match:
-                target, count = self._norm_id(match.group(1)), int(match.group(2))
+                target, amount = self._norm_id(match.group(1)), yuan_to_amount(match.group(2))
 
-        if target:
-            old_cnt = self._get_user_count(target)
-            new_cnt = await self._adjust_usage_balance(
-                event=event,
-                subject_type="user",
-                subject_id=target,
-                amount=count,
-                source="chat_admin",
-                actor=self._norm_id(event.get_sender_id()),
-                note="聊天管理员增加用户次数",
-                snapshot_identity=False,
-            )
+        if not target:
+            return
+        if amount <= 0:
+            yield event.plain_result("❌ 请输入有效的金额（正数，精确到 0.001 元），例：#手办化增加用户余额 @用户 0.5")
+            return
 
-            msg = f"✅ 已为用户 {target} 增加 {count} 次。\n"
-            msg += f"📊 变动: {old_cnt} + {count} = {new_cnt}\n"
-            msg += f"👤 用户剩余: {new_cnt}"
-            if gid := event.get_group_id():
-                msg += f"\n👥 本群剩余: {self._get_group_count(self._norm_id(gid))}"
+        old_balance = self._get_user_balance(target)
+        new_balance = await self._adjust_usage_balance(
+            event=event,
+            subject_type="user",
+            subject_id=target,
+            amount=amount,
+            source="chat_admin",
+            actor=self._norm_id(event.get_sender_id()),
+            note="聊天管理员增加用户余额",
+            snapshot_identity=False,
+        )
 
-            yield event.plain_result(msg)
+        msg = f"✅ 已为用户 {target} 增加 {format_amount(amount)} 元。\n"
+        msg += f"📊 变动: {format_amount(old_balance)} + {format_amount(amount)} = {format_amount(new_balance)} 元\n"
+        msg += f"👤 用户余额: {format_amount(new_balance)} 元"
+        if gid := event.get_group_id():
+            msg += f"\n👥 本群余额: {format_amount(self._get_group_balance(self._norm_id(gid)))} 元"
 
-    @filter.command("手办化增加群组次数", prefix_optional=True)
-    async def on_add_group_counts(self, event: AstrMessageEvent):
+        yield event.plain_result(msg)
+
+    @filter.command("手办化增加群组余额", prefix_optional=True)
+    async def on_add_group_balance(self, event: AstrMessageEvent):
         if maintenance_message := self._get_maintenance_message():
             yield self._reply_plain_result(event, maintenance_message)
             event.stop_event()
@@ -7904,30 +8009,34 @@ class FigurineProPlugin(Star):
         if not self.is_global_admin(event):
             return
 
-        match = re.search(r"(\d+)\s+(\d+)", event.message_str.strip())
+        match = re.search(r"(\d+)\s+(\d+(?:\.\d{1,3})?)", event.message_str.strip())
         if match:
-            gid, count = self._norm_id(match.group(1)), int(match.group(2))
+            gid, amount = self._norm_id(match.group(1)), yuan_to_amount(match.group(2))
 
-            old_cnt = self._get_group_count(gid)
-            new_cnt = await self._adjust_usage_balance(
+            if amount <= 0:
+                yield event.plain_result("❌ 请输入有效的金额（正数，精确到 0.001 元），例：#手办化增加群组余额 123456 0.5")
+                return
+
+            old_balance = self._get_group_balance(gid)
+            new_balance = await self._adjust_usage_balance(
                 event=event,
                 subject_type="group",
                 subject_id=gid,
-                amount=count,
+                amount=amount,
                 source="chat_admin",
                 actor=self._norm_id(event.get_sender_id()),
-                note="聊天管理员增加群组次数",
+                note="聊天管理员增加群组余额",
                 snapshot_identity=False,
             )
 
-            msg = f"✅ 已为群 {gid} 增加 {count} 次。\n"
-            msg += f"📊 变动: {old_cnt} + {count} = {new_cnt}\n"
-            msg += f"👥 本群剩余: {new_cnt}"
+            msg = f"✅ 已为群 {gid} 增加 {format_amount(amount)} 元。\n"
+            msg += f"📊 变动: {format_amount(old_balance)} + {format_amount(amount)} = {format_amount(new_balance)} 元\n"
+            msg += f"👥 本群余额: {format_amount(new_balance)} 元"
 
             yield event.plain_result(msg)
 
-    @filter.command("手办化查询次数", prefix_optional=True)
-    async def on_query_counts(self, event: AstrMessageEvent):
+    @filter.command("手办化查询余额", prefix_optional=True)
+    async def on_query_balance(self, event: AstrMessageEvent):
         if maintenance_message := self._get_maintenance_message():
             yield self._reply_plain_result(event, maintenance_message)
             event.stop_event()
@@ -7944,9 +8053,9 @@ class FigurineProPlugin(Star):
                 if len(parts) > 1 and parts[1].isdigit():
                     uid = self._norm_id(parts[1])
 
-        msg = f"👤 用户 {uid} 剩余: {self._get_user_count(uid)}"
+        msg = f"👤 用户 {uid} 余额: {format_amount(self._get_user_balance(uid))} 元"
         if gid := event.get_group_id():
-            msg += f"\n👥 本群剩余: {self._get_group_count(self._norm_id(gid))}"
+            msg += f"\n👥 本群余额: {format_amount(self._get_group_balance(self._norm_id(gid)))} 元"
 
         yield event.plain_result(msg)
 

@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 venv/
 .zcode/
+
+# 线上数据迁移产物与数据包，禁止入库
+migration_work/
+*.tar.gz

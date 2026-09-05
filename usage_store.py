@@ -1,4 +1,4 @@
-"""File-backed quota balances and privacy-conscious generation usage history."""
+"""File-backed money balances and privacy-conscious generation usage history."""
 
 from __future__ import annotations
 
@@ -11,15 +11,44 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
+# 内部金额单位：1 厘 = 0.001 元。所有余额与账本金额均以「厘」为整数存储，避免浮点误差。
+MONEY_SCALE = 1000
+# 旧版「按次计费」数据迁移到「按金额计费」的汇率：1 次 = LEGACY_COUNT_TO_YUAN 元。
+# 线上部署定为 0.04 元/次（2026-09 按实际数据确认）。
+LEGACY_COUNT_TO_YUAN = 0.04
+
+
+def yuan_to_amount(value: Any) -> int:
+    """元（int/float/str）→ 厘（int），四舍五入到 0.001 元；无效输入返回 0。"""
+    try:
+        return int(round(float(value) * MONEY_SCALE))
+    except (TypeError, ValueError):
+        return 0
+
+
+def amount_to_yuan(amount: Any) -> float:
+    """厘（int）→ 元（float），保留 3 位小数。"""
+    try:
+        return round(int(amount) / MONEY_SCALE, 3)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def format_amount(amount: Any) -> str:
+    """厘（int）→ 金额文本（去尾零）：50 → "0.05"，1234 → "1.234"，0 → "0"。"""
+    text = f"{amount_to_yuan(amount):.3f}".rstrip("0").rstrip(".")
+    return text or "0"
+
 
 class UsageStore:
     """Async facade around a plugin-local JSON ledger.
 
     Prompts, images, provider payloads, headers, and API credentials are never
     persisted. SQLite is only opened read-only once to import an older ledger.
+    Balances and ledger money fields are integer 「厘」 (0.001 yuan).
     """
 
-    FILE_VERSION = 1
+    FILE_VERSION = 2
 
     def __init__(self, history_path: Path, legacy_database_path: Path | None = None):
         self.history_path = Path(history_path)
@@ -58,7 +87,7 @@ class UsageStore:
         user_balances: dict[str, Any],
         group_balances: dict[str, Any],
     ) -> dict[str, dict[str, int]]:
-        """Merge legacy count files as the authoritative current balances."""
+        """Merge legacy balance sources (already in 厘) as the authoritative current balances."""
         async with self._lock:
             data = self._require_data()
             previous = copy.deepcopy(data)
@@ -83,6 +112,10 @@ class UsageStore:
         self.history_path.parent.mkdir(parents=True, exist_ok=True)
         if self.history_path.exists():
             self._data = self._load_file_sync()
+            if self._migrate_billing_v2_sync(self._data):
+                self._ensure_shape(self._data)
+                self._persist_sync()
+                return
             self._ensure_shape(self._data)
             return
 
@@ -118,6 +151,59 @@ class UsageStore:
             "ledger_events": [],
             "next_event_id": 1,
         }
+
+    def _migrate_billing_v2_sync(self, data: dict[str, Any]) -> bool:
+        """v1（按次计费）→ v2（按金额计费）：余额与账本金额字段换算成「厘」。
+
+        换算公式：厘 = 次 × LEGACY_COUNT_TO_YUAN × MONEY_SCALE。
+        事件字段 charged_units 同时重命名为 charged_amount。返回是否发生迁移。
+        """
+        if not isinstance(data, dict):
+            return False
+        try:
+            version = int(data.get("version") or 1)
+        except (TypeError, ValueError):
+            version = 1
+        if version >= self.FILE_VERSION:
+            return False
+        factor = LEGACY_COUNT_TO_YUAN * MONEY_SCALE
+
+        def scale(value: Any) -> int:
+            return int(round(self._nonnegative_int(value) * factor))
+
+        balances = data.get("balances")
+        if isinstance(balances, dict):
+            for scope in ("user", "group"):
+                values = balances.get(scope)
+                if isinstance(values, dict):
+                    balances[scope] = {
+                        subject_id: scale(balance)
+                        for subject_id, balance in values.items()
+                        if str(subject_id or "").strip()
+                    }
+        events = data.get("ledger_events")
+        if isinstance(events, list):
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                if "charged_units" in event:
+                    event["charged_amount"] = scale(event.pop("charged_units"))
+                elif "charged_amount" in event:
+                    event["charged_amount"] = scale(event["charged_amount"])
+                if "balance_delta" in event:
+                    event["balance_delta"] = int(round(self._int(event["balance_delta"]) * factor))
+                if event.get("resulting_balance") is not None:
+                    event["resulting_balance"] = scale(event["resulting_balance"])
+        migration = data.get("migration")
+        if not isinstance(migration, dict):
+            migration = {}
+            data["migration"] = migration
+        migration["billing_v2"] = {
+            "legacy_count_to_yuan": LEGACY_COUNT_TO_YUAN,
+            "completed_at": self._now(),
+        }
+        data["version"] = self.FILE_VERSION
+        return True
 
     def _load_file_sync(self) -> dict[str, Any]:
         try:
@@ -214,7 +300,9 @@ class UsageStore:
             "outcome": str(raw_event.get("outcome") or ""),
             "http_status": self._int(raw_event.get("http_status")),
             "output_count": self._nonnegative_int(raw_event.get("output_count")),
-            "charged_units": self._nonnegative_int(raw_event.get("charged_units")),
+            "charged_amount": self._nonnegative_int(
+                raw_event.get("charged_amount", raw_event.get("charged_units"))
+            ),
             "balance_subject_type": str(raw_event.get("balance_subject_type") or ""),
             "balance_subject_id": str(raw_event.get("balance_subject_id") or ""),
             "balance_delta": self._int(raw_event.get("balance_delta")),
@@ -227,6 +315,8 @@ class UsageStore:
 
     def _import_sqlite_sync(self, database_path: Path) -> dict[str, Any]:
         data = self._empty_data()
+        # SQLite 是旧版「按次计费」账本，先按 v1 标记再统一迁移成金额（厘）。
+        data["version"] = 1
         try:
             connection = sqlite3.connect(f"{database_path.resolve().as_uri()}?mode=ro", uri=True)
             connection.row_factory = sqlite3.Row
@@ -269,6 +359,7 @@ class UsageStore:
             raise RuntimeError(f"读取旧 SQLite 用量账本失败: {exc}") from exc
         finally:
             connection.close()
+        self._migrate_billing_v2_sync(data)
         self._ensure_shape(data)
         return data
 
@@ -393,7 +484,7 @@ class UsageStore:
         outcome: str,
         http_status: int = 0,
         output_count: int = 0,
-        charged_units: int = 0,
+        charged_amount: int = 0,
         deduction_source: str | None = None,
         note: str = "",
         identity_platform: str = "",
@@ -406,7 +497,7 @@ class UsageStore:
             previous = copy.deepcopy(data)
             subject_type = deduction_source if deduction_source in {"user", "group"} else ""
             subject_id = user_id if subject_type == "user" else (group_id or "") if subject_type == "group" else ""
-            requested_charge = self._nonnegative_int(charged_units) if subject_id else 0
+            requested_charge = self._nonnegative_int(charged_amount) if subject_id else 0
             actual_charge = 0
             balance_delta = 0
             resulting_balance: int | None = None
@@ -434,7 +525,7 @@ class UsageStore:
                 "outcome": outcome,
                 "http_status": http_status,
                 "output_count": output_count,
-                "charged_units": actual_charge,
+                "charged_amount": actual_charge,
                 "balance_subject_type": subject_type,
                 "balance_subject_id": subject_id,
                 "balance_delta": balance_delta,
@@ -515,9 +606,9 @@ class UsageStore:
             events = self._filtered_events(self._require_data(), start, end)
             summary = {
                 "successful_outputs": sum(event["output_count"] for event in events if event["event_kind"] == "generation" and event["outcome"] == "success" and not event["is_legacy"]),
-                "failed_charged_units": sum(event["charged_units"] for event in events if event["event_kind"] == "generation" and event["outcome"] != "success" and event["charged_units"] > 0 and not event["is_legacy"]),
-                "charged_units": sum(event["charged_units"] for event in events if event["event_kind"] == "generation" and not event["is_legacy"]),
-                "unbilled_llm_outputs": sum(event["output_count"] for event in events if event["event_kind"] == "generation" and event["source"] == "llm_tool" and event["outcome"] == "success" and event["charged_units"] == 0 and not event["is_legacy"]),
+                "failed_charged_amount": sum(event["charged_amount"] for event in events if event["event_kind"] == "generation" and event["outcome"] != "success" and event["charged_amount"] > 0 and not event["is_legacy"]),
+                "charged_amount": sum(event["charged_amount"] for event in events if event["event_kind"] == "generation" and not event["is_legacy"]),
+                "unbilled_llm_outputs": sum(event["output_count"] for event in events if event["event_kind"] == "generation" and event["source"] == "llm_tool" and event["outcome"] == "success" and event["charged_amount"] == 0 and not event["is_legacy"]),
                 "legacy_output_count": sum(event["output_count"] for event in events if event["is_legacy"] and event["event_kind"] == "generation" and event["legacy_scope"] == "user"),
             }
             trend_by_date: dict[str, dict[str, Any]] = {}
@@ -526,20 +617,20 @@ class UsageStore:
                 if event["is_legacy"] or event["event_kind"] != "generation":
                     continue
                 date = event["occurred_at"][:10]
-                trend = trend_by_date.setdefault(date, {"date": date, "outputs": 0, "charged_units": 0})
+                trend = trend_by_date.setdefault(date, {"date": date, "outputs": 0, "charged_amount": 0})
                 if event["outcome"] == "success":
                     trend["outputs"] += event["output_count"]
-                trend["charged_units"] += event["charged_units"]
+                trend["charged_amount"] += event["charged_amount"]
                 key = (event["actual_model"], event["api_route"], event["endpoint_type"])
                 model = model_rows.setdefault(key, {
                     "actual_model": key[0], "api_route": key[1], "endpoint_type": key[2],
-                    "outputs": 0, "charged_units": 0, "attempts": 0,
+                    "outputs": 0, "charged_amount": 0, "attempts": 0,
                 })
                 if event["outcome"] == "success":
                     model["outputs"] += event["output_count"]
-                model["charged_units"] += event["charged_units"]
+                model["charged_amount"] += event["charged_amount"]
                 model["attempts"] += 1
-            models = sorted(model_rows.values(), key=lambda item: (-item["outputs"], -item["charged_units"], -item["attempts"], item["actual_model"]))[:20]
+            models = sorted(model_rows.values(), key=lambda item: (-item["outputs"], -item["charged_amount"], -item["attempts"], item["actual_model"]))[:20]
             return {"summary": summary, "trend": [trend_by_date[key] for key in sorted(trend_by_date)], "models": models}
 
     async def list_users(self, *, start: str | None = None, end: str | None = None, search: str = "", page: int = 1, page_size: int = 30) -> dict[str, Any]:
@@ -565,7 +656,7 @@ class UsageStore:
                 continue
             relevant = [event for event in events if event[key] == subject_id]
             output_count = sum(event["output_count"] for event in relevant if event["event_kind"] == "generation" and event["outcome"] == "success")
-            charged_units = sum(event["charged_units"] for event in relevant if event["event_kind"] == "generation")
+            charged_amount = sum(event["charged_amount"] for event in relevant if event["event_kind"] == "generation")
             legacy_outputs = sum(event["output_count"] for event in relevant if event["event_kind"] == "generation" and event["is_legacy"])
             if subject_type == "user":
                 row = {
@@ -575,7 +666,7 @@ class UsageStore:
                     "nickname": name,
                     "avatar_url": identity.get("avatar_url", ""),
                     "outputs": output_count,
-                    "charged_units": charged_units,
+                    "charged_amount": charged_amount,
                     "legacy_outputs": legacy_outputs,
                 }
             else:
@@ -585,20 +676,28 @@ class UsageStore:
                     "platform": identity.get("platform", ""),
                     "name": name,
                     "outputs": output_count,
-                    "charged_units": charged_units,
+                    "charged_amount": charged_amount,
                     "active_users": len({event["user_id"] for event in relevant if event["user_id"]}),
                     "legacy_outputs": legacy_outputs,
                 }
             rows.append(row)
         id_key = "user_id" if subject_type == "user" else "group_id"
-        rows.sort(key=lambda row: (-row["charged_units"], -row["outputs"], row[id_key]))
+        rows.sort(key=lambda row: (-row["charged_amount"], -row["outputs"], row[id_key]))
         return self._page_result(rows, page, page_size)
 
-    async def list_events(self, *, start: str | None = None, end: str | None = None, user_id: str = "", group_id: str = "", model: str = "", page: int = 1, page_size: int = 30) -> dict[str, Any]:
+    async def list_events(self, *, start: str | None = None, end: str | None = None, user_id: str = "", group_id: str = "", model: str = "", outcome: str = "", page: int = 1, page_size: int = 30) -> dict[str, Any]:
         async with self._lock:
             data = self._require_data()
             events = self._filtered_events(data, start, end)
             user_id, group_id, model = str(user_id or ""), str(group_id or ""), str(model or "")
+            outcome = str(outcome or "").strip().lower()
+            if outcome == "success":
+                events = [event for event in events if event["outcome"] == "success"]
+            elif outcome == "failed":
+                events = [
+                    event for event in events
+                    if event["event_kind"] == "generation" and event["outcome"] != "success"
+                ]
             events = [
                 event for event in events
                 if (not user_id or event["user_id"] == user_id)

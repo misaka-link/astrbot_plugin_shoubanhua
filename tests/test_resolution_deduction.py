@@ -180,7 +180,7 @@ class ResolutionDeductionTests(unittest.TestCase):
 
         PLUGIN_MODULE.request.json = read_json
 
-    # ---- _get_resolution_deduction_tier --------------------------------
+    # ---- _get_resolution_charge_tier --------------------------------
 
     def test_failover_callback_only_records_intermediate_failures(self):
         plugin = self.make_plugin([])
@@ -343,7 +343,7 @@ class ResolutionDeductionTests(unittest.TestCase):
             {
                 "model": "source",
                 "parameter_mode": "gpt",
-                "deduction_count": 7,
+                "charge_amount": 7,
                 "reference_image_limit": 9,
                 "max_output_tokens": 8192,
                 "deduct_on_violation": True,
@@ -361,12 +361,12 @@ class ResolutionDeductionTests(unittest.TestCase):
         inherited_parameters = plugin._get_effective_model_parameters("source", "unconfigured-target")
 
         self.assertEqual(target_parameters["parameter_mode"], "none")
-        self.assertEqual(target_parameters["deduction_count"], 1)
+        self.assertEqual(target_parameters["charge_amount"], 1000)
         self.assertEqual(target_parameters["reference_image_limit"], 0)
         self.assertEqual(target_parameters["max_output_tokens"], 0)
         self.assertFalse(target_parameters["deduct_on_violation"])
         self.assertFalse(target_parameters["enable_gpt_parameters"])
-        self.assertEqual(inherited_parameters["deduction_count"], 7)
+        self.assertEqual(inherited_parameters["charge_amount"], 7000)
         self.assertTrue(inherited_parameters["enable_gpt_parameters"])
 
     def test_parameter_modes_keep_vendor_payloads_exclusive(self):
@@ -939,37 +939,37 @@ class ResolutionDeductionTests(unittest.TestCase):
 
     def test_no_signal_yields_no_tier(self):
         plugin = self.make_plugin([{"model": "m"}])
-        self.assertIsNone(plugin._get_resolution_deduction_tier("m"))
-        self.assertIsNone(plugin._get_resolution_deduction_tier("m", image_bytes_list=[b"small"]))
+        self.assertIsNone(plugin._get_resolution_charge_tier("m"))
+        self.assertIsNone(plugin._get_resolution_charge_tier("m", image_bytes_list=[b"small"]))
 
     def test_image_side_over_2000_triggers_2k(self):
         plugin = self.make_plugin([{"model": "m"}])
-        self.assertEqual(plugin._get_resolution_deduction_tier("m", image_bytes_list=[b"wide_2k"]), "2K")
+        self.assertEqual(plugin._get_resolution_charge_tier("m", image_bytes_list=[b"wide_2k"]), "2K")
 
     def test_multiple_images_use_max_side(self):
         plugin = self.make_plugin([{"model": "m"}])
         # 第一张小图、第二张超限 → 按最大边长命中 2K
         self.assertEqual(
-            plugin._get_resolution_deduction_tier("m", image_bytes_list=[b"small", b"wide_2k"]),
+            plugin._get_resolution_charge_tier("m", image_bytes_list=[b"small", b"wide_2k"]),
             "2K",
         )
 
     def test_invalid_image_is_skipped(self):
         plugin = self.make_plugin([{"model": "m"}])
-        self.assertIsNone(plugin._get_resolution_deduction_tier("m", image_bytes_list=[b"invalid"]))
+        self.assertIsNone(plugin._get_resolution_charge_tier("m", image_bytes_list=[b"invalid"]))
 
     def test_command_resolution_triggers_tier(self):
         plugin = self.make_plugin([{"model": "m"}])
-        self.assertEqual(plugin._get_resolution_deduction_tier("m", resolution="2K"), "2K")
-        self.assertEqual(plugin._get_resolution_deduction_tier("m", resolution="4K"), "4K")
+        self.assertEqual(plugin._get_resolution_charge_tier("m", resolution="2K"), "2K")
+        self.assertEqual(plugin._get_resolution_charge_tier("m", resolution="4K"), "4K")
 
     def test_configured_resolution_triggers_tier(self):
         plugin = self.make_plugin([
             {"model": "m2k", "adaptive_resolution": "2K"},
             {"model": "m4k", "adaptive_resolution": "4K"},
         ])
-        self.assertEqual(plugin._get_resolution_deduction_tier("m2k"), "2K")
-        self.assertEqual(plugin._get_resolution_deduction_tier("m4k"), "4K")
+        self.assertEqual(plugin._get_resolution_charge_tier("m2k"), "2K")
+        self.assertEqual(plugin._get_resolution_charge_tier("m4k"), "4K")
 
     def test_4k_takes_priority_over_2k(self):
         plugin = self.make_plugin([
@@ -977,7 +977,7 @@ class ResolutionDeductionTests(unittest.TestCase):
         ])
         # 命令 x4 与边长 2K 信号同时存在 → 4K 优先
         self.assertEqual(
-            plugin._get_resolution_deduction_tier(
+            plugin._get_resolution_charge_tier(
                 "m",
                 resolution="2K",
                 image_bytes_list=[b"wide_2k"],
@@ -1035,10 +1035,10 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertEqual(request["aspect_ratio"], "21:9")
 
     def test_seedream_side_upgrade_triggers_2k_tier(self):
-        plugin = self._make_seedream_plugin(deduction_count_2k=5)
-        # 参考图边长未超 2000，但比例来源 21:9 使详细分辨率升级为 2K → 按 2K 档扣次
+        plugin = self._make_seedream_plugin(charge_amount_2k=5)
+        # 参考图边长未超 2000，但比例来源 21:9 使详细分辨率升级为 2K → 按 2K 档扣费
         self.assertEqual(
-            plugin._get_resolution_deduction_tier(
+            plugin._get_resolution_charge_tier(
                 "m",
                 image_bytes_list=[b"small"],
                 aspect_ratio="21:9",
@@ -1051,14 +1051,14 @@ class ResolutionDeductionTests(unittest.TestCase):
                 image_bytes_list=[b"small"],
                 aspect_ratio="21:9",
             ),
-            5,
+            5000,
         )
 
     def test_seedream_without_side_upgrade_keeps_base_tier(self):
         plugin = self._make_seedream_plugin()
         # 4:3 在所选档位下未超限 → 不命中 2K 档
         self.assertIsNone(
-            plugin._get_resolution_deduction_tier(
+            plugin._get_resolution_charge_tier(
                 "m",
                 image_bytes_list=[b"small"],
                 aspect_ratio="4:3",
@@ -1068,103 +1068,111 @@ class ResolutionDeductionTests(unittest.TestCase):
     def test_seedream_side_upgrade_off_no_tier(self):
         plugin = self._make_seedream_plugin(seedream_side_over_2000_auto_2k=False)
         self.assertIsNone(
-            plugin._get_resolution_deduction_tier(
+            plugin._get_resolution_charge_tier(
                 "m",
                 image_bytes_list=[b"small"],
                 aspect_ratio="21:9",
             ),
         )
 
-    # ---- _get_tiered_deduction_cost ------------------------------------
+    # ---- _get_tiered_charge_amount --------------------------------------
 
     def test_base_cost_when_no_tier(self):
-        plugin = self.make_plugin([{"model": "m", "deduction_count": 3}])
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", None), 3)
+        plugin = self.make_plugin([{"model": "m", "charge_amount": 3}])
+        self.assertEqual(plugin._get_tiered_charge_amount("m", None), 3000)
 
     def test_2k_cost_replaces_base(self):
         plugin = self.make_plugin([
-            {"model": "m", "deduction_count": 3, "deduction_count_2k": 5},
+            {"model": "m", "charge_amount": 3, "charge_amount_2k": 5},
         ])
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "2K"), 5)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "2K"), 5000)
 
     def test_4k_cost_replaces_base(self):
         plugin = self.make_plugin([
-            {"model": "m", "deduction_count": 3, "deduction_count_4k": 8},
+            {"model": "m", "charge_amount": 3, "charge_amount_4k": 8},
         ])
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "4K"), 8)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "4K"), 8000)
 
     def test_2k_cost_falls_back_to_global(self):
         plugin = self.make_plugin([{"model": "m"}], resolution_2k_cost=7)
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "2K"), 7)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "2K"), 7000)
 
     def test_4k_cost_falls_back_to_global(self):
         plugin = self.make_plugin([{"model": "m"}], resolution_4k_cost=9)
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "4K"), 9)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "4K"), 9000)
 
     def test_global_defaults_when_absent(self):
         plugin = self.make_plugin([{"model": "m"}])
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "2K"), 2)
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "4K"), 4)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "2K"), 2000)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "4K"), 4000)
 
-    def test_legacy_chinese_label_config(self):
-        plugin = self.make_plugin({
+    def test_float_config_and_legacy_chinese_label_config(self):
+        plugin = self.make_plugin([
+            {"model": "m", "charge_amount": 0.05, "charge_amount_2k": 0.1, "charge_amount_4k": 0.2},
+        ])
+        self.assertEqual(plugin._get_tiered_charge_amount("m", None), 50)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "2K"), 100)
+        self.assertEqual(plugin._get_tiered_charge_amount("m", "4K"), 200)
+
+        legacy = self.make_plugin({
             "m": {
                 "扣除次数": 3,
                 "2K扣除次数": 5,
                 "4K扣除次数": 8,
             },
         })
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", None), 3)
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "2K"), 5)
-        self.assertEqual(plugin._get_tiered_deduction_cost("m", "4K"), 8)
+        # 旧「次数」键按迁移汇率（1 次 = 0.04 元）换算成厘：3 次 → 120 厘
+        self.assertEqual(legacy._get_tiered_charge_amount("m", None), 120)
+        self.assertEqual(legacy._get_tiered_charge_amount("m", "2K"), 200)
+        self.assertEqual(legacy._get_tiered_charge_amount("m", "4K"), 320)
 
     # ---- 集成：_get_required_invocation_cost ---------------------------
 
     def test_required_cost_base_when_no_tier(self):
-        plugin = self.make_plugin([{"model": "m", "deduction_count": 3}])
-        self.assertEqual(plugin._get_required_invocation_cost("m"), 3)
+        plugin = self.make_plugin([{"model": "m", "charge_amount": 3}])
+        self.assertEqual(plugin._get_required_invocation_cost("m"), 3000)
 
     def test_required_cost_2k_by_side(self):
-        plugin = self.make_plugin([{"model": "m", "deduction_count_2k": 5}])
+        plugin = self.make_plugin([{"model": "m", "charge_amount_2k": 5}])
         self.assertEqual(
             plugin._get_required_invocation_cost("m", image_bytes_list=[b"wide_2k"]),
-            5,
+            5000,
         )
 
     def test_required_cost_4k_by_resolution(self):
         plugin = self.make_plugin([
-            {"model": "m", "deduction_count": 3, "deduction_count_4k": 8},
+            {"model": "m", "charge_amount": 3, "charge_amount_4k": 8},
         ])
-        self.assertEqual(plugin._get_required_invocation_cost("m", resolution="4K"), 8)
+        self.assertEqual(plugin._get_required_invocation_cost("m", resolution="4K"), 8000)
 
     def test_required_cost_stacks_extra_quota(self):
         plugin = self.make_plugin([
             {
                 "model": "m",
-                "deduction_count": 1,
-                "deduction_count_2k": 2,
+                "charge_amount": 1,
+                "charge_amount_2k": 2,
                 "reference_image_limit": 1,
                 "extra_reference_image_quota": 1,
             },
         ])
-        # 3 张图，边长超限 → 2K 档(2) + 阶梯额外(2) = 4
+        # 3 张图，边长超限 → 2K 档(2000) + 阶梯额外(2 阶梯 × 1000) = 4000
         cost = plugin._get_required_invocation_cost("m", image_bytes_list=[b"wide_2k"] * 3)
-        self.assertEqual(cost, 4)
+        self.assertEqual(cost, 4000)
 
     def test_violation_cost_uses_tier(self):
         plugin = self.make_plugin([
-            {"model": "m", "deduction_count": 3, "deduction_count_2k": 5},
+            {"model": "m", "charge_amount": 3, "charge_amount_2k": 5},
         ])
-        # 违规结算同样按档位替换：2K 档 = 5
+        # 违规结算同样按档位替换：2K 档 = 5000
         cost = plugin._get_violation_deduction_cost("m", image_bytes_list=[b"wide_2k"])
-        self.assertEqual(cost, 5)
+        self.assertEqual(cost, 5000)
 
     def test_violation_cost_4k_by_command(self):
         plugin = self.make_plugin([
-            {"model": "m", "deduction_count_4k": 8},
+            {"model": "m", "charge_amount_4k": 8},
         ])
         cost = plugin._get_violation_deduction_cost("m", resolution="4K")
-        self.assertEqual(cost, 8)
+        self.assertEqual(cost, 8000)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,25 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from usage_store import UsageStore
+from usage_store import UsageStore, format_amount, yuan_to_amount
+
+
+class MoneyHelperTests(unittest.TestCase):
+    def test_yuan_to_amount_converts_to_milli(self):
+        self.assertEqual(yuan_to_amount(1), 1000)
+        self.assertEqual(yuan_to_amount(0.05), 50)
+        self.assertEqual(yuan_to_amount("0.001"), 1)
+        self.assertEqual(yuan_to_amount(3.0), 3000)
+        self.assertEqual(yuan_to_amount(None), 0)
+        self.assertEqual(yuan_to_amount("abc"), 0)
+
+    def test_format_amount_strips_trailing_zeros(self):
+        self.assertEqual(format_amount(0), "0")
+        self.assertEqual(format_amount(1), "0.001")
+        self.assertEqual(format_amount(50), "0.05")
+        self.assertEqual(format_amount(1234), "1.234")
+        self.assertEqual(format_amount(1000), "1")
+        self.assertEqual(format_amount(-50), "-0.05")
 
 
 class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -14,8 +32,8 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         self.history_path = Path(self.temp_dir.name) / "usage_history.json"
         self.store = UsageStore(self.history_path)
         await self.store.initialize(
-            {"10001": 8, "10002": 3},
-            {"20001": 12},
+            {"10001": 8000, "10002": 3000},
+            {"20001": 12000},
             {"date": "2026-08-14", "users": {"10001": 2}, "groups": {"20001": 2}},
         )
 
@@ -29,16 +47,16 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         overview = await self.store.get_overview()
 
         self.assertEqual(users["total"], 2)
-        self.assertEqual(next(item for item in users["items"] if item["user_id"] == "10001")["balance"], 8)
-        self.assertEqual(groups["items"][0]["balance"], 12)
+        self.assertEqual(next(item for item in users["items"] if item["user_id"] == "10001")["balance"], 8000)
+        self.assertEqual(groups["items"][0]["balance"], 12000)
         self.assertEqual(overview["summary"]["legacy_output_count"], 2)
         self.assertTrue(self.history_path.exists())
 
         await self.store.close()
         self.store = UsageStore(self.history_path)
-        await self.store.initialize({"10001": 99}, {"20001": 99}, {})
+        await self.store.initialize({"10001": 99000}, {"20001": 99000}, {})
         users_after_reopen = await self.store.list_users()
-        self.assertEqual(next(item for item in users_after_reopen["items"] if item["user_id"] == "10001")["balance"], 8)
+        self.assertEqual(next(item for item in users_after_reopen["items"] if item["user_id"] == "10001")["balance"], 8000)
 
     async def test_settlement_deducts_balance_and_records_event(self):
         result = await self.store.settle_generation(
@@ -54,17 +72,17 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
             outcome="success",
             http_status=200,
             output_count=1,
-            charged_units=5,
+            charged_amount=5000,
             deduction_source="group",
         )
-        self.assertEqual(result["balance_delta"], -5)
-        self.assertEqual(result["resulting_balance"], 7)
+        self.assertEqual(result["balance_delta"], -5000)
+        self.assertEqual(result["resulting_balance"], 7000)
 
         groups = await self.store.list_groups(start="2026-08-15T00:00:00")
         row = next(item for item in groups["items"] if item["group_id"] == "20001")
-        self.assertEqual(row["balance"], 7)
+        self.assertEqual(row["balance"], 7000)
         self.assertEqual(row["outputs"], 1)
-        self.assertEqual(row["charged_units"], 5)
+        self.assertEqual(row["charged_amount"], 5000)
 
         events = await self.store.list_events(model="actual-model")
         self.assertEqual(events["total"], 1)
@@ -74,7 +92,7 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.adjust_balance(
             subject_type="user",
             subject_id="10002",
-            amount=-2,
+            amount=-2000,
             timestamp="2026-08-15T10:30:00",
             source="web_admin",
         )
@@ -90,24 +108,24 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
             mode="文生图",
             outcome="success",
             output_count=1,
-            charged_units=9,
+            charged_amount=9000,
             deduction_source="user",
         )
-        self.assertEqual(result["balance_delta"], -1)
+        self.assertEqual(result["balance_delta"], -1000)
         event = (await self.store.list_events(model="m"))["items"][0]
-        self.assertEqual(event["charged_units"], 1)
+        self.assertEqual(event["charged_amount"], 1000)
 
     async def test_adjustment_never_creates_negative_balance(self):
         changed = await self.store.adjust_balance(
             subject_type="user",
             subject_id="10002",
-            amount=-99,
+            amount=-99000,
             timestamp="2026-08-15T11:00:00",
             source="web_admin",
             actor="admin",
             note="remove test quota",
         )
-        self.assertEqual(changed, {"before": 3, "after": 0, "applied_delta": -3})
+        self.assertEqual(changed, {"before": 3000, "after": 0, "applied_delta": -3000})
 
         events = await self.store.list_events(user_id="10002")
         adjustment = next(item for item in events["items"] if item["event_kind"] == "adjustment")
@@ -200,7 +218,7 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.adjust_balance(
             subject_type="user",
             subject_id="10003",
-            amount=10,
+            amount=10000,
             timestamp="2026-08-15T12:00:00",
             source="chat_admin",
         )
@@ -218,7 +236,7 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
                 mode="文生图",
                 outcome="success",
                 output_count=1,
-                charged_units=1,
+                charged_amount=1000,
                 deduction_source="user",
             )
 
@@ -229,6 +247,93 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(item["output_count"] for item in events["items"]), 10)
         saved = json.loads(self.history_path.read_text(encoding="utf-8"))
         self.assertEqual(saved["balances"]["user"]["10003"], 0)
+
+    async def test_list_events_filters_by_outcome(self):
+        for index, (outcome, status) in enumerate(
+            (("success", 200), ("failed", 400), ("success", 200), ("failed", 400))
+        ):
+            await self.store.settle_generation(
+                timestamp=f"2026-08-16T10:0{index}:00",
+                source="chat",
+                user_id="10001",
+                group_id=None,
+                logical_model="m",
+                actual_model="filter-model",
+                api_route="generic",
+                endpoint_type="images_generations",
+                mode="文生图",
+                outcome=outcome,
+                http_status=status,
+                output_count=1 if outcome == "success" else 0,
+                deduction_source=None,
+            )
+        await self.store.adjust_balance(
+            subject_type="user",
+            subject_id="10001",
+            amount=1000,
+            timestamp="2026-08-16T11:00:00",
+            source="web_admin",
+        )
+
+        success = await self.store.list_events(model="filter-model", outcome="success")
+        self.assertEqual(success["total"], 2)
+        self.assertTrue(all(item["outcome"] == "success" for item in success["items"]))
+
+        failed = await self.store.list_events(model="filter-model", outcome="failed")
+        self.assertEqual(failed["total"], 2)
+        self.assertTrue(all(
+            item["event_kind"] == "generation" and item["outcome"] != "success"
+            for item in failed["items"]
+        ))
+
+        # 全部：4 条生成事件 + 1 条调整事件（排除 setUp 建账当天的 opening_balance）
+        everything = await self.store.list_events(
+            user_id="10001", start="2026-08-16T00:00:00", end="2026-08-17T00:00:00",
+        )
+        self.assertEqual(everything["total"], 5)
+
+    async def test_v1_ledger_is_migrated_to_amount_units(self):
+        legacy = {
+            "version": 1,
+            "migration": {},
+            "balances": {"user": {"10001": 8}, "group": {"20001": 12}},
+            "user_identities": {},
+            "group_identities": {},
+            "ledger_events": [
+                {
+                    "id": 1, "occurred_at": "2026-08-14T10:00:00", "source": "chat",
+                    "event_kind": "generation", "user_id": "10001", "group_id": "",
+                    "actor": "", "identity_platform": "", "user_nickname_snapshot": "",
+                    "user_avatar_url_snapshot": "", "group_name_snapshot": "",
+                    "logical_model": "m", "actual_model": "m", "api_route": "generic",
+                    "endpoint_type": "images_generations", "generation_mode": "文生图",
+                    "outcome": "success", "http_status": 200, "output_count": 1,
+                    "charged_units": 3, "balance_subject_type": "user",
+                    "balance_subject_id": "10001", "balance_delta": -3,
+                    "resulting_balance": 5, "note": "", "is_legacy": 0, "legacy_scope": "",
+                }
+            ],
+            "next_event_id": 2,
+        }
+        self.history_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        store = UsageStore(self.history_path)
+        await store.initialize({}, {}, {})
+        # 汇率 1 次 = 0.04 元：8 次 → 320 厘，12 次 → 480 厘
+        balances = await store.export_balances()
+        self.assertEqual(balances["user"]["10001"], 320)
+        self.assertEqual(balances["group"]["20001"], 480)
+
+        event = (await store.list_events())["items"][0]
+        self.assertEqual(event["charged_amount"], 120)
+        self.assertEqual(event["balance_delta"], -120)
+        self.assertEqual(event["resulting_balance"], 200)
+
+        saved = json.loads(self.history_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["version"], 2)
+        self.assertIn("billing_v2", saved["migration"])
+        self.assertNotIn("charged_units", saved["ledger_events"][0])
+        await store.close()
 
     async def test_sqlite_import_preserves_events_and_json_balances_win(self):
         legacy_path = Path(self.temp_dir.name) / "usage_history.sqlite3"
@@ -257,14 +362,15 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
 
         imported_path = Path(self.temp_dir.name) / "imported.json"
         imported = UsageStore(imported_path, legacy_path)
-        await imported.initialize({"same": 9, "json-only": 4}, {}, {})
+        await imported.initialize({"same": 9000, "json-only": 4000}, {}, {})
 
         balances = await imported.export_balances()
-        self.assertEqual(balances["user"], {"same": 9, "json-only": 4})
-        self.assertEqual(balances["group"]["legacy-group"], 6)
+        self.assertEqual(balances["user"], {"same": 9000, "json-only": 4000})
+        self.assertEqual(balances["group"]["legacy-group"], 240)
         events = await imported.list_events(model="legacy-model")
         self.assertEqual(events["items"][0]["id"], 42)
         self.assertEqual(events["items"][0]["user_nickname"], "旧用户")
+        self.assertEqual(events["items"][0]["charged_amount"], 40)
         self.assertTrue(legacy_path.exists())
         saved = json.loads(imported_path.read_text(encoding="utf-8"))
         self.assertTrue(saved["migration"]["legacy_sqlite_imported"])

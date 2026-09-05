@@ -5,6 +5,7 @@
     view: "overview",
     userPage: 1,
     groupPage: 1,
+    eventsPage: 1,
 
     // Configuration
     configRevision: null,
@@ -78,6 +79,13 @@
     const start = $("#start-date")?.value || "";
     const end = $("#end-date")?.value || "";
     return { ...(start ? { start } : {}), ...(end ? { end } : {}), ...extra };
+  }
+
+  function eventsParams(extra = {}) {
+    // 事件列表独立筛选：选择了日期时只看当天，否则跟随顶部时间范围
+    const day = $("#events-day")?.value || "";
+    const base = day ? { start: day, end: day } : rangeParams();
+    return { ...base, ...extra };
   }
 
   async function requestBridge(method, endpoint, payload) {
@@ -180,10 +188,16 @@
     return makePrivacyToggle(element, mask, label);
   }
 
+  function fmtYuan(milli) {
+    // 后端金额以「厘」(1 厘 = 0.001 元) 整数存储，这里换算为元并去掉尾零
+    const value = (Number(milli) || 0) / 1000;
+    return String(Number(value.toFixed(3)));
+  }
+
   function balanceCell(value, className = "text-right font-mono") {
     const td = document.createElement("td");
     td.className = className;
-    td.append(privacyValue(value, "balance", "余额", "span"));
+    td.append(privacyValue(fmtYuan(value), "balance", "余额", "span"));
     return td;
   }
 
@@ -311,29 +325,39 @@
   // --- Overview ---
   async function loadOverview() {
     setStatus("正在获取概览与账本数据...");
-    const [overview, events] = await Promise.all([
-      get("usage/overview", rangeParams()),
-      get("usage/events", rangeParams({ page: 1, page_size: 15 })),
-    ]);
+    const overview = await get("usage/overview", rangeParams());
 
     const summary = overview.summary || {};
     $("#metrics").replaceChildren(
       metric("成功输出", summary.successful_outputs, "theme-blue", "生成完成数"),
-      metric("实际扣次", summary.charged_units, "theme-amber", "已消耗额度"),
-      metric("失败扣次", summary.failed_charged_units, "theme-rose", "失败且未返还"),
-      metric("LLM 工具免扣次", summary.unbilled_llm_outputs, "theme-teal", "插件免计费调用"),
+      metric("本次消耗", fmtYuan(summary.charged_amount) + " 元", "theme-amber", "已消耗金额"),
+      metric("失败扣费", fmtYuan(summary.failed_charged_amount) + " 元", "theme-rose", "失败且未返还"),
+      metric("LLM 工具免计费", summary.unbilled_llm_outputs, "theme-teal", "插件免计费调用"),
       metric("旧版汇总", summary.legacy_output_count, "theme-slate", "历史日统计")
     );
 
     renderTrend(overview.trend || []);
     renderModels(overview.models || []);
-    renderEvents(events.items || []);
+    await loadEvents();
 
     if (summary.legacy_output_count) {
       setStatus("包含旧版日汇总数据；旧版不包含模型、路由通道及单次请求详情。", "info");
     } else {
       setStatus("");
     }
+  }
+
+  async function loadEvents() {
+    const data = await get("usage/events", eventsParams({
+      outcome: $("#events-outcome")?.value || "",
+      page: state.eventsPage,
+      page_size: Number($("#events-page-size")?.value) || 15,
+    }));
+    renderEvents(data.items || []);
+    pagination($("#events-pagination"), data, (page) => {
+      state.eventsPage = page;
+      loadEvents().catch(handleError);
+    });
   }
 
   function renderTrend(items) {
@@ -348,7 +372,7 @@
 
     target.className = "trend-container";
     const value = (item, key) => Math.max(0, Number(item[key]) || 0);
-    const peak = Math.max(...items.map((item) => Math.max(value(item, "outputs"), value(item, "charged_units"))), 1);
+    const peak = Math.max(...items.map((item) => Math.max(value(item, "outputs"), value(item, "charged_amount"))), 1);
     const chartHeight = 180;
     const padding = { top: 16, right: 16, bottom: 30, left: 30 };
     const chartWidth = Math.max(360, items.length * 56 + padding.left + padding.right);
@@ -369,7 +393,7 @@
 
     const title = svgElement("title");
     title.id = "trend-chart-title";
-    title.textContent = "每日成功输出与实际扣次走势";
+    title.textContent = "每日成功输出与本次消耗走势";
     const description = svgElement("desc");
     description.id = "trend-chart-description";
     description.textContent = `统计 ${items.length} 个日期，从 ${items[0].date} 至 ${items[items.length - 1].date}。`;
@@ -392,18 +416,18 @@
     outputLine.setAttribute("points", buildPoints("outputs"));
     const chargeLine = svgElement("polyline");
     chargeLine.classList.add("trend-line", "is-charge");
-    chargeLine.setAttribute("points", buildPoints("charged_units"));
+    chargeLine.setAttribute("points", buildPoints("charged_amount"));
     chart.append(outputLine, chargeLine);
 
     const labelInterval = Math.max(1, Math.ceil(items.length / 8));
     for (const [index, item] of items.entries()) {
       const x = xAt(index);
       const outputs = value(item, "outputs");
-      const chargedUnits = value(item, "charged_units");
+      const chargedAmount = value(item, "charged_amount");
       const point = svgElement("g");
       point.classList.add("trend-point");
       const pointTitle = svgElement("title");
-      pointTitle.textContent = `${item.date}\n成功输出: ${outputs}\n实际扣次: ${chargedUnits}`;
+      pointTitle.textContent = `${item.date}\n成功输出: ${outputs}\n本次消耗: ${fmtYuan(chargedAmount)} 元`;
 
       const outputMarker = svgElement("circle");
       outputMarker.classList.add("trend-marker", "is-output");
@@ -466,7 +490,7 @@
         modelTd,
         routeTd,
         cell(item.outputs, "text-right font-mono"),
-        cell(item.charged_units, "text-right font-mono"),
+        cell(fmtYuan(item.charged_amount), "text-right font-mono"),
         cell(item.attempts, "text-right font-mono")
       );
       target.append(row);
@@ -557,9 +581,9 @@
       } else if (outcomeVal === "checkin" || outcomeVal === "签到") {
         outcomeBadge.className = "badge badge-info";
         outcomeBadge.textContent = "签到";
-      } else if (outcomeVal === "skipped" || outcomeVal === "免扣次") {
+      } else if (outcomeVal === "skipped" || outcomeVal === "免扣费") {
         outcomeBadge.className = "badge badge-neutral";
-        outcomeBadge.textContent = "免扣次";
+        outcomeBadge.textContent = "免扣费";
       } else {
         outcomeBadge.className = "badge badge-error";
         outcomeBadge.textContent = item.outcome || "失败";
@@ -576,8 +600,8 @@
       // 8. Output count
       const outputTd = cell(item.output_count !== undefined && item.output_count !== null ? item.output_count : "-", "text-right font-mono");
 
-      // 9. Charged units
-      const chargeTd = cell(item.charged_units !== undefined && item.charged_units !== null ? item.charged_units : "-", "text-right font-mono");
+      // 9. Charged amount
+      const chargeTd = cell(item.charged_amount !== undefined && item.charged_amount !== null ? fmtYuan(item.charged_amount) : "-", "text-right font-mono");
 
       // 10. Balance Delta
       const deltaTd = document.createElement("td");
@@ -588,10 +612,10 @@
         deltaText = "-";
       } else if (deltaVal > 0) {
         deltaTd.className += " delta-positive";
-        deltaText = `+${deltaVal}`;
+        deltaText = `+${fmtYuan(deltaVal)}`;
       } else if (deltaVal < 0) {
         deltaTd.className += " delta-negative";
-        deltaText = String(deltaVal);
+        deltaText = fmtYuan(deltaVal);
       } else {
         deltaTd.className += " delta-zero";
         deltaText = "0";
@@ -602,7 +626,7 @@
         const resSpan = document.createElement("span");
         resSpan.className = "metric-hint font-mono";
         resSpan.style.display = "block";
-        resSpan.textContent = `余: ${item.resulting_balance}`;
+        resSpan.textContent = `余: ${fmtYuan(item.resulting_balance)}`;
         makePrivacyToggle(resSpan, "balance", "余额");
         deltaTd.append(resSpan);
       }
@@ -675,14 +699,14 @@
         const actionBtn = document.createElement("button");
         actionBtn.className = "button secondary button-sm";
         actionBtn.type = "button";
-        actionBtn.textContent = "调整次数";
+        actionBtn.textContent = "调整余额";
         actionBtn.onclick = () => openAdjust("user", item.user_id, item.nickname ? `${item.nickname} (${item.user_id})` : `QQ ${item.user_id}`);
         actionTd.append(actionBtn);
 
         row.append(
           personTd,
           cell(item.outputs, "text-right font-mono"),
-          cell(item.charged_units, "text-right font-mono"),
+          cell(fmtYuan(item.charged_amount), "text-right font-mono"),
           balanceCell(item.balance),
           actionTd
         );
@@ -721,14 +745,14 @@
         const actionBtn = document.createElement("button");
         actionBtn.className = "button secondary button-sm";
         actionBtn.type = "button";
-        actionBtn.textContent = "调整次数";
+        actionBtn.textContent = "调整余额";
         actionBtn.onclick = () => openAdjust("group", item.group_id, item.name ? `${item.name} (${item.group_id})` : `群 ${item.group_id}`);
         actionTd.append(actionBtn);
 
         row.append(
           groupTd,
           cell(item.outputs, "text-right font-mono"),
-          cell(item.charged_units, "text-right font-mono"),
+          cell(fmtYuan(item.charged_amount), "text-right font-mono"),
           cell(item.active_users, "text-right font-mono"),
           balanceCell(item.balance),
           actionTd
@@ -1978,7 +2002,7 @@
   function openAdjust(type, id, label) {
     $("#adjust-subject-type").value = type;
     $("#adjust-subject-id").value = id;
-    $("#adjust-title").textContent = `调整${type === "user" ? "用户" : "群组"}额度`;
+    $("#adjust-title").textContent = `调整${type === "user" ? "用户" : "群组"}余额`;
     $("#adjust-subject").textContent = label;
     $("#adjust-amount").value = "";
     $("#adjust-note").value = "";
@@ -2054,6 +2078,14 @@
         loadGroups().catch(handleError);
       }
     });
+
+    // Overview Events Filters (day / outcome / page size)
+    for (const control of ["#events-day", "#events-outcome", "#events-page-size"]) {
+      $(control)?.addEventListener("change", () => {
+        state.eventsPage = 1;
+        loadEvents().catch(handleError);
+      });
+    }
 
     // Presets View Actions
     $("#preset-search-input")?.addEventListener("input", (e) => {
@@ -2215,11 +2247,11 @@
     $("#adjust-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       try {
-        const amount = Number($("#adjust-amount")?.value);
+        const amount = Number((Number($("#adjust-amount")?.value) || 0).toFixed(3));
         if (!amount) {
-          throw new Error("变更额度不能为 0");
+          throw new Error("变更金额不能为 0");
         }
-        setStatus("正在提交额度调整...");
+        setStatus("正在提交余额调整...");
         await post("usage/adjust", {
           subject_type: $("#adjust-subject-type")?.value,
           subject_id: $("#adjust-subject-id")?.value,
@@ -2227,7 +2259,7 @@
           note: $("#adjust-note")?.value.trim() || "",
         });
         closeAdjust();
-        setStatus("用量额度调整成功。", "success");
+        setStatus("余额调整成功。", "success");
         await loadCurrent();
       } catch (error) {
         handleError(error);

@@ -19,7 +19,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - **灵活的输入方式**：支持直接发送图片、回复图片、或`@用户`来使用其头像进行制作。
 - **强大的管理功能 (管理员限定)**：
   - **Key 管理**：通过指令动态添加、查看、删除 API Key，支持配置多个 Key 并自动轮换使用。
-  - **用户次数管理**：可为普通用户设置使用次数，并通过指令进行增加和查询，实现轻量级付费或激励机制。
+  - **用户余额管理**：可为普通用户设置余额（按金额计费，精确到 0.001 元），并通过指令进行增加和查询，实现轻量级付费或激励机制。
 - **高度可定制**：所有指令的默认提示词（Prompt）都在后台配置文件中开放，也可按模型指定最终提示词模板。
 - **代理支持**：内置 HTTP / SOCKS5 代理支持，方便在特殊网络环境下部署。
 
@@ -44,7 +44,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `gemini_model_list` | 命中后走 Gemini 端点的模型列表 |
 | `command_model_list` | 触发指令和模型名绑定列表，不改变默认触发指令 |
 | `model_prompt_template_list` | 预设提示词列表，按模型指定最终发送给绘图接口的提示词模板 |
-| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、扣次、2K/4K扣除次数、违规失败扣次和最大输出/思考 Token 始终生效；`parameter_mode` 选择唯一生效的 GPT/Gemini/Grok/Seedream 厂商参数，或 `none` 禁用厂商参数 |
+| `model_parameter_list` | 模型参数设置列表；模型名、参考图数量限制、单次扣费金额（元，精确到 0.001）、2K/4K 扣费、违规失败扣费和最大输出/思考 Token 始终生效；`parameter_mode` 选择唯一生效的 GPT/Gemini/Grok/Seedream 厂商参数，或 `none` 禁用厂商参数 |
 | `model_mapping_list` | 模型热备映射列表；选择源模型后按映射项的优先权重从高到低请求实际模型，同权重按列表顺序 |
 | `chat_completions_model_list` | 走 `/v1/chat/completions` 的模型列表。端点模型列表为空或模型未匹配时，也默认走该端点 |
 | `chat_completions_system_prompt_enabled` | 是否在 `/v1/chat/completions` 请求中发送 system 系统提示词，默认开启 |
@@ -59,9 +59,9 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `error_default_message` / `error_400_message` 等 | 自定义错误模板。支持 `{status_code}`、`{elapsed}`、`{detail}`、`{provider_message}`、`{model}`、`{endpoint_type}`、`{endpoint}`、`{request_id}` 等变量 |
 | `content_policy_warning_message` | 上游判定内容违规、安全拦截或命中配置错误码时发送的独立警告内容；支持成功提示模板的通用变量和批量变量 |
 | `prefix` | 是否需要命令前缀或 @ 才触发 |
-| `enable_llm_tools` | 是否向 AstrBot 对话模型注册文生图、图生图工具，默认关闭；工具调用不检查或扣除用户/群组次数 |
+| `enable_llm_tools` | 是否向 AstrBot 对话模型注册文生图、图生图工具，默认关闭；工具调用不检查或扣除用户/群组余额 |
 | `llm_image_generation_model_list` | 仅供 LLM 生图工具报告和选择的源模型 ID 白名单；启用 LLM 工具时至少配置一个，不影响普通指令、默认模型、模型切换、路由或热备映射 |
-| `maintenance_mode` | 维护模式开关。开启后拦截所有插件命令；不调用上游 API，也不扣除次数，可在后台关闭恢复使用 |
+| `maintenance_mode` | 维护模式开关。开启后拦截所有插件命令；不调用上游 API，也不扣除费用，可在后台关闭恢复使用 |
 | `maintenance_message` | 维护模式下返回给用户的提示文本；留空时使用默认提示 |
 | `extra_prefix` | 自定义提示词前缀（如 bnn，用 `bnn <提示词>` 调用；也支持 `bnn <预设名>` 或 `bnn <预设名>%<追加内容>` 精确调用 `prompt_list` 中的自定义预设） |
 | `preset_list_command` | 预设/提示词列表触发指令，默认 `手办化列表`；修改后仅新配置的命令可触发，`lm列表`、`lmlist`、`预设列表` 不再兼容 |
@@ -70,7 +70,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `resolution_symbol` | 临时覆盖模型自适应分辨率的符号，默认 `x`；`x1/x2/x4` 对应 `1K/2K/4K`，可与批量倍率、比例任意排序组合 |
 | `aspect_ratio_symbol` | 临时覆盖参考图比例的符号，默认 `=`；格式为 `=宽:高`，支持英文 `:` 和中文 `：`，可与批量倍率、分辨率级别任意排序组合；可用于 GPT 或 Gemini 的自适应比例 |
 | `default_batch_count` | 未写倍率时的默认批量数，默认 1 |
-| `max_batch_multiplier` | 单次指令最大生成倍率，可填 1-100，扣次按实际倍率计算 |
+| `max_batch_multiplier` | 单次指令最大生成倍率，可填 1-100，扣费按实际倍率计算 |
 | `max_batch_concurrency` | 批量生成最大并发数，可填 1-20，倍率更大时会排队执行 |
 | `use_proxy` / `proxy_url` | 启用代理与代理地址（支持 `http(s)://` 或 `socks5://` 等格式） |
 | `timeout` | 请求超时（秒），默认 120 |
@@ -79,14 +79,14 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `help_command` | 帮助菜单触发命令，默认 `手办化帮助`；不需要写 `#`，`lmh` 和 `lm帮助` 不再作为别名 |
 | `help_text` | 自定义帮助菜单显示文本，支持 Markdown；可使用变量 `{custom_command_model_bindings}`，会自动替换为自定义提示词前缀与模型的绑定列表，未绑定时显示默认模型，箭头会按最长触发词自动对齐 |
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
-| `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群不限制次数；全局管理员可无视群黑名单 |
-| `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组次数限制 |
-| `resolution_1k_cost` / `resolution_2k_cost` / `resolution_4k_cost` | 分辨率档位的扣除次数；“1K超限自动转2K”实际升级时使用 `resolution_2k_cost`，默认分别为 1、2、4 |
-| `failure_deduction_status_codes` | 触发违规警告和失败扣次判断的 HTTP 状态码列表，默认仅 `400`；命中后会停止模型热备切换 |
-| `deduct_on_failure_status_codes` | 未配置实际调用模型参数项时，错误码/违规是否扣除次数的全局回退开关，默认开启；模型项的“违规是否扣次数”优先 |
-| `enable_checkin` | 是否启用每日签到获取次数 |
-| `checkin_fixed_reward` | 签到固定奖励（未开启随机时） |
-| `enable_random_checkin` / `checkin_random_reward_max` | 签到随机奖励开关与最大值 |
+| `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群免费不扣费；全局管理员可无视群黑名单 |
+| `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组余额限制 |
+| `resolution_1k_cost` / `resolution_2k_cost` / `resolution_4k_cost` | 分辨率档位的扣除金额（元，精确到 0.001）；“1K超限自动转2K”实际升级时使用 `resolution_2k_cost`，默认分别为 1、2、4 元 |
+| `failure_deduction_status_codes` | 触发违规警告和失败扣费判断的 HTTP 状态码列表，默认仅 `400`；命中后会停止模型热备切换 |
+| `deduct_on_failure_status_codes` | 未配置实际调用模型参数项时，错误码/违规是否扣费的全局回退开关，默认开启；模型项的“违规是否扣费”优先 |
+| `enable_checkin` | 是否启用每日签到获取余额 |
+| `checkin_fixed_reward` | 签到固定奖励（元，未开启随机时） |
+| `enable_random_checkin` / `checkin_random_reward_max` | 签到随机奖励开关与最大值（元） |
 | `prompt_list` | 预设提示词列表，每项包含 `指令` / `提示词`；默认预设也来自配置，可在 WebUI 改名、修改或删除。旧 `触发词:提示词` 与历史 `prompts` 会自动迁移 |
 
 > 路径说明：`generic_api_url` 是所有路由的共享服务地址。它可填写服务根地址、`/v1`，或完整 OpenAI 端点 URL；命中 `gemini_model_list` 的模型会先规范化为服务根，再自动请求 `/v1beta/models/{model}:generateContent`。其余模型按端点模型列表使用 OpenAI `/v1/chat/completions`、`/v1/images/generations` 或 `/v1/images/edits`。未匹配的模型默认走 Chat Completions。同一模型同时配置在 `images_generations_model_list` 和 `images_edits_model_list` 时，文生图走 `/v1/images/generations`，图生图走 `/v1/images/edits`。新配置不再需要 Gemini 专属地址或 Key。
@@ -101,15 +101,15 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 ### Web 用量与模型路由管理
 
-插件提供 `pages/usage-dashboard/` 管理页面，AstrBot 发现插件页面后可在插件 Web 页面中打开“用量与模型路由”。页面包含概览、用户、群组、配置和独立预设提示词视图：可查看成功输出、实际扣次、失败扣次、模型/端点分布、当前余额和最新 15 条账本；也可调整用户或群组额度，维护全部插件普通设置、敏感连接配置、模型目录与路由、自定义触发词、指令模型绑定、热备、模型提示词模板和按端点自动筛选的模型参数。
+插件提供 `pages/usage-dashboard/` 管理页面，AstrBot 发现插件页面后可在插件 Web 页面中打开“用量与模型路由”。页面包含概览、用户、群组、配置和独立预设提示词视图：可查看成功输出、本次消耗（元）、失败扣费、模型/端点分布、当前余额和用量明细账本；明细支持按天筛选、按结果筛选（全部/成功/失败）和翻页（默认每页 15 条，可选 15/30/50/100），也可调整用户或群组余额，维护全部插件普通设置、敏感连接配置、模型目录与路由、自定义触发词、指令模型绑定、热备、模型提示词模板和按端点自动筛选的模型参数。
 
-页面访问由 AstrBot WebUI 的登录会话控制，插件不再维护额外的 `web_dashboard_admin_usernames` 用户名白名单。网页调整额度时，当前 AstrBot 后台用户名仍会作为账本操作人记录。
+页面访问由 AstrBot WebUI 的登录会话控制，插件不再维护额外的 `web_dashboard_admin_usernames` 用户名白名单。网页调整余额时，当前 AstrBot 后台用户名仍会作为账本操作人记录。
 
-用量账本保存到插件数据目录的 `usage_history.json`，同时继续同步原有 `user_counts.json` 与 `group_counts.json`，因此降级到旧插件版本时仍会保留最新余额。账本更新采用“写入临时文件后原子替换”的方式，不创建或写入 SQLite/WAL 文件。首次升级时，如果尚不存在 `usage_history.json` 但检测到旧 `usage_history.sqlite3`，插件会只读导入余额、身份快照和全部账本事件；当前两份次数 JSON 的余额优先，SQLite 中独有的主体会补入。导入成功后旧 SQLite 文件会保留为备份，不会自动删除；确认 `usage_history.json` 完整后可由管理员自行归档或删除。旧版 `daily_stats.json` 只能迁移为“旧版日汇总”，不包含真实请求时间、模型、路由、扣次或单次请求详情，也不会伪造这些数据。新版本启用后会记录聊天命令、LLM 生图工具、热备中间失败、签到和管理员调整的账本事件。
+用量账本保存到插件数据目录的 `usage_history.json`（金额单位为「厘」，1 厘 = 0.001 元），余额同步写入 `user_balances.json` 与 `group_balances.json`。升级到 v2.0.0 后首次启动时自动迁移，无需手工处理：旧版按次的 `user_counts.json` / `group_counts.json` 与 v1 账本按迁移汇率（`LEGACY_COUNT_TO_YUAN`，即 **1 次 = 0.04 元**）自动换算成金额并标记迁移记录，余额立即物化为 `user_balances.json` / `group_balances.json`，旧文件保留为备份不会删除，重复启动不会二次换算。账本更新采用“写入临时文件后原子替换”的方式，不创建或写入 SQLite/WAL 文件。首次升级时，如果尚不存在 `usage_history.json` 但检测到旧 `usage_history.sqlite3`，插件会只读导入余额、身份快照和全部账本事件并按同一汇率换算；导入成功后旧 SQLite 文件会保留为备份，不会自动删除；确认 `usage_history.json` 完整后可由管理员自行归档或删除。旧版 `daily_stats.json` 只能迁移为“旧版日汇总”，不包含真实请求时间、模型、路由、扣费或单次请求详情，也不会伪造这些数据。新版本启用后会记录聊天命令、LLM 生图工具、热备中间失败、签到和管理员调整的账本事件。
 
-账本只记录用于审计和统计的时间、来源、用户/群组 ID、身份快照、模型、路由、端点、结果、HTTP 状态、输出数、实际扣次和余额变动。不会保存提示词、图片、API Key、请求头或上游原始响应。QQ 数字 ID 默认使用官方 QQ 头像地址；昵称和群名称从后续事件中尽力更新，缺失时页面分别显示 `QQ <号码>` 与 `群 <群号>`。账本无法初始化或写入失败时，正常生成会继续使用原有 JSON 次数逻辑，仪表盘接口则返回统计不可用。
+账本只记录用于审计和统计的时间、来源、用户/群组 ID、身份快照、模型、路由、端点、结果、HTTP 状态、输出数、实际扣费金额（`charged_amount`）和余额变动。不会保存提示词、图片、API Key、请求头或上游原始响应。QQ 数字 ID 默认使用官方 QQ 头像地址；昵称和群名称从后续事件中尽力更新，缺失时页面分别显示 `QQ <号码>` 与 `群 <群号>`。账本无法初始化或写入失败时，正常生成会继续使用原有 JSON 余额逻辑，仪表盘接口则返回统计不可用。
 
-插件日志会额外写入数据目录 `logs/figurine_pro.log`，按 5 MiB 轮转并保留最近 5 个备份，同时仍发送至 AstrBot 原有日志管道。日志可能包含消息内容、用户或群组标识、以及已脱敏的请求信息，应按敏感运行日志限制访问权限。
+插件日志会额外写入数据目录 `logs/figurine_pro.log`，按天轮转（每天 0 点切分为 `figurine_pro.log.日期`），默认保留最近 30 天，同时仍发送至 AstrBot 原有日志管道。日志可能包含消息内容、用户或群组标识、以及已脱敏的请求信息，应按敏感运行日志限制访问权限。
 
 配置页覆盖全部非敏感插件设置、模型路由、触发词、绑定、热备、模板和模型参数；`prompt_list` 在独立的预设提示词页面保存。控制台加载时会兼容旧的热备对象、列表和 `源模型:映射模型` 字符串格式，保存时统一转换为当前 schema 列表，不会再因页面显示为空而清空热备。API Key、认证代理，以及带用户认证或敏感查询参数的共享服务地址仅通过写入式敏感配置面板管理，页面不会读取或回显其明文；认证代理和认证服务地址可在该面板首次保存、替换或清除，无认证代理和无认证服务地址仍在普通设置中编辑。普通配置与敏感配置共享配置版本；预设使用独立的预设内容版本。直接编辑配置文件并重载后，陈旧的对应页面保存会被拒绝，避免覆盖新配置。代理、超时、下载限制/重试，以及 LLM 工具开关和模型白名单会标注为重载后生效；其他配置在保存后供后续生成请求直接读取。
 
@@ -122,7 +122,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 工具 schema 会明确引导 LLM 在用户要求横图、竖图、海报、壁纸等构图时传递 `aspect_ratio`，例如 `1:1`、`16:9`、`9:16`、`4:3`、`3:4`。工具不暴露分辨率参数：Generic 的 `size` 和 Gemini 的 `imageSize` 始终由实际热备模型的 `model_parameter_list` 配置决定。显式比例会优先于首图比例；Generic Images 会按实际模型的默认自适应分辨率计算合法 `size`，Gemini 会映射到最接近的官方 `aspectRatio` 枚举。
 
-工具调用与聊天命令使用相同的模型热备、路由、模型提示词模板、模型参数和图片下载限制。它不读取、不检查也不扣除用户/群组次数，仍会记录日生成统计。成功时图片直接发送到会话，并向后续 LLM 返回不含图片 Base64 或密钥的 JSON 摘要。维护模式开启时，工具同样不会请求上游。
+工具调用与聊天命令使用相同的模型热备、路由、模型提示词模板、模型参数和图片下载限制。它不读取、不检查也不扣除用户/群组余额，仍会记录日生成统计。成功时图片直接发送到会话，并向后续 LLM 返回不含图片 Base64 或密钥的 JSON 摘要。维护模式开启时，工具同样不会请求上游。
 
 ### 按模型预设提示词模板
 
@@ -157,23 +157,24 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 
 收到请求的开始消息显示源模型，便于对应用户选择；生成成功或最终失败消息中的模型名显示实际请求的映射模型。
 
-任何未成功生成图片的结果，包括上游 HTTP 错误、超时、响应无图片或图片下载失败，都会继续切换到下一条热备模型；但上游判定内容违规/安全拦截，或 HTTP 状态码命中 `failure_deduction_status_codes` 时会立即停止热备，并单独发送违规内容警告，不再请求后续模型。全部模型失败后才向用户返回最后一次失败结果；中间失败不会单独扣次。
+任何未成功生成图片的结果，包括上游 HTTP 错误、超时、响应无图片或图片下载失败，都会继续切换到下一条热备模型；但上游判定内容违规/安全拦截，或 HTTP 状态码命中 `failure_deduction_status_codes` 时会立即停止热备，并单独发送违规内容警告，不再请求后续模型。全部模型失败后才向用户返回最后一次失败结果；中间失败不会单独扣费。
 
 每次尝试保留源模型和实际调用模型两个身份：提示词模板、上游 URL、Gemini URL 中的模型名，以及 Generic JSON 或 multipart 的 `model` 字段始终使用实际调用模型。实际模型在 Gemini、Chat Completions、Images Generations 或 Images Edits 任一路由列表中有显式配置时，完整采用它自己的路由；实际模型没有任何显式路由时，才继承源模型的显式路由；两者均未配置时使用 Generic Chat Completions。路由继承只决定端点，绝不把实际请求模型 ID 替换为源模型 ID。
 
-模型参数遵循同样的整项规则：实际模型存在 `model_parameter_list` 条目时，该条目完整覆盖源模型条目；只有实际模型完全没有条目时才继承源模型。目标条目中的 `false`、`0` 和 `parameter_mode=none` 都是明确设置，不会回退到源模型。成功、最终失败、违规扣次、参考图截断和账本路由/端点均按该候选模型实际使用的上下文结算；配额预检会按所有候选模型中的最高单次扣次检查，避免备用模型扣次更高时超额。
+模型参数遵循同样的整项规则：实际模型存在 `model_parameter_list` 条目时，该条目完整覆盖源模型条目；只有实际模型完全没有条目时才继承源模型。目标条目中的 `false`、`0` 和 `parameter_mode=none` 都是明确设置，不会回退到源模型。成功、最终失败、违规扣费、参考图截断和账本路由/端点均按该候选模型实际使用的上下文结算；配额预检会按所有候选模型中的最高单次扣费检查，避免备用模型扣费更高时超额。
 
 ### 模型参数设置
 
-`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式。模型名、扣除次数、最大输出/思考 Token、默认分辨率和“默认传递 size”位于每项最上方，始终生效；每项通过唯一的 `parameter_mode` 选择无厂商参数、GPT、Gemini、Grok 或 Seedream。切换模式只改变本次请求允许发送的厂商字段，不会删除其他模式已填写的值。
+`model_parameter_list` 使用与“触发指令模型绑定”相同的列表对象形式。模型名、扣费金额、最大输出/思考 Token、默认分辨率和“默认传递 size”位于每项最上方，始终生效；每项通过唯一的 `parameter_mode` 选择无厂商参数、GPT、Gemini、Grok 或 Seedream。切换模式只改变本次请求允许发送的厂商字段，不会删除其他模式已填写的值。
 
 - `模型`：填写模型列表或端点模型列表中的模型名。
 - `参考图数量限制`：默认 `0`，继承全局 `max_images_count`；填写正数时，会按实际热备模型和全局设置的较小值截取参考图。普通命令和 LLM 图生图工具共用此规则。
-- `超限参考图阶梯额度`：默认 `0`。当 `参考图数量限制` 为正且本项也为正时启用：超出软限的参考图不再被截断，而是发送到全局 `max_images_count` 硬上限，并按阶梯额外扣次。每超出本项数量 = 1 个阶梯（向上取整），每阶梯固定额外扣除 **1 次**（与 `该模型扣除次数`、分辨率升级均无关）。例：限制 `2`、额度 `2` 时，传 `3/4` 张 = 多扣 `1` 次，`5/6` 张 = 多扣 `2` 次，`7` 张 = 多扣 `3` 次。批量生成时每批次都会叠加该额外扣次；命中违规或失败错误码时同样扣除。本项为 `0` 或 `参考图数量限制` 为 `0` 时不启用，维持原有截断行为。
-- `该模型扣除次数`：每次生成扣除多少次，默认 `1`；不受厂商参数模式影响，批量生成还会乘以实际生成倍率。
-- `2K扣除次数`：默认 `0`。命中 2K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：参考图任一边长超过 `2000`（取所有参考图最大边长，读取失败跳过）、`自适应比例分辨率` 设置为 `2K`、命令使用 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率的自适应结果升到 2K。填 `0` 时继承全局“2K 扣除次数”（`resolution_2k_cost`，默认 `2`）。超限参考图阶梯额外扣次仍独立叠加。
-- `4K扣除次数`：默认 `0`。命中 4K 档位时**替换**“该模型扣除次数”结算（不叠加）。触发条件（任一满足即可）：`自适应比例分辨率` 设置为 `4K`、命令使用 `x4`。暂不按参考图边长检测。填 `0` 时继承全局“4K 扣除次数”（`resolution_4k_cost`，默认 `4`）。4K 优先于 2K；超限参考图阶梯额外扣次仍独立叠加。
-- `违规是否扣次数`：默认关闭。该模型发生内容安全/政策违规，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，是否按该模型实际命中的扣次档位（基础/2K/4K）扣次。模型单独设置优先于全局 `deduct_on_failure_status_codes`；未配置该模型参数项时才回退到全局开关。
+- `超限参考图阶梯额度`：默认 `0`。当 `参考图数量限制` 为正且本项也为正时启用：超出软限的参考图不再被截断，而是发送到全局 `max_images_count` 硬上限，并按阶梯额外加费。每超出本项数量 = 1 个阶梯（向上取整），每阶梯按 `超限参考图每阶梯加费` 收费（默认 **1 元**，与 `该模型单次生成扣费`、分辨率升级均无关）。例：限制 `2`、额度 `2` 时，传 `3/4` 张 = 多收 `1` 个阶梯，`5/6` 张 = 多收 `2` 个阶梯，`7` 张 = 多收 `3` 个阶梯。批量生成时每批次都会叠加该额外加费；命中违规或失败错误码时同样收取。本项为 `0` 或 `参考图数量限制` 为 `0` 时不启用，维持原有截断行为。
+- `超限参考图每阶梯加费`：默认 `1` 元，阶梯功能启用时每个阶梯额外加收的金额（元，精确到 `0.001`）。
+- `该模型单次生成扣费`：每次生成扣除多少元，默认 `1` 元；不受厂商参数模式影响，批量生成还会乘以实际生成倍率。
+- `2K单次扣费`：默认 `0`。命中 2K 档位时**替换**“该模型单次生成扣费”结算（不叠加）。触发条件（任一满足即可）：参考图任一边长超过 `2000`（取所有参考图最大边长，读取失败跳过）、`自适应比例分辨率` 设置为 `2K`、命令使用 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率的自适应结果升到 2K。填 `0` 时继承全局“2K 扣除金额”（`resolution_2k_cost`，默认 `2` 元）。超限参考图阶梯加费仍独立叠加。
+- `4K单次扣费`：默认 `0`。命中 4K 档位时**替换**“该模型单次生成扣费”结算（不叠加）。触发条件（任一满足即可）：`自适应比例分辨率` 设置为 `4K`、命令使用 `x4`。暂不按参考图边长检测。填 `0` 时继承全局“4K 扣除金额”（`resolution_4k_cost`，默认 `4` 元）。4K 优先于 2K；超限参考图阶梯加费仍独立叠加。
+- `违规是否扣费`：默认关闭。该模型发生内容安全/政策违规，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，是否按该模型实际命中的扣费档位（基础/2K/4K）扣费。模型单独设置优先于全局 `deduct_on_failure_status_codes`；未配置该模型参数项时才回退到全局开关。
 - `最大输出/思考 Token`：仅 Gemini 和 Generic Chat Completions 路由生效。大于 `0` 时覆盖全局 `max_output_tokens`；填 `0` 时继承全局设置。全局也为 `0`（默认）时不发送限制参数，即不限制。Gemini 使用 `maxOutputTokens`，Generic Chat Completions 使用 `max_tokens`；不受厂商参数模式影响。
 - `默认分辨率`：独立设置，启用“默认传递 size”后，在自适应比例未启动或未生成有效尺寸时发送的 `size` 参数，默认 `auto`；可填写供应商支持的其他 `size` 值。
 - `默认传递 size`：独立设置，默认关闭。开启后，Images Generations / Edits 请求在未生成自适应尺寸时发送“默认分辨率”（默认 `size=auto`）；关闭时不传递兜底 `size`。不受厂商参数模式影响。
@@ -205,7 +206,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 - `Seedream像素数上限 (K)`：默认 `0`，即不限制。仅“Seedream传递详细分辨率”开启时使用，按价格表以十进制 `1000` 像素为一 K 限制总像素。例如 `2360` 表示 `2,360,000 px`，且不会超过固定尺寸表所选档位的像素数。
 - `Seedream自适应比例`：默认关闭，保留命令 `=宽:高` 优先、首张参考图兜底及最近官方比例表映射的自适应配置。仅“Seedream传递详细分辨率”开启时，该自适应结果才用于传递 `size=宽x高`；关闭详细分辨率后仍传递“Seedream分辨率”的档位值。
 - `Seedream宽高均不超过2000`：默认开启，仅在“Seedream传递详细分辨率”开启后参与固定尺寸表筛选。官方候选尺寸中宽或高任一边超过 `2000 px` 都会被排除，并向下选择同一比例的合法档位；关闭后恢复为仅按“Seedream像素数上限 (K)”筛选。
-- `边长超2000自动升2K`：默认开启，仅“Seedream参数设置”和“Seedream传递详细分辨率”均开启且有比例来源（命令 `=宽:高` 或首张参考图）时生效。所选档位尺寸任一边超过 `2000 px` 时不再向下降档，直接改发该比例的 2K 档官方尺寸（如 21:9 在 1.5K/2K 档都会发 `3136x1344`），并自动按 2K 档扣次计费；“Seedream像素数上限 (K)”连 2K 档都容纳不下时保持原降档逻辑（像素数上限优先）。关闭后维持原行为（排除超限档位，必要时回退 1K）。
+- `边长超2000自动升2K`：默认开启，仅“Seedream参数设置”和“Seedream传递详细分辨率”均开启且有比例来源（命令 `=宽:高` 或首张参考图）时生效。所选档位尺寸任一边超过 `2000 px` 时不再向下降档，直接改发该比例的 2K 档官方尺寸（如 21:9 在 1.5K/2K 档都会发 `3136x1344`），并自动按 2K 档扣费；“Seedream像素数上限 (K)”连 2K 档都容纳不下时保持原降档逻辑（像素数上限优先）。关闭后维持原行为（排除超限档位，必要时回退 1K）。
 - `Seedream提示词优化模式`：可选 `standard`、`fast`，默认 `standard`，发送为 `optimize_prompt_options.mode`。`fast` 更快但可能影响效果；插件不根据模型名过滤，支持情况由实际接入的上游模型决定。
 
 Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig.imageConfig`：
@@ -225,19 +226,19 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 例如第一张图是 `1920x1080`（16:9）：模型配置为 `1K` 且关闭“强制限制分辨率”时提交 `size=1088x608`（`1024x576` 低于最小总像素，因此自动放大）；若开启“1K超限自动转2K”（即使强制限制仍被配置为开启，也会自动失效），会改按 2K 提交 `size=2048x1152`。单独开启“强制限制分辨率”后提交 `size=1024x640`，既不超过最长边 1024，也满足最小总像素，但比例会从 16:9 调整为 8:5。使用 `#bnnx2` 临时覆盖后提交 `size=2048x1152`；使用 `#bnnx4` 提交 `size=3840x2160`。命令带 `=9:16` 时会覆盖参考图比例并按竖图方向生成对应 `size`。竖图会交换宽高；方图 4K 会受最大总像素限制，提交 `2880x2880`。比例超过 3:1 的参考图或命令比例会按 3:1 上限计算。插件只增加请求参数，不会缩放或修改上传的原图。
 
-当前模型选择 GPT 模式后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。选择 Grok 模式后，两个 Images 路由都会发送 `resolution`（默认 `2k`）和 `aspect_ratio`；关闭 Grok 自适应比例时固定发送 `auto`，开启后使用命令 `=宽:高` 或首张参考图映射出的最近 Grok 比例。Grok 不使用或替换 Generic 的 `size`。Seedream 参数不复用 Edits multipart：选择 Seedream 模式的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且选择 GPT 模式并开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由 Gemini 模式独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣次。自适应分辨率通常只影响请求参数；扣次档位由参考图边长、`自适应比例分辨率` 设置与命令 `x2/x4` 决定（见上方计费规则）。
+当前模型选择 GPT 模式后，插件才会向 `/v1/images/generations` 或 `/v1/images/edits` 发送质量、审核和自适应计算出的 `size`。选择 Grok 模式后，两个 Images 路由都会发送 `resolution`（默认 `2k`）和 `aspect_ratio`；关闭 Grok 自适应比例时固定发送 `auto`，开启后使用命令 `=宽:高` 或首张参考图映射出的最近 Grok 比例。Grok 不使用或替换 Generic 的 `size`。Seedream 参数不复用 Edits multipart：选择 Seedream 模式的模型必须走 `/v1/images/generations` JSON 请求，带图时传单数 `image`（多图为该字段的数组），并发送 `output_format`、`watermark`、可选 `tools`、可选 `aspect_ratio`、`size` 和 `optimize_prompt_options`；Seedream 请求不发送 `n`。非 Seedream 的 Images 请求默认会发送 `n=1`；为兼容上游对 Images Edits multipart 表单 `n` 字段的严格校验，可启用“不传递 n 参数”将其完全省略，不影响插件的单次生成或 `*2` 等批量请求数。请求携带图片且选择 GPT 模式并开启“自适应比例”时，会按模型配置的分辨率增加计算后的 `size`；命令带 `x1/x2/x4` 时覆盖分辨率级别，命令带 `=宽:高` / `=宽：高` 时覆盖参考图比例。“默认传递 size”独立生效：自适应比例未启动、无图片或未生成有效尺寸时，开启该开关才会发送“默认分辨率”（默认 `size=auto`）；该开关默认关闭。Chat Completions 和 Gemini 路由不提交 Generic 的 `size`；Gemini 的图片大小和比例由 Gemini 模式独立控制，使用官方 `generationConfig.imageConfig` 字段。开启“Gemini自适应比例”后，带图请求会把首图（或 `=宽:高`）映射为最接近的 Gemini 官方 `aspectRatio` 并提交，不影响其 `imageSize` 或扣费。自适应分辨率通常只影响请求参数；扣费档位由参考图边长、`自适应比例分辨率` 设置与命令 `x2/x4` 决定（见上方计费规则）。
 
-每次请求通常按模型的“该模型扣除次数”扣次，最后再乘批量倍率。例如模型配置为每次扣除 `3` 次时，`#bnn*2x4` 共扣 `3 x 2 = 6` 次。命中 2K/4K 档位时，单次扣除次数改为该模型“2K/4K扣除次数”（填 `0` 时回退全局 `resolution_2k_cost` / `resolution_4k_cost`）；2K 档触发条件为参考图任一边长超过 `2000`、`自适应比例分辨率` 为 `2K`、命令 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率升级为 2K 尺寸；4K 档触发条件为 `自适应比例分辨率` 为 `4K` 或命令 `x4`，4K 优先于 2K。配额预检和最终成功/失败结算均使用同一规则。
+每次请求通常按模型的“该模型单次生成扣费”扣费，最后再乘批量倍率。例如模型配置为每次扣除 `0.05` 元时，`#bnn*2x4` 共扣 `0.05 x 2 = 0.1` 元。命中 2K/4K 档位时，单次扣费改为该模型“2K/4K单次扣费”（填 `0` 时回退全局 `resolution_2k_cost` / `resolution_4k_cost`）；2K 档触发条件为参考图任一边长超过 `2000`、`自适应比例分辨率` 为 `2K`、命令 `x2`，或“边长超2000自动升2K”开启时 Seedream 详细分辨率升级为 2K 尺寸；4K 档触发条件为 `自适应比例分辨率` 为 `4K` 或命令 `x4`，4K 优先于 2K。配额预检和最终成功/失败结算均使用同一规则。
 
-次数按每个请求的实际结果结算：生成成功正常扣次。上游判定内容违规或触发安全拦截时，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，均会单独发送 `content_policy_warning_message`。模型参数中的 `违规是否扣次数` 优先决定是否扣次；未配置该模型参数项时才使用 `deduct_on_failure_status_codes`（旧配置 `deduct_on_content_policy_violation` 仍兼容）。违规/错误码失败若扣次，按实际调用模型命中的扣次档位（基础/2K/4K）结算，与成功请求使用同一规则；关闭后仍会警告但不扣次。未命中错误码的普通失败不扣次，并继续模型热备切换。批量生成逐个结果结算。
+费用按每个请求的实际结果结算：生成成功正常扣费。上游判定内容违规或触发安全拦截时，或 HTTP 状态码命中 `failure_deduction_status_codes` 时，均会单独发送 `content_policy_warning_message`。模型参数中的 `违规是否扣费` 优先决定是否扣费；未配置该模型参数项时才使用 `deduct_on_failure_status_codes`（旧配置 `deduct_on_content_policy_violation` 仍兼容）。违规/错误码失败若扣费，按实际调用模型命中的扣费档位（基础/2K/4K）结算，与成功请求使用同一规则；关闭后仍会警告但不扣费。未命中错误码的普通失败不扣费，并继续模型热备切换。批量生成逐个结果结算。
 
 `content_policy_warning_message` 支持与 `custom_success_message` 相同的通用变量：`{model}`、`{label}`、`{image_count}`、`{elapsed}`、`{remaining}`、`{prompt}`；另有 `{reason}`，会替换为上游返回的主要错误原因（例如安全拦截说明）。批量、预设和 `#bnn` 入口还支持 `{batch_count}`、`{batch_index}`、`{max_batch_concurrency}`。独立 `#文生图` 保持成功模板的现有行为，不替换这三个批量变量。默认警告会提示更换模型、提示词或参考图，并显示实际模型与任务序号。
 
-旧版 `deduct_on_content_policy_violation` 配置会在首次加载时自动迁移为 `deduct_on_failure_status_codes`，已存在新配置时不会覆盖。
+旧版 `deduct_on_content_policy_violation` 配置会在首次加载时自动迁移为 `deduct_on_failure_status_codes`，已存在新配置时不会覆盖。v2.0.0 起计费单位由「次」改为「元」（精确到 0.001）：旧配置中的 `扣除次数` / `2K扣除次数` / `4K扣除次数` 等按次键会按 `LEGACY_COUNT_TO_YUAN` 汇率自动换算读取，WebUI 保存后写为新键 `charge_amount` / `charge_amount_2k` / `charge_amount_4k`；余额与账本数据同步自动迁移（见上方账本说明）。
 
 配置示例：
 
-| 模型 | 扣除次数 | 最大输出/思考 Token | GPT参数设置 | GPT 分辨率 | Gemini参数设置 | Gemini分辨率 |
+| 模型 | 单次扣费(元) | 最大输出/思考 Token | GPT参数设置 | GPT 分辨率 | Gemini参数设置 | Gemini分辨率 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `gpt-image-1` | `1` | `0` | 开启 | 自适应 `2K` | 关闭 | `auto`（不生效） |
 | `gemini-2.5-flash-image` | `1` | `8192` | 关闭 | 不发送 | 开启 | `4K` |
@@ -252,6 +253,17 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 ## 新增
 
 新增签到系统，文生图功能和自定义模型。
+
+### 本次更新 (v2.0.0)
+
+- **计费单位由「次」改为「元」**：全链路按金额计费，精确到 `0.001` 元；内部以整数「厘」存储，杜绝浮点误差。配置项、指令、消息文案与 Web 仪表盘全部金额化，旧「次数」配置与余额/账本数据按 `LEGACY_COUNT_TO_YUAN`（1 次 = 0.04 元）汇率**全自动迁移**，启动即完成且幂等。
+- **变量与字段更名**：模型参数 `deduction_count(_2k/_4k)` → `charge_amount(_2k/_4k)`，账本字段 `charged_units` → `charged_amount`，余额文件更名为 `user_balances.json` / `group_balances.json`（旧文件自动迁移读取并立即落盘）。
+- **用量明细按天查看与筛选**：账本明细支持按天筛选（日期选择器）、按结果筛选（全部/成功/失败）与翻页，默认每页 15 条（可选 15/30/50/100）。
+- **插件日志按天保存**：日志文件由按大小轮转改为按天轮转（每天 0 点切分），默认保留最近 30 天。
+- **指令更名**：`#手办化查询余额`、`#手办化增加用户余额 <QQ|@> <金额>`、`#手办化增加群组余额 <群号> <金额>`（金额支持小数，精确到 0.001）；旧指令不再保留。
+- **超限参考图阶梯加费可配置**：新增 `extra_reference_image_charge`（每阶梯加收金额，默认 1 元/阶梯）。
+- **签到奖励金额化**：`checkin_fixed_reward`、`checkin_random_reward_max` 单位改为元，随机奖励按 0.001 元粒度发放。
+- **Web 仪表盘金额化**：概览显示「本次消耗(元)」，用户/群组余额、账本扣费与余额变动均以元显示，调整对话框支持 `0.001` 步进。
 
 ### 本次更新 (v1.9.0)
 
@@ -331,14 +343,15 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 | `#手办化帮助` | 显示帮助菜单；默认命令，可通过 `help_command` 自定义 |
 | `#手办化预设增加 <关键词>:<提示词>` | 添加或修改自定义预设（仅主人） |
 | `#手办化预设查看 <关键词>` | 查看自定义预设的提示词 |
-| `#手办化查询次数` | 查询自己的剩余次数 |
+| `#手办化查询余额` | 查询自己的剩余余额 |
 
 ### 👑 管理命令 (仅主人)
 
 | 命令 | 功能说明 |
 | :--- | :--- |
-| `#手办化增加次数 <QQ号> <次数>` | 为用户增加使用次数 |
-| `#手办化查询次数 <QQ号>` | 查询指定用户剩余次数 |
+| `#手办化增加用户余额 <QQ号或@用户> <金额>` | 为用户增加余额（元，精确到 0.001） |
+| `#手办化增加群组余额 <群号> <金额>` | 为群组增加公共余额（元，精确到 0.001） |
+| `#手办化查询余额 <QQ号>` | 查询指定用户剩余余额 |
 
 ---
 

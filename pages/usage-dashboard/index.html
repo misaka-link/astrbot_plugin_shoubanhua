@@ -65,14 +65,14 @@
           <div class="panel-header">
             <div class="header-content">
               <h2 class="panel-title">每日趋势</h2>
-              <span class="panel-subtitle">生成输出与扣减次数趋势对比</span>
+              <span class="panel-subtitle">生成输出与本次消耗趋势对比</span>
             </div>
             <div class="trend-legend">
               <span class="legend-item"><span class="legend-box is-output"></span>成功输出</span>
-              <span class="legend-item"><span class="legend-box is-charge"></span>实际扣次</span>
+              <span class="legend-item"><span class="legend-box is-charge"></span>本次消耗(元)</span>
             </div>
           </div>
-          <div id="trend" class="trend-container" aria-label="每日生成与扣次趋势"></div>
+          <div id="trend" class="trend-container" aria-label="每日生成与消耗趋势"></div>
         </section>
 
         <section class="panel">
@@ -96,7 +96,7 @@
                   <th>实际模型</th>
                   <th>路由通道</th>
                   <th class="text-right">成功输出</th>
-                  <th class="text-right">实际扣次</th>
+                  <th class="text-right">本次消耗(元)</th>
                   <th class="text-right">尝试次数</th>
                 </tr>
               </thead>
@@ -110,7 +110,21 @@
         <div class="panel-header">
           <div class="header-content">
             <h2 class="panel-title">最近活动记录</h2>
-            <span class="panel-subtitle">最近用量消耗与额度变更审计明细（最新 15 条）</span>
+            <span class="panel-subtitle">用量消耗与余额变更审计明细，可按天筛选、按结果筛选并翻页</span>
+          </div>
+          <div class="events-toolbar">
+            <input id="events-day" class="field-input" type="date" aria-label="按天筛选日期" title="按天筛选（留空时跟随顶部时间范围）">
+            <select id="events-outcome" class="field-input" aria-label="按结果筛选">
+              <option value="">全部</option>
+              <option value="success">成功</option>
+              <option value="failed">失败</option>
+            </select>
+            <select id="events-page-size" class="field-input" aria-label="每页条数">
+              <option value="15" selected>15 条/页</option>
+              <option value="30">30 条/页</option>
+              <option value="50">50 条/页</option>
+              <option value="100">100 条/页</option>
+            </select>
           </div>
         </div>
         <div class="table-wrap">
@@ -137,13 +151,14 @@
                 <th>路由通道</th>
                 <th>执行结果</th>
                 <th class="text-right">产出</th>
-                <th class="text-right">扣次</th>
-                <th class="text-right">余额变动</th>
+                <th class="text-right">扣费(元)</th>
+                <th class="text-right">余额变动(元)</th>
               </tr>
             </thead>
             <tbody id="recent-events"></tbody>
           </table>
         </div>
+        <div id="events-pagination" class="pagination-bar"></div>
       </section>
     </section>
 
@@ -169,8 +184,8 @@
               <tr>
                 <th>用户</th>
                 <th class="text-right">成功输出</th>
-                <th class="text-right">实际扣次</th>
-                <th class="text-right">个人余额</th>
+                <th class="text-right">本次消耗(元)</th>
+                <th class="text-right">个人余额(元)</th>
                 <th class="text-center">操作</th>
               </tr>
             </thead>
@@ -204,9 +219,9 @@
               <tr>
                 <th>群组信息</th>
                 <th class="text-right">成功输出</th>
-                <th class="text-right">实际扣次</th>
+                <th class="text-right">本次消耗(元)</th>
                 <th class="text-right">活跃用户数</th>
-                <th class="text-right">群公用余额</th>
+                <th class="text-right">群公用余额(元)</th>
                 <th class="text-center">操作</th>
               </tr>
             </thead>
@@ -538,7 +553,7 @@
           <div class="panel-header">
             <div class="header-content">
               <h2 class="panel-title">模型专属参数配置</h2>
-              <span class="panel-subtitle">为特定模型独立配置生成参数、分辨率、扣次及厂商专属特性（根据当前通道能力动态过滤适用字段）</span>
+              <span class="panel-subtitle">为特定模型独立配置生成参数、分辨率、扣费金额及厂商专属特性（根据当前通道能力动态过滤适用字段）</span>
             </div>
             <button id="add-parameter-btn" class="button secondary" type="button">
               <span class="btn-symbol">+</span> 添加模型参数条目
@@ -552,7 +567,7 @@
           <div class="panel-header">
             <div class="header-content">
               <h2 class="panel-title">插件功能与运行设置</h2>
-              <span class="panel-subtitle">基于元数据动态渲染的高级基础、网络、权限、次数、签到与错误提示配置</span>
+              <span class="panel-subtitle">基于元数据动态渲染的高级基础、网络、权限、计费、签到与错误提示配置</span>
             </div>
           </div>
           <div id="config-dynamic-settings" class="dynamic-settings-wrap"></div>
@@ -572,7 +587,7 @@
   <dialog id="adjust-dialog" class="custom-dialog">
     <form id="adjust-form" method="dialog" class="dialog-form">
       <div class="dialog-header">
-        <h2 id="adjust-title" class="dialog-title">调整用量额度</h2>
+        <h2 id="adjust-title" class="dialog-title">调整余额</h2>
         <button class="icon-button close-dialog-btn" value="cancel" type="button" aria-label="关闭">✕</button>
       </div>
 
@@ -587,9 +602,9 @@
 
         <div class="dialog-field">
           <label for="adjust-amount" class="field-label">
-            变更次数 <span class="field-hint">(正数为增加，负数为扣减)</span>
+            变更金额(元) <span class="field-hint">(正数为增加，负数为扣减，精确到 0.001)</span>
           </label>
-          <input id="adjust-amount" class="field-input font-mono" type="number" min="-100000" max="100000" required placeholder="如 10 或 -5">
+          <input id="adjust-amount" class="field-input font-mono" type="number" step="0.001" min="-100000" max="100000" required placeholder="如 0.5 或 -0.2">
         </div>
 
         <div class="dialog-field">

@@ -77,7 +77,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `use_stream` | Generic 模式是否走流式请求。仅 `chat/completions` 路径有效，`images/generations` 不使用流式 |
 | `download_retries` | 图片下载重试次数 |
 | `help_command` | 帮助菜单触发命令，默认 `手办化帮助`；不需要写 `#`，`lmh` 和 `lm帮助` 不再作为别名 |
-| `help_text` | 自定义帮助菜单显示文本，支持 Markdown；可使用变量 `{custom_command_model_bindings}`，会自动替换为自定义提示词前缀与模型的绑定列表，未绑定时显示默认模型，箭头会按最长触发词自动对齐 |
+| `help_text` | 自定义帮助菜单显示文本，支持 Markdown；可使用变量 `{custom_command_model_bindings}`（自定义提示词前缀与模型的绑定列表）或 `{custom_command_model_bindings_with_price}`（同款列表，并在每个模型后附上默认价格，取热备候选中最高单次扣费），未绑定时显示默认模型，箭头会按最长触发词自动对齐 |
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
 | `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群免费不扣费；全局管理员可无视群黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组余额限制 |

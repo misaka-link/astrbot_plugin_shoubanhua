@@ -281,6 +281,34 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertTrue(parameters["recover-grok"]["enable_grok_parameters"])
         self.assertEqual(parameters["none"]["parameter_mode"], "none")
 
+    def test_help_bindings_with_price_variable(self):
+        plugin = self.make_dashboard_plugin(
+            extra_prefix=[
+                {"__template_key": "prefix", "prefix": "bnn"},
+                {"__template_key": "prefix", "prefix": "gpt2"},
+            ],
+            command_model_list=[
+                {"__template_key": "binding", "command": "gpt2", "model": "m-paid"},
+            ],
+            model_parameter_list=[
+                {"model": "m-paid", "parameter_mode": "none", "charge_amount": 0.1},
+                {"model": "m-hot", "parameter_mode": "none", "charge_amount": 0.08},
+            ],
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "m-paid", "mapped_model": "m-hot", "priority": 1},
+            ],
+        )
+
+        plain = plugin._get_custom_command_model_bindings_text()
+        priced = plugin._get_custom_command_model_bindings_text(with_price=True)
+
+        self.assertNotIn("元", plain)
+        self.assertEqual(len(priced.splitlines()), 2)
+        # bnn 未绑定 → 默认模型 m1，无参数条目 → 默认 1 元
+        self.assertIn("m1（1 元）", priced)
+        # gpt2 → m-paid 走热备 m-hot，按候选最高价 0.08 元展示
+        self.assertIn("gpt2 -> m-paid（0.08 元）", priced)
+
     def test_dashboard_model_parameter_items_display_yuan_not_milli(self):
         plugin = self.make_dashboard_plugin()
         plugin.conf["model_parameter_list"] = [{

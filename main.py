@@ -2821,8 +2821,14 @@ class FigurineProPlugin(Star):
             width += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
         return width
 
-    def _get_custom_command_model_bindings_text(self) -> str:
-        """返回自定义提示词前缀与实际选择模型的帮助文本。"""
+    def _get_binding_default_price_text(self, model: str) -> str:
+        """返回该命令普通一次生成的默认价格文本（取热备候选中最高单次扣费，与余额预检口径一致）。"""
+        candidates = self._get_model_failover_candidates(model) or [model]
+        cost = max(self._get_required_invocation_cost(candidate) for candidate in candidates)
+        return f"{format_amount(cost)} 元"
+
+    def _get_custom_command_model_bindings_text(self, with_price: bool = False) -> str:
+        """返回自定义提示词前缀与实际选择模型的帮助文本；with_price 时在模型后附默认价格。"""
         default_model = str(self.conf.get("model", "nano-banana") or "nano-banana").strip()
         default_model = default_model or "nano-banana"
         command_models = self._get_command_model_map()
@@ -2840,14 +2846,22 @@ class FigurineProPlugin(Star):
             (self._get_text_display_width(command) for command, _ in bindings),
             default=0,
         )
-        return "\n".join(
-            f"{command}{' ' * (max_command_width - self._get_text_display_width(command))} -> {model}"
-            for command, model in bindings
-        )
+        lines: List[str] = []
+        for command, model in bindings:
+            padded = f"{command}{' ' * (max_command_width - self._get_text_display_width(command))}"
+            if with_price:
+                lines.append(f"{padded} -> {model}（{self._get_binding_default_price_text(model)}）")
+            else:
+                lines.append(f"{padded} -> {model}")
+        return "\n".join(lines)
 
     def _render_help_text(self) -> str:
         help_text = str(self.conf.get("help_text", "帮助文档未配置") or "")
+        # 先替换带价格的变量名（更长），避免其前缀被子串替换破坏
         return help_text.replace(
+            "{custom_command_model_bindings_with_price}",
+            self._get_custom_command_model_bindings_text(with_price=True),
+        ).replace(
             "{custom_command_model_bindings}",
             self._get_custom_command_model_bindings_text(),
         )

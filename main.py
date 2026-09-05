@@ -3808,8 +3808,13 @@ class FigurineProPlugin(Star):
         # 2. 厂商参数专属分辨率设置（仅当对应厂商模式激活时生效）
         param_mode = str(parameters.get("parameter_mode") or "").strip().lower()
 
-        # GPT 自适应比例分辨率：兼容历史无 parameter_mode 或显式 gpt 模式
-        if param_mode == "gpt" or parameters.get("enable_gpt_parameters") or param_mode in {"", "none"}:
+        # GPT 自适应比例分辨率：模式为 GPT 时开启自适应比例生效；纯测试/未指定模式时直接配置 2K/4K 亦兼容
+        if param_mode == "gpt" or parameters.get("enable_gpt_parameters"):
+            if parameters.get("adaptive_aspect_ratio"):
+                if adaptive_res := parameters.get("adaptive_resolution"):
+                    if tier := self._parse_resolution_tier(adaptive_res):
+                        tiers.append(tier)
+        elif param_mode in {"", "none"}:
             if adaptive_res := parameters.get("adaptive_resolution"):
                 if tier := self._parse_resolution_tier(adaptive_res):
                     tiers.append(tier)

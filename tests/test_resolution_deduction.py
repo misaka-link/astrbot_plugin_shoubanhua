@@ -378,6 +378,7 @@ class ResolutionDeductionTests(unittest.TestCase):
                 {
                     "model": "model-gpt4k",
                     "parameter_mode": "gpt",
+                    "adaptive_aspect_ratio": True,
                     "adaptive_resolution": "4K",
                     "charge_amount": 0.08,
                     "charge_amount_2k": 0.16,
@@ -395,6 +396,30 @@ class ResolutionDeductionTests(unittest.TestCase):
         self.assertIn("m_grok2k -> model-grok2k（0.16）", priced)
         self.assertIn("m_sd2k   -> model-sd2k（0.14）", priced)
         self.assertIn("m_gpt4k  -> model-gpt4k（0.36）", priced)
+
+    def test_help_bindings_gpt_adaptive_resolution_off_keeps_base_price(self):
+        plugin = self.make_dashboard_plugin(
+            extra_prefix=[
+                {"__template_key": "prefix", "prefix": "m_gpt_off"},
+            ],
+            command_model_list=[
+                {"__template_key": "binding", "command": "m_gpt_off", "model": "model-gpt-off"},
+            ],
+            model_parameter_list=[
+                {
+                    "model": "model-gpt-off",
+                    "parameter_mode": "gpt",
+                    "adaptive_aspect_ratio": False,
+                    "adaptive_resolution": "4K",
+                    "charge_amount": 0.08,
+                    "charge_amount_2k": 0.16,
+                    "charge_amount_4k": 0.36,
+                },
+            ],
+        )
+        priced = plugin._get_custom_command_model_bindings_text(with_price=True)
+        # GPT自适应比例未打开时，不计入 4K 价格，保持基础扣费 0.08
+        self.assertIn("m_gpt_off -> model-gpt-off（0.08）", priced)
 
     def test_help_bindings_with_failover_inheriting_default_resolution_price(self):
         plugin = self.make_dashboard_plugin(

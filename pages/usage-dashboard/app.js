@@ -438,7 +438,7 @@
       const chargeMarker = svgElement("rect");
       chargeMarker.classList.add("trend-marker", "is-charge");
       chargeMarker.setAttribute("x", String(x - 3));
-      chargeMarker.setAttribute("y", String(yAt(chargedUnits) - 3));
+      chargeMarker.setAttribute("y", String(yAt(chargedAmount) - 3));
       chargeMarker.setAttribute("width", "6");
       chargeMarker.setAttribute("height", "6");
       chargeMarker.setAttribute("rx", "1");

@@ -269,7 +269,7 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
-    "2.0.1",
+    "2.0.2",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -2835,14 +2835,12 @@ class FigurineProPlugin(Star):
         return width
 
     def _get_binding_default_price_text(self, model: str) -> str:
-        """返回该命令普通一次生成的默认价格文本（取热备候选中按模型参数默认设置的分辨率计算的最高单次扣费，与余额预检口径一致）。"""
+        """返回该命令普通一次生成的默认价格文本（按首选模型及其默认设置的分辨率计算）。"""
         candidates = self._get_model_failover_candidates(model) or [model]
-        cost = max(
-            self._get_required_invocation_cost(
-                candidate,
-                parameters=self._get_effective_model_parameters(model, candidate),
-            )
-            for candidate in candidates
+        primary = candidates[0]
+        cost = self._get_required_invocation_cost(
+            primary,
+            parameters=self._get_effective_model_parameters(model, primary),
         )
         return f"{format_amount(cost)}"
 

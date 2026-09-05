@@ -447,6 +447,27 @@ class ResolutionDeductionTests(unittest.TestCase):
         # unconfigured-target 没有自己的参数条目，继承 source-model 的 2K 默认分辨率及价格 0.12
         self.assertIn("bnn -> source-model（0.12）", priced)
 
+    def test_help_bindings_uses_primary_candidate_price_not_max(self):
+        plugin = self.make_dashboard_plugin(
+            extra_prefix=[
+                {"__template_key": "prefix", "prefix": "bnn"},
+            ],
+            command_model_list=[
+                {"__template_key": "binding", "command": "bnn", "model": "source"},
+            ],
+            model_parameter_list=[
+                {"model": "target-p1", "parameter_mode": "none", "charge_amount": 0.04},
+                {"model": "target-p2", "parameter_mode": "none", "charge_amount": 0.08},
+            ],
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "target-p1", "priority": 2},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "target-p2", "priority": 1},
+            ],
+        )
+        priced = plugin._get_custom_command_model_bindings_text(with_price=True)
+        # 首选模型为 target-p1 (权重2 > 权重1)，应显示首选价格 0.04，而非后备模型的 0.08
+        self.assertIn("bnn -> source（0.04）", priced)
+
     def test_dashboard_model_parameter_items_display_yuan_not_milli(self):
         plugin = self.make_dashboard_plugin()
         plugin.conf["model_parameter_list"] = [{

@@ -77,7 +77,7 @@ apt install -y fonts-dejavu fonts-noto fonts-freefont-ttf
 | `use_stream` | Generic 模式是否走流式请求。仅 `chat/completions` 路径有效，`images/generations` 不使用流式 |
 | `download_retries` | 图片下载重试次数 |
 | `help_command` | 帮助菜单触发命令，默认 `手办化帮助`；不需要写 `#`，`lmh` 和 `lm帮助` 不再作为别名 |
-| `help_text` | 自定义帮助菜单显示文本，支持 Markdown；可使用变量 `{custom_command_model_bindings}`（自定义提示词前缀与模型的绑定列表）或 `{custom_command_model_bindings_with_price}`（同款列表，并在每个模型后附上默认价格（仅数字），按模型参数默认设置的分辨率及热备候选中最高单次扣费计算），未绑定时显示默认模型，箭头会按最长触发词自动对齐 |
+| `help_text` | 自定义帮助菜单显示文本，支持 Markdown；可使用变量 `{custom_command_model_bindings}`（自定义提示词前缀与模型的绑定列表）或 `{custom_command_model_bindings_with_price}`（同款列表，并在每个模型后附上默认价格（仅数字），按首选模型及其默认设置的分辨率单次扣费计算），未绑定时显示默认模型，箭头会按最长触发词自动对齐 |
 | `user_whitelist` / `user_blacklist` | 用户白/黑名单 |
 | `group_whitelist` / `group_blacklist` | 群聊白/黑名单，白名单群免费不扣费；全局管理员可无视群黑名单 |
 | `enable_user_limit` / `enable_group_limit` | 是否启用用户/群组余额限制 |
@@ -257,9 +257,11 @@ Gemini 图片配置使用官方 `generateContent` 请求结构 `generationConfig
 
 新增签到系统，文生图功能和自定义模型。
 
-### 本次更新 (v2.0.1)
+### 本次更新 (v2.0.2)
 
-- **帮助菜单价格显示对齐模型默认分辨率**：`#手办化帮助` 中的 `{custom_command_model_bindings_with_price}` 自动识别模型参数中配置的默认分辨率（通用默认分辨率、像素尺寸分辨率，以及 GPT 自适应/Gemini/Grok/Seedream 各模式下的专属分辨率），按实际对应的 2K/4K 档位单次扣费准确展示。
+- **帮助菜单价格显示对齐首选模型**：`#手办化帮助` 中的 `{custom_command_model_bindings_with_price}` 改为按首选模型（首个实际调用模型）及其默认设置的分辨率单次扣费展示，避免备用候选模型的高费率干扰默认价格展示。
+
+### 历史更新 (v2.0.1)
 
 ### 历史更新 (v2.0.0)
 

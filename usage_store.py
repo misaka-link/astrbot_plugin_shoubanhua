@@ -609,7 +609,6 @@ class UsageStore:
                 "failed_charged_amount": sum(event["charged_amount"] for event in events if event["event_kind"] == "generation" and event["outcome"] != "success" and event["charged_amount"] > 0 and not event["is_legacy"]),
                 "charged_amount": sum(event["charged_amount"] for event in events if event["event_kind"] == "generation" and not event["is_legacy"]),
                 "unbilled_llm_outputs": sum(event["output_count"] for event in events if event["event_kind"] == "generation" and event["source"] == "llm_tool" and event["outcome"] == "success" and event["charged_amount"] == 0 and not event["is_legacy"]),
-                "legacy_output_count": sum(event["output_count"] for event in events if event["is_legacy"] and event["event_kind"] == "generation" and event["legacy_scope"] == "user"),
             }
             trend_by_date: dict[str, dict[str, Any]] = {}
             model_rows: dict[tuple[str, str, str], dict[str, Any]] = {}
@@ -657,7 +656,6 @@ class UsageStore:
             relevant = [event for event in events if event[key] == subject_id]
             output_count = sum(event["output_count"] for event in relevant if event["event_kind"] == "generation" and event["outcome"] == "success")
             charged_amount = sum(event["charged_amount"] for event in relevant if event["event_kind"] == "generation")
-            legacy_outputs = sum(event["output_count"] for event in relevant if event["event_kind"] == "generation" and event["is_legacy"])
             if subject_type == "user":
                 row = {
                     "user_id": subject_id,
@@ -667,7 +665,6 @@ class UsageStore:
                     "avatar_url": identity.get("avatar_url", ""),
                     "outputs": output_count,
                     "charged_amount": charged_amount,
-                    "legacy_outputs": legacy_outputs,
                 }
             else:
                 row = {
@@ -678,7 +675,6 @@ class UsageStore:
                     "outputs": output_count,
                     "charged_amount": charged_amount,
                     "active_users": len({event["user_id"] for event in relevant if event["user_id"]}),
-                    "legacy_outputs": legacy_outputs,
                 }
             rows.append(row)
         id_key = "user_id" if subject_type == "user" else "group_id"

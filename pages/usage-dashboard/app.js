@@ -332,19 +332,13 @@
       metric("成功输出", summary.successful_outputs, "theme-blue", "生成完成数"),
       metric("本次消耗", fmtYuan(summary.charged_amount) + " 元", "theme-amber", "已消耗金额"),
       metric("失败扣费", fmtYuan(summary.failed_charged_amount) + " 元", "theme-rose", "失败且未返还"),
-      metric("LLM 工具免计费", summary.unbilled_llm_outputs, "theme-teal", "插件免计费调用"),
-      metric("旧版汇总", summary.legacy_output_count, "theme-slate", "历史日统计")
+      metric("LLM 工具免计费", summary.unbilled_llm_outputs, "theme-teal", "插件免计费调用")
     );
 
     renderTrend(overview.trend || []);
     renderModels(overview.models || []);
     await loadEvents();
-
-    if (summary.legacy_output_count) {
-      setStatus("包含旧版日汇总数据；旧版不包含模型、路由通道及单次请求详情。", "info");
-    } else {
-      setStatus("");
-    }
+    setStatus("");
   }
 
   async function loadEvents() {

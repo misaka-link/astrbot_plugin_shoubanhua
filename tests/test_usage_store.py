@@ -49,7 +49,6 @@ class UsageStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(users["total"], 2)
         self.assertEqual(next(item for item in users["items"] if item["user_id"] == "10001")["balance"], 8000)
         self.assertEqual(groups["items"][0]["balance"], 12000)
-        self.assertEqual(overview["summary"]["legacy_output_count"], 2)
         self.assertTrue(self.history_path.exists())
 
         await self.store.close()

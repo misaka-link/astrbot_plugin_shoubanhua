@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Collapse,
   Form,
   Input,
@@ -268,6 +269,54 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
     setDirty(true);
   };
 
+  const toggleRoute = (
+    key: "gemini_model_list" | "chat_completions_model_list" | "images_generations_model_list" | "images_edits_model_list",
+    model: string,
+    checked: boolean
+  ) => {
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const without = (list: string[]) => list.filter((m) => m !== model);
+      const next: ConfigValues = { ...prev };
+      if (!checked) {
+        next[key] = without(next[key]);
+        return next;
+      }
+      if (key === "gemini_model_list") {
+        // Gemini 与 Generic 端点互斥
+        next.gemini_model_list = [...without(next.gemini_model_list), model];
+        next.chat_completions_model_list = without(next.chat_completions_model_list);
+        next.images_generations_model_list = without(next.images_generations_model_list);
+        next.images_edits_model_list = without(next.images_edits_model_list);
+      } else {
+        next.gemini_model_list = without(next.gemini_model_list);
+        next[key] = [...without(next[key]), model];
+      }
+      return next;
+    });
+    setDirty(true);
+  };
+
+  const removeModelEverywhere = (value: string[]) => {
+    const kept = new Set(value);
+    return {
+      model_list: value,
+      model: config.model && !kept.has(config.model) ? value[0] || "" : config.model,
+      gemini_model_list: config.gemini_model_list.filter((m) => kept.has(m)),
+      chat_completions_model_list: config.chat_completions_model_list.filter((m) => kept.has(m)),
+      images_generations_model_list: config.images_generations_model_list.filter((m) => kept.has(m)),
+      images_edits_model_list: config.images_edits_model_list.filter((m) => kept.has(m)),
+      command_model_list: config.command_model_list.filter((item) => kept.has(item.model)),
+      model_mapping_list: config.model_mapping_list.filter(
+        (item) => kept.has(item.model) && kept.has(item.mapped_model)
+      ),
+      model_prompt_template_list: config.model_prompt_template_list.filter(
+        (item) => item.model === "ALL" || kept.has(item.model)
+      ),
+      model_parameter_list: config.model_parameter_list.filter((item) => kept.has(String(item.model))),
+    };
+  };
+
   const addParamCard = () => {
     const used = new Set(config.model_parameter_list.map((item) => String(item.model || "")));
     const nextModel = config.model_list.find((name) => !used.has(name)) || "";
@@ -496,7 +545,7 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
                   tokenSeparators={[",", "，", " ", "\n"]}
                   open={false}
                   suffixIcon={null}
-                  onChange={(value) => update({ model_list: value })}
+                  onChange={(value) => update(removeModelEverywhere(value))}
                 />
               </Form.Item>
               <Form.Item label="共享 API 地址" extra="generic_api_url：所有路由的共享服务地址，填根地址或 /v1">
@@ -506,44 +555,49 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
                   onChange={(event) => update({ generic_api_url: event.target.value })}
                 />
               </Form.Item>
-              <Form.Item label="Gemini 路由模型列表" extra="命中后走 Gemini 官方格式端点">
-                <Select
-                  mode="multiple"
-                  value={config.gemini_model_list}
-                  options={modelOptions}
-                  showSearch
-                  onChange={(value) => update({ gemini_model_list: value })}
-                />
-              </Form.Item>
-              <Form.Item label="Chat Completions 模型列表" extra="走 /v1/chat/completions；端点列表为空或未匹配时默认走该端点">
-                <Select
-                  mode="multiple"
-                  value={config.chat_completions_model_list}
-                  options={modelOptions}
-                  showSearch
-                  onChange={(value) => update({ chat_completions_model_list: value })}
-                />
-              </Form.Item>
-              <Form.Item label="Images Generations 模型列表" extra="走 /v1/images/generations，常用于文生图">
-                <Select
-                  mode="multiple"
-                  value={config.images_generations_model_list}
-                  options={modelOptions}
-                  showSearch
-                  onChange={(value) => update({ images_generations_model_list: value })}
-                />
-              </Form.Item>
-              <Form.Item label="Images Edits 模型列表" extra="走 /v1/images/edits，常用于带图请求">
-                <Select
-                  mode="multiple"
-                  value={config.images_edits_model_list}
-                  options={modelOptions}
-                  showSearch
-                  onChange={(value) => update({ images_edits_model_list: value })}
-                />
-              </Form.Item>
             </div>
           </Form>
+          <Card size="small" title="路由端点勾选" styles={{ body: { padding: 0 } }}>
+            <Table
+              rowKey="model"
+              size="small"
+              dataSource={config.model_list.map((name) => ({ model: name }))}
+              pagination={false}
+              columns={[
+                {
+                  title: "模型",
+                  dataIndex: "model",
+                  render: (value: string) => (
+                    <Space size={6}>
+                      <Text className="font-mono">{value}</Text>
+                      {config.model === value && <Tag color="blue">默认</Tag>}
+                    </Space>
+                  ),
+                },
+                ...[
+                  { key: "gemini_model_list" as const, title: "Gemini 官方格式" },
+                  { key: "chat_completions_model_list" as const, title: "Chat Completions" },
+                  { key: "images_generations_model_list" as const, title: "Generations（文生图）" },
+                  { key: "images_edits_model_list" as const, title: "Edits（图生图）" },
+                ].map((endpoint) => ({
+                  title: endpoint.title,
+                  align: "center" as const,
+                  render: (_: unknown, row: { model: string }) => (
+                    <Checkbox
+                      checked={config[endpoint.key].includes(row.model)}
+                      onChange={(event) =>
+                        toggleRoute(endpoint.key, row.model, event.target.checked)
+                      }
+                    />
+                  ),
+                })),
+              ]}
+            />
+          </Card>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            Gemini 与其他端点互斥；Generations 与 Edits 可同时勾选（文生图走 Generations，带图走 Edits）；
+            未勾选任何端点的模型走 Chat Completions 兜底。移除模型时会自动清理其路由、映射、模板与参数配置。
+          </Text>
         </Space>
       ),
     },

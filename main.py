@@ -269,7 +269,7 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
-    "2.0.0",
+    "2.0.1",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -2835,9 +2835,15 @@ class FigurineProPlugin(Star):
         return width
 
     def _get_binding_default_price_text(self, model: str) -> str:
-        """返回该命令普通一次生成的默认价格文本（取热备候选中最高单次扣费，与余额预检口径一致）。"""
+        """返回该命令普通一次生成的默认价格文本（取热备候选中按模型参数默认设置的分辨率计算的最高单次扣费，与余额预检口径一致）。"""
         candidates = self._get_model_failover_candidates(model) or [model]
-        cost = max(self._get_required_invocation_cost(candidate) for candidate in candidates)
+        cost = max(
+            self._get_required_invocation_cost(
+                candidate,
+                parameters=self._get_effective_model_parameters(model, candidate),
+            )
+            for candidate in candidates
+        )
         return f"{format_amount(cost)}"
 
     def _get_custom_command_model_bindings_text(self, with_price: bool = False) -> str:
@@ -3754,6 +3760,84 @@ class FigurineProPlugin(Star):
                 max_side = max(max_side, width, height)
         return max_side
 
+    @classmethod
+    def _parse_resolution_tier(cls, value: Any) -> Optional[str]:
+        """从分辨率字符串（如 2K、4K、x2、x4、2048x2048、3840x2160）解析扣费档位（'4K' / '2K' / None）。"""
+        if not value:
+            return None
+        s = str(value).strip()
+        if not s:
+            return None
+        upper = s.upper()
+        if upper in {"AUTO", "AUTOMATIC", "自动", "DEFAULT", "默认", "NONE", "1K", "1.5K", "X1"}:
+            return None
+        if upper in {"4K", "X4", "3840", "4096"}:
+            return "4K"
+        if upper in {"2K", "X2", "2048", "2560"}:
+            return "2K"
+        if re.search(r"\b4K\b|X4", upper):
+            return "4K"
+        if re.search(r"\b2K\b|X2", upper):
+            return "2K"
+        match = re.search(r"(\d+)\s*[xX*]\s*(\d+)", s)
+        if match:
+            max_side = max(int(match.group(1)), int(match.group(2)))
+            if max_side >= 3840:
+                return "4K"
+            if max_side > 2000:
+                return "2K"
+        return None
+
+    def _get_model_configured_resolution_tier(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """获取模型参数中默认设置的分辨率扣费档位（4K > 2K > None）。"""
+        parameters = self._parameters_for_request(model_name, parameters)
+        if not parameters:
+            return None
+
+        tiers: List[str] = []
+
+        # 1. 基础默认分辨率（通用字段，如配置 2K、4K、2048x2048 等）
+        if default_res := parameters.get("default_resolution"):
+            if tier := self._parse_resolution_tier(default_res):
+                tiers.append(tier)
+
+        # 2. 厂商参数专属分辨率设置（仅当对应厂商模式激活时生效）
+        param_mode = str(parameters.get("parameter_mode") or "").strip().lower()
+
+        # GPT 自适应比例分辨率：兼容历史无 parameter_mode 或显式 gpt 模式
+        if param_mode == "gpt" or parameters.get("enable_gpt_parameters") or param_mode in {"", "none"}:
+            if adaptive_res := parameters.get("adaptive_resolution"):
+                if tier := self._parse_resolution_tier(adaptive_res):
+                    tiers.append(tier)
+
+        # Gemini 分辨率
+        if param_mode == "gemini" or parameters.get("enable_gemini_parameters"):
+            if gemini_res := parameters.get("gemini_resolution"):
+                if tier := self._parse_resolution_tier(gemini_res):
+                    tiers.append(tier)
+
+        # Grok 分辨率
+        if param_mode == "grok" or parameters.get("enable_grok_parameters"):
+            if grok_res := parameters.get("grok_resolution"):
+                if tier := self._parse_resolution_tier(grok_res):
+                    tiers.append(tier)
+
+        # Seedream 分辨率
+        if param_mode == "seedream" or parameters.get("enable_seedream_parameters"):
+            if seedream_res := parameters.get("seedream_resolution"):
+                if tier := self._parse_resolution_tier(seedream_res):
+                    tiers.append(tier)
+
+        if "4K" in tiers:
+            return "4K"
+        if "2K" in tiers:
+            return "2K"
+        return None
+
     def _get_resolution_charge_tier(
             self,
             model_name: str,
@@ -3770,14 +3854,14 @@ class FigurineProPlugin(Star):
         任一条件满足即命中对应档位，取最高档。
         """
         parameters = self._parameters_for_request(model_name, parameters)
-        configured_resolution = str((parameters or {}).get("adaptive_resolution") or "1K").upper()
-        requested_resolution = str(resolution or "").strip().upper()
+        configured_tier = self._get_model_configured_resolution_tier(model_name, parameters)
+        requested_tier = self._parse_resolution_tier(resolution)
 
-        if configured_resolution == "4K" or requested_resolution == "4K":
+        if configured_tier == "4K" or requested_tier == "4K":
             return "4K"
         if (
-                configured_resolution == "2K"
-                or requested_resolution == "2K"
+                configured_tier == "2K"
+                or requested_tier == "2K"
                 or self._get_max_reference_image_side(image_bytes_list) > 2000
                 or self._seedream_side_upgrade_hits_2k(
                     model_name,

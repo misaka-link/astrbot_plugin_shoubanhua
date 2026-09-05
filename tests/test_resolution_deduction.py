@@ -309,6 +309,119 @@ class ResolutionDeductionTests(unittest.TestCase):
         # gpt2 → m-paid 走热备 m-hot，按候选最高价 0.08 元展示
         self.assertIn("gpt2 -> m-paid（0.08）", priced)
 
+    def test_help_bindings_with_model_parameter_default_resolution_price(self):
+        plugin = self.make_dashboard_plugin(
+            extra_prefix=[
+                {"__template_key": "prefix", "prefix": "m_def2k"},
+                {"__template_key": "prefix", "prefix": "m_def4k"},
+                {"__template_key": "prefix", "prefix": "m_size2k"},
+                {"__template_key": "prefix", "prefix": "m_gem2k"},
+                {"__template_key": "prefix", "prefix": "m_grok2k"},
+                {"__template_key": "prefix", "prefix": "m_sd2k"},
+                {"__template_key": "prefix", "prefix": "m_gpt4k"},
+            ],
+            command_model_list=[
+                {"__template_key": "binding", "command": "m_def2k", "model": "model-def2k"},
+                {"__template_key": "binding", "command": "m_def4k", "model": "model-def4k"},
+                {"__template_key": "binding", "command": "m_size2k", "model": "model-size2k"},
+                {"__template_key": "binding", "command": "m_gem2k", "model": "model-gem2k"},
+                {"__template_key": "binding", "command": "m_grok2k", "model": "model-grok2k"},
+                {"__template_key": "binding", "command": "m_sd2k", "model": "model-sd2k"},
+                {"__template_key": "binding", "command": "m_gpt4k", "model": "model-gpt4k"},
+            ],
+            model_parameter_list=[
+                {
+                    "model": "model-def2k",
+                    "default_resolution": "2K",
+                    "charge_amount": 0.05,
+                    "charge_amount_2k": 0.12,
+                    "charge_amount_4k": 0.25,
+                },
+                {
+                    "model": "model-def4k",
+                    "default_resolution": "4K",
+                    "charge_amount": 0.05,
+                    "charge_amount_2k": 0.12,
+                    "charge_amount_4k": 0.25,
+                },
+                {
+                    "model": "model-size2k",
+                    "default_resolution": "2048x2048",
+                    "charge_amount": 0.05,
+                    "charge_amount_2k": 0.15,
+                    "charge_amount_4k": 0.30,
+                },
+                {
+                    "model": "model-gem2k",
+                    "parameter_mode": "gemini",
+                    "gemini_resolution": "2K",
+                    "charge_amount": 0.04,
+                    "charge_amount_2k": 0.09,
+                    "charge_amount_4k": 0.18,
+                },
+                {
+                    "model": "model-grok2k",
+                    "parameter_mode": "grok",
+                    "grok_resolution": "2k",
+                    "charge_amount": 0.06,
+                    "charge_amount_2k": 0.16,
+                    "charge_amount_4k": 0.32,
+                },
+                {
+                    "model": "model-sd2k",
+                    "parameter_mode": "seedream",
+                    "seedream_resolution": "2K",
+                    "charge_amount": 0.07,
+                    "charge_amount_2k": 0.14,
+                    "charge_amount_4k": 0.28,
+                },
+                {
+                    "model": "model-gpt4k",
+                    "parameter_mode": "gpt",
+                    "adaptive_resolution": "4K",
+                    "charge_amount": 0.08,
+                    "charge_amount_2k": 0.16,
+                    "charge_amount_4k": 0.36,
+                },
+            ],
+        )
+
+        priced = plugin._get_custom_command_model_bindings_text(with_price=True)
+        # 验证手办化帮助中模型后显示的是该模型默认设置分辨率对应的价格
+        self.assertIn("m_def2k  -> model-def2k（0.12）", priced)
+        self.assertIn("m_def4k  -> model-def4k（0.25）", priced)
+        self.assertIn("m_size2k -> model-size2k（0.15）", priced)
+        self.assertIn("m_gem2k  -> model-gem2k（0.09）", priced)
+        self.assertIn("m_grok2k -> model-grok2k（0.16）", priced)
+        self.assertIn("m_sd2k   -> model-sd2k（0.14）", priced)
+        self.assertIn("m_gpt4k  -> model-gpt4k（0.36）", priced)
+
+    def test_help_bindings_with_failover_inheriting_default_resolution_price(self):
+        plugin = self.make_dashboard_plugin(
+            extra_prefix=[
+                {"__template_key": "prefix", "prefix": "bnn"},
+            ],
+            command_model_list=[
+                {"__template_key": "binding", "command": "bnn", "model": "source-model"},
+            ],
+            model_parameter_list=[
+                {
+                    "model": "source-model",
+                    "default_resolution": "2K",
+                    "charge_amount": 0.05,
+                    "charge_amount_2k": 0.12,
+                    "charge_amount_4k": 0.25,
+                },
+            ],
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source-model", "mapped_model": "unconfigured-target", "priority": 1},
+            ],
+        )
+
+        priced = plugin._get_custom_command_model_bindings_text(with_price=True)
+        # unconfigured-target 没有自己的参数条目，继承 source-model 的 2K 默认分辨率及价格 0.12
+        self.assertIn("bnn -> source-model（0.12）", priced)
+
     def test_dashboard_model_parameter_items_display_yuan_not_milli(self):
         plugin = self.make_dashboard_plugin()
         plugin.conf["model_parameter_list"] = [{

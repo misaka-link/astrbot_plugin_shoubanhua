@@ -128,7 +128,7 @@
                     "extra_reference_image_charge": {
                         "label": "超限参考图每阶梯加费(元)",
                         "type": "float",
-                        "default": 1,
+                        "default": 0.04,
                         "min": 0,
                         "max": 100000,
                         "step": 0.001,

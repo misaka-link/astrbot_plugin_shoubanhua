@@ -1198,9 +1198,9 @@ class ResolutionDeductionTests(unittest.TestCase):
                 "extra_reference_image_quota": 1,
             },
         ])
-        # 3 张图，边长超限 → 2K 档(2000) + 阶梯额外(2 阶梯 × 1000) = 4000
+        # 3 张图，边长超限 → 2K 档(2000) + 阶梯额外(2 阶梯 × 40) = 2080
         cost = plugin._get_required_invocation_cost("m", image_bytes_list=[b"wide_2k"] * 3)
-        self.assertEqual(cost, 4000)
+        self.assertEqual(cost, 2080)
 
     def test_violation_cost_uses_tier(self):
         plugin = self.make_plugin([

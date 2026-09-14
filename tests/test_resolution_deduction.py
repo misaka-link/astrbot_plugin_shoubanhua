@@ -1477,6 +1477,54 @@ class ResolutionDeductionTests(unittest.TestCase):
         cost = plugin._get_violation_deduction_cost("m", resolution="4K")
         self.assertEqual(cost, 8000)
 
+    def test_equal_weight_model_mapping_load_balancing(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "target-a", "priority": 10},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "target-b", "priority": 10},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "target-c", "priority": 10},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "backup-x", "priority": 5},
+            ]
+        )
+
+        # 1. 静态查询 rotate=False：始终保持原始顺序，不推进轮询游标
+        c_static1 = plugin._get_model_failover_candidates("source", rotate=False)
+        c_static2 = plugin._get_model_failover_candidates("source", rotate=False)
+        self.assertEqual(c_static1, ["target-a", "target-b", "target-c", "backup-x"])
+        self.assertEqual(c_static2, ["target-a", "target-b", "target-c", "backup-x"])
+
+        # 2. 运行时调用 rotate=True：同权重 N 个模型执行负载均衡轮询
+        # 第 1 次：target-a 为首选，后续为 target-b, target-c, backup-x
+        c1 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c1, ["target-a", "target-b", "target-c", "backup-x"])
+
+        # 第 2 次：target-b 为首选，后续为 target-c, target-a, backup-x
+        c2 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c2, ["target-b", "target-c", "target-a", "backup-x"])
+
+        # 第 3 次：target-c 为首选，后续为 target-a, target-b, backup-x
+        c3 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c3, ["target-c", "target-a", "target-b", "backup-x"])
+
+        # 第 4 次：回到 target-a
+        c4 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c4, ["target-a", "target-b", "target-c", "backup-x"])
+
+    def test_multi_tier_equal_weight_load_balancing(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "pri10-a", "priority": 10},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "pri10-b", "priority": 10},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "pri5-a", "priority": 5},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "pri5-b", "priority": 5},
+            ]
+        )
+        c1 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c1, ["pri10-a", "pri10-b", "pri5-a", "pri5-b"])
+
+        c2 = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(c2, ["pri10-b", "pri10-a", "pri5-b", "pri5-a"])
+
 
 if __name__ == "__main__":
     unittest.main()

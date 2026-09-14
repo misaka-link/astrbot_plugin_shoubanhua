@@ -764,6 +764,13 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
             </Button>
           }
         >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="热备调度与负载均衡规则"
+            description="优先权重数值越大越优先调用。若同一源模型下配置了多个权重相同的映射模型，系统将自动进行负载均衡轮询调度；当首选模型调用失败时，自动切换至同级其他模型或下一优先级的热备模型。权重设为 -1 时停用不参与调度。"
+          />
           <Table
             rowKey={(_, index) => String(index)}
             size="small"
@@ -809,15 +816,16 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
                 ),
               },
               {
-                title: "优先权重",
+                title: "优先权重（相同则负载均衡）",
                 dataIndex: "priority",
-                width: "20%",
+                width: "25%",
                 render: (value: number, _: unknown, index: number) => (
                   <InputNumber
                     style={{ width: "100%" }}
                     value={value}
                     min={-1}
                     max={10000}
+                    placeholder="权重相同则轮询"
                     onChange={(next) => {
                       const list = config.model_mapping_list.map((item, i) =>
                         i === index ? { ...item, priority: Number(next ?? 0) } : item

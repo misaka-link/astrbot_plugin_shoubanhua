@@ -2514,7 +2514,7 @@ class FigurineProPlugin(Star):
             _normalize_positive_int(self.conf.get("max_batch_concurrency", 4), 4),
             20,
         )
-        initial_candidate_model = self._get_model_failover_candidates(model_name)[0]
+        initial_candidate_model = self._get_model_failover_candidates(model_name, rotate=False)[0]
         initial_request_context = self._get_request_context(
             model_name,
             initial_candidate_model,
@@ -3045,7 +3045,7 @@ class FigurineProPlugin(Star):
 
     def _get_binding_default_price_text(self, model: str) -> str:
         """返回该命令普通一次生成的默认价格文本（按首选模型及其默认设置的分辨率计算）。"""
-        candidates = self._get_model_failover_candidates(model) or [model]
+        candidates = self._get_model_failover_candidates(model, rotate=False) or [model]
         primary = candidates[0]
         cost = self._get_required_invocation_cost(
             primary,
@@ -3092,10 +3092,9 @@ class FigurineProPlugin(Star):
             self._get_custom_command_model_bindings_text(),
         )
 
-    def _get_model_mapping_map(self) -> Dict[str, List[str]]:
-        """获取源模型到按优先权重排列的热备模型映射。"""
+    def _get_raw_model_mapping_entries(self) -> Dict[str, List[Tuple[int, str]]]:
+        """获取源模型到 (优先权重, 映射模型) 列表的原始解析映射。"""
         mapping_entries: Dict[str, List[Tuple[int, str]]] = {}
-        mapping: Dict[str, List[str]] = {}
         raw_list = self.conf.get("model_mapping_list", [])
 
         def add_item(source: Any, mapped: Any, priority: Any = 0):
@@ -3155,7 +3154,14 @@ class FigurineProPlugin(Star):
                     source, mapped = item.split(":", 1)
                     add_item(source, mapped)
 
-        for source, candidates in mapping_entries.items():
+        return mapping_entries
+
+    def _get_model_mapping_map(self) -> Dict[str, List[str]]:
+        """获取源模型到按优先权重排列的热备模型映射（静态顺序）。"""
+        mapping: Dict[str, List[str]] = {}
+        raw_entries = self._get_raw_model_mapping_entries()
+
+        for source, candidates in raw_entries.items():
             # Python 的稳定排序保留同权重配置的原始顺序。
             ordered_candidates = sorted(
                 candidates,
@@ -3172,13 +3178,50 @@ class FigurineProPlugin(Star):
 
         return mapping
 
-    def _get_model_failover_candidates(self, model_name: str) -> List[str]:
-        """返回实际调用模型列表；配置映射时首项即为首选模型。"""
+    def _get_model_failover_candidates(self, model_name: str, rotate: bool = True) -> List[str]:
+        """
+        返回实际调用模型列表；配置映射时首项即为首选模型。
+        若同一源模型下存在多个权重相同的映射模型，则对该权重层级的模型进行负载均衡轮询调用；
+        失败时自动切换到同权重其它模型或下一优先级的热备模型。
+        """
         source_name = (model_name or "").strip()
         if not source_name:
             return []
-        mapped_models = self._get_model_mapping_map().get(source_name, [])
-        return mapped_models or [source_name]
+
+        raw_entries = self._get_raw_model_mapping_entries()
+        candidates = raw_entries.get(source_name, [])
+        if not candidates:
+            return [source_name]
+
+        # 按照权重从大到小分组，同权重去重并保留相对顺序
+        ordered = sorted(candidates, key=lambda c: c[0], reverse=True)
+        seen = set()
+        tiers: Dict[int, List[str]] = {}
+        priority_order: List[int] = []
+        for prio, mapped in ordered:
+            if mapped in seen:
+                continue
+            seen.add(mapped)
+            if prio not in tiers:
+                tiers[prio] = []
+                priority_order.append(prio)
+            tiers[prio].append(mapped)
+
+        if not hasattr(self, "_model_failover_indices"):
+            self._model_failover_indices = {}
+
+        result: List[str] = []
+        for prio in priority_order:
+            group = tiers[prio]
+            if len(group) > 1 and rotate:
+                tier_key = f"{source_name}:{prio}"
+                idx = self._model_failover_indices.get(tier_key, 0) % len(group)
+                self._model_failover_indices[tier_key] = (idx + 1) % len(group)
+                result.extend(group[idx:] + group[:idx])
+            else:
+                result.extend(group)
+
+        return result or [source_name]
 
     def _get_model_prompt_template_map(self) -> Dict[str, str]:
         mapping: Dict[str, str] = {}
@@ -7317,7 +7360,7 @@ class FigurineProPlugin(Star):
         display_label = display_cmd
         base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
-        candidate_models = self._get_model_failover_candidates(model_in_use)
+        candidate_models = self._get_model_failover_candidates(model_in_use, rotate=False)
         initial_actual_model = candidate_models[0]
         candidate_contexts = [
             self._get_request_context(model_in_use, candidate_model, bool(images_to_process))
@@ -7746,7 +7789,7 @@ class FigurineProPlugin(Star):
 
         base_model_name = (self.conf.get("model", "nano-banana") or "nano-banana").strip() or "nano-banana"
         model_in_use = (override_model_name or base_model_name).strip() or base_model_name
-        candidate_models = self._get_model_failover_candidates(model_in_use)
+        candidate_models = self._get_model_failover_candidates(model_in_use, rotate=False)
         initial_actual_model = candidate_models[0]
         initial_request_context = self._get_request_context(
             model_in_use,

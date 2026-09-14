@@ -61,7 +61,15 @@ interface SettingMeta {
   write_only?: boolean;
 }
 
+interface KeyItem {
+  tag: string;
+  masked_key: string;
+  api_url?: string;
+  is_default: boolean;
+}
+
 interface SensitiveState {
+  api_keys?: KeyItem[];
   generic_api_keys?: { configured: boolean; count: number };
   generic_api_url?: { configured: boolean; write_only: boolean };
   proxy_url?: { configured: boolean; write_only: boolean };
@@ -131,6 +139,18 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
   const [keyInput, setKeyInput] = useState("");
   const [sensitiveUrl, setSensitiveUrl] = useState("");
   const [sensitiveProxy, setSensitiveProxy] = useState("");
+
+  // Key 管理与编辑输入
+  const [newKeyTag, setNewKeyTag] = useState("");
+  const [newKeyValue, setNewKeyValue] = useState("");
+  const [newKeyApiUrl, setNewKeyApiUrl] = useState("");
+  const [newKeyIsDefault, setNewKeyIsDefault] = useState(false);
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editOldTag, setEditOldTag] = useState("");
+  const [editNewTag, setEditNewTag] = useState("");
+  const [editNewKey, setEditNewKey] = useState("");
+  const [editNewApiUrl, setEditNewApiUrl] = useState("");
+  const [editIsDefault, setEditIsDefault] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -234,8 +254,8 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
   };
 
   const submitSensitive = async (
-    target: "generic_api_keys" | "generic_api_url" | "proxy_url",
-    action: "append" | "replace" | "clear",
+    target: "api_keys" | "api_key_list" | "generic_api_keys" | "generic_api_url" | "proxy_url",
+    action: string,
     body: Record<string, unknown>
   ) => {
     setError("");
@@ -349,11 +369,27 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
       );
     }
     if (field.type === "select") {
+      let options = asOptions(field.options);
+      if (field.name === "api_key_tag") {
+        const configuredKeys = sensitive?.api_keys || [];
+        const dynamicOptions = configuredKeys.map((k) => ({
+          value: k.tag,
+          label: `${k.tag}${k.is_default ? " (默认 Key)" : ""}`,
+        }));
+        if (!dynamicOptions.some((opt) => opt.value === "默认")) {
+          dynamicOptions.unshift({ value: "默认", label: "默认 (默认 Key)" });
+        }
+        const currentVal = String(value ?? field.default ?? "默认");
+        if (currentVal && !dynamicOptions.some((opt) => opt.value === currentVal)) {
+          dynamicOptions.push({ value: currentVal, label: currentVal });
+        }
+        options = dynamicOptions;
+      }
       return (
         <Form.Item key={field.name} label={field.label} {...hint}>
           <Select
-            value={String(value ?? field.default ?? "")}
-            options={asOptions(field.options)}
+            value={String(value ?? field.default ?? "默认")}
+            options={options}
             onChange={(selected) => updateParam(index, field.name, selected)}
           />
         </Form.Item>
@@ -377,6 +413,7 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
       <Form.Item key={field.name} label={field.label} {...hint}>
         <Input
           value={String(value ?? field.default ?? "")}
+          placeholder={field.name === "request_model_name" ? `默认不填即为「${entry.model || "当前模型"}」` : undefined}
           maxLength={field.max_length}
           onChange={(event) => updateParam(index, field.name, event.target.value)}
         />
@@ -949,46 +986,211 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
             message="敏感配置只写不读"
             description="Key 池、认证地址与代理仅支持追加/替换/清除，页面不会回显明文。"
           />
-          <Card size="small" title={`共享 Key 池（已配置 ${sensitive?.generic_api_keys?.count ?? 0} 条）`}>
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-              <Input.TextArea
-                rows={3}
-                value={keyInput}
-                placeholder="每行一个 Key，仅新增的 Key 会被追加"
-                onChange={(event) => setKeyInput(event.target.value)}
+          <Card
+            size="small"
+            title={`API Key 列表管理（已配置 ${sensitive?.api_keys?.length ?? sensitive?.generic_api_keys?.count ?? 0} 条）`}
+            extra={
+              <Button
+                size="small"
+                danger
+                disabled={!(sensitive?.api_keys?.length || sensitive?.generic_api_keys?.count)}
+                onClick={() =>
+                  modal.confirm({
+                    title: "清空所有 API Key？",
+                    content: "所有配置的 API Key 将被删除，插件将无法请求上游 API。",
+                    okText: "清空",
+                    okButtonProps: { danger: true },
+                    cancelText: "取消",
+                    onOk: () => submitSensitive("api_keys", "clear", {}),
+                  })
+                }
+              >
+                清空所有 Key
+              </Button>
+            }
+          >
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+              <Table<KeyItem>
+                size="small"
+                pagination={false}
+                rowKey="tag"
+                dataSource={sensitive?.api_keys || []}
+                locale={{ emptyText: "暂未配置 API Key" }}
+                columns={[
+                  {
+                    title: "代号",
+                    dataIndex: "tag",
+                    key: "tag",
+                    width: 140,
+                    render: (tag: string, record: KeyItem) => (
+                      <Space>
+                        <Text strong>{tag}</Text>
+                        {record.is_default && <Tag color="blue">默认 Key</Tag>}
+                      </Space>
+                    ),
+                  },
+                  {
+                    title: "API Key (脱敏)",
+                    dataIndex: "masked_key",
+                    key: "masked_key",
+                    width: 160,
+                    render: (masked: string) => (
+                      <Text code>{masked || "未配置"}</Text>
+                    ),
+                  },
+                  {
+                    title: "自定义 API 地址",
+                    dataIndex: "api_url",
+                    key: "api_url",
+                    render: (url?: string) =>
+                      url ? (
+                        <Text code>{url}</Text>
+                      ) : (
+                        <Text type="secondary">全局默认地址</Text>
+                      ),
+                  },
+                  {
+                    title: "操作",
+                    key: "actions",
+                    width: 180,
+                    render: (_: unknown, record: KeyItem) => (
+                      <Space size="small">
+                        {!record.is_default && (
+                          <Button
+                            size="small"
+                            type="link"
+                            style={{ padding: 0 }}
+                            onClick={() =>
+                              submitSensitive("api_keys", "set_default", { tag: record.tag })
+                            }
+                          >
+                            设为默认
+                          </Button>
+                        )}
+                        <Button
+                          size="small"
+                          type="link"
+                          style={{ padding: 0 }}
+                          onClick={() => {
+                            setEditOldTag(record.tag);
+                            setEditNewTag(record.tag);
+                            setEditNewKey("");
+                            setEditNewApiUrl(record.api_url || "");
+                            setEditIsDefault(record.is_default);
+                            setEditModalVisible(true);
+                          }}
+                        >
+                          编辑
+                        </Button>
+                        <Button
+                          size="small"
+                          type="link"
+                          danger
+                          style={{ padding: 0 }}
+                          onClick={() =>
+                            modal.confirm({
+                              title: `删除 Key「${record.tag}」？`,
+                              content: record.is_default
+                                ? "这是当前的默认 Key，删除后下一个 Key 会自动成为默认 Key。"
+                                : "删除后该 Key 将无法被调用。",
+                              okText: "删除",
+                              okButtonProps: { danger: true },
+                              cancelText: "取消",
+                              onOk: () =>
+                                submitSensitive("api_keys", "delete", { tag: record.tag }),
+                            })
+                          }
+                        >
+                          删除
+                        </Button>
+                      </Space>
+                    ),
+                  },
+                ]}
               />
-              <Space>
-                <Button
-                  size="small"
-                  type="primary"
-                  disabled={!keyInput.trim()}
-                  onClick={() => {
-                    const values = keyInput
-                      .split(/\r?\n/)
-                      .map((line) => line.trim())
-                      .filter(Boolean);
-                    submitSensitive("generic_api_keys", "append", { values }).then(() => setKeyInput(""));
-                  }}
-                >
-                  追加
-                </Button>
-                <Button
-                  size="small"
-                  danger
-                  onClick={() =>
-                    modal.confirm({
-                      title: "清空 Key 池？",
-                      content: "所有共享 Key 将被删除，插件将无法请求上游 API。",
-                      okText: "清空",
-                      okButtonProps: { danger: true },
-                      cancelText: "取消",
-                      onOk: () => submitSensitive("generic_api_keys", "clear", {}),
-                    })
-                  }
-                >
-                  清空
-                </Button>
-              </Space>
+
+              <Card size="small" type="inner" title="添加新 API Key">
+                <Space wrap align="center">
+                  <Input
+                    style={{ width: 140 }}
+                    placeholder="代号（如：备用Key）"
+                    value={newKeyTag}
+                    onChange={(e) => setNewKeyTag(e.target.value)}
+                  />
+                  <Input.Password
+                    style={{ width: 220 }}
+                    placeholder="API Key（形如 sk-...）"
+                    value={newKeyValue}
+                    onChange={(e) => setNewKeyValue(e.target.value)}
+                  />
+                  <Input
+                    style={{ width: 260 }}
+                    placeholder="自定义 API 地址（留空使用全局默认）"
+                    value={newKeyApiUrl}
+                    onChange={(e) => setNewKeyApiUrl(e.target.value)}
+                  />
+                  <Checkbox
+                    checked={newKeyIsDefault}
+                    onChange={(e) => setNewKeyIsDefault(e.target.checked)}
+                  >
+                    设为默认 Key
+                  </Checkbox>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<PlusOutlined />}
+                    disabled={!newKeyTag.trim() || !newKeyValue.trim()}
+                    onClick={async () => {
+                      await submitSensitive("api_keys", "add", {
+                        tag: newKeyTag.trim(),
+                        key: newKeyValue.trim(),
+                        api_url: newKeyApiUrl.trim(),
+                        is_default: newKeyIsDefault,
+                      });
+                      setNewKeyTag("");
+                      setNewKeyValue("");
+                      setNewKeyApiUrl("");
+                      setNewKeyIsDefault(false);
+                    }}
+                  >
+                    添加 Key
+                  </Button>
+                </Space>
+              </Card>
+
+              <Collapse
+                size="small"
+                items={[
+                  {
+                    key: "batch",
+                    label: "批量导入 Key",
+                    children: (
+                      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                        <Input.TextArea
+                          rows={3}
+                          value={keyInput}
+                          placeholder="支持每行一个 Key，或每行 代号:Key 或 代号:Key:API地址，例如：&#10;默认:sk-123456789&#10;Grok专线:sk-abcdefgh:https://api.x.ai/v1&#10;sk-987654321（无代号则自动命名）"
+                          onChange={(event) => setKeyInput(event.target.value)}
+                        />
+                        <Button
+                          size="small"
+                          type="primary"
+                          disabled={!keyInput.trim()}
+                          onClick={() => {
+                            const values = keyInput
+                              .split(/\r?\n/)
+                              .map((line) => line.trim())
+                              .filter(Boolean);
+                            submitSensitive("api_keys", "batch_append", { values }).then(() => setKeyInput(""));
+                          }}
+                        >
+                          批量导入
+                        </Button>
+                      </Space>
+                    ),
+                  },
+                ]}
+              />
             </Space>
           </Card>
           <Card
@@ -1111,6 +1313,64 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
           }))}
         />
       </Card>
+
+      <Modal
+        title={`编辑 Key「${editOldTag}」`}
+        open={editModalVisible}
+        onCancel={() => setEditModalVisible(false)}
+        onOk={async () => {
+          if (!editNewTag.trim()) {
+            message.warning("代号不能为空");
+            return;
+          }
+          await submitSensitive("api_keys", "update", {
+            old_tag: editOldTag,
+            tag: editNewTag.trim(),
+            key: editNewKey.trim() || undefined,
+            api_url: editNewApiUrl.trim(),
+            is_default: editIsDefault,
+          });
+          setEditModalVisible(false);
+        }}
+      >
+        <Space direction="vertical" size={14} style={{ width: "100%", marginTop: 8 }}>
+          <div>
+            <Text strong>Key 代号：</Text>
+            <Input
+              style={{ marginTop: 4 }}
+              value={editNewTag}
+              onChange={(e) => setEditNewTag(e.target.value)}
+              placeholder="Key 代号"
+            />
+          </div>
+          <div>
+            <Text strong>更新密钥（留空则保持原密钥不变）：</Text>
+            <Input.Password
+              style={{ marginTop: 4 }}
+              value={editNewKey}
+              onChange={(e) => setEditNewKey(e.target.value)}
+              placeholder="输入新 Key 覆盖，不修改请留空"
+            />
+          </div>
+          <div>
+            <Text strong>自定义 API 地址（留空使用全局默认地址）：</Text>
+            <Input
+              style={{ marginTop: 4 }}
+              value={editNewApiUrl}
+              onChange={(e) => setEditNewApiUrl(e.target.value)}
+              placeholder="例如 https://api.openai.com/v1（留空使用全局默认）"
+            />
+          </div>
+          <div>
+            <Checkbox
+              checked={editIsDefault}
+              onChange={(e) => setEditIsDefault(e.target.checked)}
+            >
+              设为默认 Key
+            </Checkbox>
+          </div>
+        </Space>
+      </Modal>
     </Space>
   );
 }

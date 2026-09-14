@@ -704,6 +704,7 @@ class FigurineProPlugin(Star):
 
         self.generic_key_index = 0
         self.gemini_key_index = 0
+        self.tag_key_indices: Dict[str, int] = {}
         self.key_lock = asyncio.Lock()
         self._dashboard_config_lock = asyncio.Lock()
 
@@ -745,6 +746,7 @@ class FigurineProPlugin(Star):
         await self._migrate_command_model_list_config()
         await self._migrate_extra_prefix_config()
         await self._migrate_prompt_list_config()
+        await self._migrate_api_keys_config()
         await self._load_prompt_map()
         await self._load_preset_images()
         self._register_llm_tools()
@@ -755,10 +757,10 @@ class FigurineProPlugin(Star):
 
         logger.info("FigurinePro 插件已加载")
 
-        g_keys = self.conf.get("generic_api_keys", [])
+        keys = self._get_normalized_api_key_list()
         o_keys = self.conf.get("gemini_api_keys", [])
 
-        if not g_keys and not o_keys:
+        if not keys and not o_keys:
             logger.warning("FigurinePro: 未配置任何 API Key")
 
         self._register_usage_web_apis()
@@ -1201,11 +1203,20 @@ class FigurineProPlugin(Star):
         return url
 
     def _dashboard_sensitive_state(self) -> Dict[str, Any]:
-        keys = self.conf.get("generic_api_keys", [])
-        key_count = len(keys) if isinstance(keys, list) else 0
+        api_keys = self._get_normalized_api_key_list()
+        key_count = len(api_keys)
         generic_api_url = str(self.conf.get("generic_api_url", "") or "").strip()
         proxy_url = str(self.conf.get("proxy_url", "") or "").strip()
         return {
+            "api_keys": [
+                {
+                    "tag": item["tag"],
+                    "masked_key": self._mask_api_key(item["key"]),
+                    "api_url": item.get("api_url", ""),
+                    "is_default": bool(item.get("is_default", False)),
+                }
+                for item in api_keys
+            ],
             "generic_api_keys": {"configured": bool(key_count), "count": key_count},
             "generic_api_url": {
                 "configured": bool(generic_api_url),
@@ -1221,6 +1232,7 @@ class FigurineProPlugin(Star):
         return {
             "generic_api_url",
             "generic_api_keys",
+            "api_key_list",
             "gemini_api_keys",
             "extra_prefix",
             "command_model_list",
@@ -1405,6 +1417,8 @@ class FigurineProPlugin(Star):
             {"name": "max_output_tokens", "label": "最大输出/思考 Token", "group": "基础与额度", "type": "number", "default": 0, "min": 0, "max": 1000000},
             {"name": "default_resolution", "label": "默认分辨率", "group": "基础与额度", "type": "text", "default": "auto", "max_length": 64},
             {"name": "send_default_size", "label": "默认传递 size", "group": "基础与额度", "type": "boolean", "default": False},
+            {"name": "api_key_tag", "label": "绑定 Key", "group": "基础与额度", "type": "select", "default": "默认", "options": self._get_api_key_tag_options()},
+            {"name": "request_model_name", "label": "实际请求模型名", "group": "基础与额度", "type": "text", "default": "", "max_length": 128},
             {"name": "enable_gpt_parameters", "label": "启用 GPT 参数", "group": "GPT", "type": "boolean", "default": False},
             {"name": "omit_n_parameter", "label": "不传递 n 参数", "group": "GPT", "type": "boolean", "default": False},
             {"name": "quality", "label": "质量", "group": "GPT", "type": "select", "default": "auto", "options": ["low", "medium", "high", "auto"]},
@@ -1674,6 +1688,9 @@ class FigurineProPlugin(Star):
                         normalized[name] = self._dashboard_int(raw_value, field["label"], field["min"], field["max"])
                 elif field_type == "select":
                     normalized_value = str(raw_value or field["default"]).strip()
+                    if name == "api_key_tag":
+                        normalized[name] = normalized_value or "默认"
+                        continue
                     option_values = {
                         option["value"] if isinstance(option, dict) else option
                         for option in field["options"]
@@ -1683,6 +1700,11 @@ class FigurineProPlugin(Star):
                     normalized[name] = normalized_value
                 else:
                     normalized_value = str(raw_value or field["default"]).strip()
+                    if name == "request_model_name":
+                        if len(normalized_value) > field["max_length"]:
+                            raise ValueError(f"{field['label']} 长度无效")
+                        normalized[name] = normalized_value
+                        continue
                     if not normalized_value or len(normalized_value) > field["max_length"]:
                         raise ValueError(f"{field['label']} 长度无效")
                     normalized[name] = normalized_value
@@ -2005,21 +2027,197 @@ class FigurineProPlugin(Star):
             expected_revision = str(body.get("revision") or "").strip()
             action = str(body.get("action") or "").strip()
             target = str(body.get("target") or "").strip()
-            if target not in {"generic_api_keys", "generic_api_url", "proxy_url"}:
+            if target not in {"api_keys", "api_key_list", "generic_api_keys", "generic_api_url", "proxy_url"}:
                 raise ValueError("敏感配置目标无效")
-            if action not in {"append", "replace", "clear"}:
+            valid_actions = {
+                "api_keys": {"add", "update", "delete", "set_default", "batch_append", "replace", "clear"},
+                "api_key_list": {"add", "update", "delete", "set_default", "batch_append", "replace", "clear"},
+                "generic_api_keys": {"append", "replace", "clear"},
+                "generic_api_url": {"replace", "clear"},
+                "proxy_url": {"replace", "clear"},
+            }
+            if action not in valid_actions.get(target, set()):
                 raise ValueError("敏感配置操作无效")
             async with self._dashboard_config_lock:
                 if expected_revision != self._dashboard_current_revision():
                     return self._dashboard_error("配置已被其他页面修改，请重新加载后再保存", 409)
                 previous = {
                     target: (target in self.conf, copy.deepcopy(self.conf.get(target))),
+                    "api_key_list": ("api_key_list" in self.conf, copy.deepcopy(self.conf.get("api_key_list"))),
+                    "generic_api_keys": ("generic_api_keys" in self.conf, copy.deepcopy(self.conf.get("generic_api_keys"))),
+                    "model_parameter_list": ("model_parameter_list" in self.conf, copy.deepcopy(self.conf.get("model_parameter_list"))),
                     "_dashboard_config_generation": (
                         "_dashboard_config_generation" in self.conf,
                         copy.deepcopy(self.conf.get("_dashboard_config_generation")),
                     ),
                 }
-                if target == "generic_api_keys":
+                if target in {"api_keys", "api_key_list"}:
+                    current_items = copy.deepcopy(self._get_normalized_api_key_list())
+                    if action == "add":
+                        tag = str(body.get("tag") or "").strip()
+                        key = str(body.get("key") or "").strip()
+                        api_url = str(body.get("api_url") or "").strip()
+                        is_default = bool(body.get("is_default", False))
+                        if not tag or len(tag) > 64:
+                            raise ValueError("Key 代号无效（不能为空且不能超过 64 字符）")
+                        if not key or len(key) > 1000:
+                            raise ValueError("Key 格式无效")
+                        if api_url:
+                            parsed_u = urlparse(api_url)
+                            if parsed_u.scheme not in {"http", "https"} or not parsed_u.netloc:
+                                raise ValueError("API 地址格式无效（需以 http:// 或 https:// 开头且包含主机名）")
+                        if any(it.get("tag") == tag for it in current_items):
+                            raise ValueError(f"代号 '{tag}' 已存在")
+                        if not current_items:
+                            is_default = True
+                        if is_default:
+                            for it in current_items:
+                                it["is_default"] = False
+                        current_items.append({
+                            "__template_key": "api_key",
+                            "tag": tag,
+                            "key": key,
+                            "api_url": api_url,
+                            "is_default": is_default,
+                        })
+                    elif action == "update":
+                        old_tag = str(body.get("old_tag") or "").strip()
+                        new_tag = str(body.get("tag") or old_tag).strip()
+                        key = str(body.get("key") or "").strip()
+                        api_url = body.get("api_url")
+                        is_default = body.get("is_default")
+                        if not new_tag or len(new_tag) > 64:
+                            raise ValueError("Key 代号无效")
+                        target_item = next((it for it in current_items if it.get("tag") == old_tag), None)
+                        if not target_item:
+                            raise ValueError("未找到要修改的 Key")
+                        if new_tag != old_tag and any(it.get("tag") == new_tag for it in current_items):
+                            raise ValueError(f"代号 '{new_tag}' 已存在")
+                        if key:
+                            if len(key) > 1000:
+                                raise ValueError("Key 格式无效")
+                            target_item["key"] = key
+                        if api_url is not None:
+                            url_str = str(api_url).strip()
+                            if url_str:
+                                parsed_u = urlparse(url_str)
+                                if parsed_u.scheme not in {"http", "https"} or not parsed_u.netloc:
+                                    raise ValueError("API 地址格式无效（需以 http:// 或 https:// 开头且包含主机名）")
+                            target_item["api_url"] = url_str
+                        target_item["tag"] = new_tag
+                        if is_default is True:
+                            for it in current_items:
+                                it["is_default"] = (it.get("tag") == new_tag)
+                        if old_tag != new_tag:
+                            param_list = self.conf.get("model_parameter_list", [])
+                            if isinstance(param_list, list):
+                                for p in param_list:
+                                    if isinstance(p, dict) and p.get("api_key_tag") == old_tag:
+                                        p["api_key_tag"] = new_tag
+                    elif action == "delete":
+                        tag = str(body.get("tag") or "").strip()
+                        target_item = next((it for it in current_items if it.get("tag") == tag), None)
+                        if not target_item:
+                            raise ValueError("未找到要删除的 Key")
+                        was_default = target_item.get("is_default", False)
+                        current_items = [it for it in current_items if it.get("tag") != tag]
+                        if was_default and current_items:
+                            current_items[0]["is_default"] = True
+                    elif action == "set_default":
+                        tag = str(body.get("tag") or "").strip()
+                        if not any(it.get("tag") == tag for it in current_items):
+                            raise ValueError("未找到指定的 Key 代号")
+                        for it in current_items:
+                            it["is_default"] = (it.get("tag") == tag)
+                    elif action == "batch_append":
+                        raw_values = body.get("values") or body.get("items") or []
+                        if not isinstance(raw_values, list):
+                            raise ValueError("批量导入数据必须是列表")
+                        existing_tags = {it.get("tag") for it in current_items}
+                        existing_keys = {it.get("key") for it in current_items}
+                        for raw_val in raw_values:
+                            u = ""
+                            if isinstance(raw_val, dict):
+                                t = str(raw_val.get("tag") or "").strip()
+                                k = str(raw_val.get("key") or "").strip()
+                                u = str(raw_val.get("api_url") or raw_val.get("url") or "").strip()
+                            elif isinstance(raw_val, str) and (":" in raw_val or "：" in raw_val):
+                                sep = ":" if ":" in raw_val else "："
+                                parts = [p.strip() for p in raw_val.split(sep, 2)]
+                                if len(parts) >= 3 and (parts[2].startswith("http://") or parts[2].startswith("https://")):
+                                    t, k, u = parts[0], parts[1], parts[2]
+                                else:
+                                    t, k = parts[0], sep.join(parts[1:]).strip()
+                            else:
+                                t, k = "", str(raw_val or "").strip()
+                            if not k or len(k) > 1000 or k in existing_keys:
+                                continue
+                            if u:
+                                parsed_u = urlparse(u)
+                                if parsed_u.scheme not in {"http", "https"} or not parsed_u.netloc:
+                                    u = ""
+                            if not t:
+                                if "默认" not in existing_tags and not current_items:
+                                    t = "默认"
+                                else:
+                                    num = len(current_items) + 1
+                                    while f"Key-{num}" in existing_tags:
+                                        num += 1
+                                    t = f"Key-{num}"
+                            elif t in existing_tags:
+                                num = 2
+                                base_t = t
+                                while f"{base_t}-{num}" in existing_tags:
+                                    num += 1
+                                t = f"{base_t}-{num}"
+                            is_def = not current_items
+                            current_items.append({
+                                "__template_key": "api_key",
+                                "tag": t,
+                                "key": k,
+                                "api_url": u,
+                                "is_default": is_def,
+                            })
+                            existing_tags.add(t)
+                            existing_keys.add(k)
+                    elif action == "replace":
+                        raw_items = body.get("items", [])
+                        if not isinstance(raw_items, list):
+                            raise ValueError("Key 列表必须是数组")
+                        parsed = []
+                        seen_t = set()
+                        for idx, raw in enumerate(raw_items):
+                            if not isinstance(raw, dict):
+                                continue
+                            t = str(raw.get("tag") or "").strip() or ("默认" if idx == 0 else f"Key-{idx + 1}")
+                            k = str(raw.get("key") or "").strip()
+                            u = str(raw.get("api_url") or raw.get("url") or "").strip()
+                            is_def = bool(raw.get("is_default", False))
+                            if not k or len(k) > 1000:
+                                continue
+                            if u:
+                                parsed_u = urlparse(u)
+                                if parsed_u.scheme not in {"http", "https"} or not parsed_u.netloc:
+                                    u = ""
+                            if t in seen_t:
+                                t = f"{t}-{idx + 1}"
+                            seen_t.add(t)
+                            parsed.append({
+                                "__template_key": "api_key",
+                                "tag": t,
+                                "key": k,
+                                "api_url": u,
+                                "is_default": is_def,
+                            })
+                        if parsed and not any(it["is_default"] for it in parsed):
+                            parsed[0]["is_default"] = True
+                        current_items = parsed
+                    elif action == "clear":
+                        current_items = []
+
+                    self.conf["api_key_list"] = current_items
+                    self.conf["generic_api_keys"] = [it["key"] for it in current_items]
+                elif target == "generic_api_keys":
                     raw_values = body.get("values", [])
                     if not isinstance(raw_values, list):
                         raise ValueError("Key 池必须是列表")
@@ -2038,6 +2236,16 @@ class FigurineProPlugin(Star):
                         next_value = values
                     else:
                         next_value = []
+                    self.conf[target] = next_value
+                    synced = []
+                    for idx, val in enumerate(next_value):
+                        synced.append({
+                            "__template_key": "api_key",
+                            "tag": "默认" if idx == 0 else f"Key-{idx + 1}",
+                            "key": val,
+                            "is_default": idx == 0,
+                        })
+                    self.conf["api_key_list"] = synced
                 else:
                     if action == "append":
                         raise ValueError("该敏感配置不支持追加")
@@ -2054,7 +2262,8 @@ class FigurineProPlugin(Star):
                             if parsed.scheme not in {"http", "https", "socks5", "socks5h"} or not parsed.netloc:
                                 raise ValueError("代理地址格式无效")
                 try:
-                    self.conf[target] = next_value
+                    if target not in {"api_keys", "api_key_list"}:
+                        self.conf[target] = next_value
                     self._dashboard_advance_configuration_generation()
                     await self._persist_configuration()
                 except Exception:
@@ -3220,6 +3429,8 @@ class FigurineProPlugin(Star):
                 seedream_max_side_2000: Any = True,
                 seedream_side_over_2000_auto_2k: Any = True,
                 seedream_optimize_prompt_mode: Any = "standard",
+                api_key_tag: Any = "默认",
+                request_model_name: Any = "",
         ):
             model_name = str(model or "").strip()
             if not model_name:
@@ -3271,6 +3482,8 @@ class FigurineProPlugin(Star):
                 "seedream_max_side_2000": normalize_bool(seedream_max_side_2000),
                 "seedream_side_over_2000_auto_2k": normalize_bool(seedream_side_over_2000_auto_2k),
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
+                "api_key_tag": str(api_key_tag or "默认").strip() or "默认",
+                "request_model_name": str(request_model_name or "").strip(),
             }
 
         if isinstance(raw_list, dict):
@@ -3448,6 +3661,8 @@ class FigurineProPlugin(Star):
                             "Seedream提示词优化模式",
                             default="standard",
                         ),
+                        get_value(parameters, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
+                        get_value(parameters, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
                     )
             return mapping
 
@@ -3629,6 +3844,8 @@ class FigurineProPlugin(Star):
                     "Seedream提示词优化模式",
                     default="standard",
                 ),
+                get_value(item, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
+                get_value(item, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
             )
 
         return mapping
@@ -4641,6 +4858,82 @@ class FigurineProPlugin(Star):
         except Exception as e:
             logger.error(f"自动迁移 extra_prefix 配置失败: {e}")
 
+    async def _migrate_api_keys_config(self):
+        raw_list = self.conf.get("api_key_list")
+        if isinstance(raw_list, list) and raw_list:
+            migrated: List[Dict[str, Any]] = []
+            changed = False
+            for idx, item in enumerate(raw_list):
+                if isinstance(item, dict):
+                    tag = str(item.get("tag") or item.get("代号") or item.get("name") or "").strip()
+                    key = str(item.get("key") or item.get("api_key") or "").strip()
+                    api_url = str(item.get("api_url") or item.get("url") or item.get("base_url") or "").strip()
+                    is_def = bool(item.get("is_default", False))
+                    if key:
+                        migrated.append({
+                            "__template_key": "api_key",
+                            "tag": tag or ("默认" if idx == 0 else f"Key-{idx + 1}"),
+                            "key": key,
+                            "api_url": api_url,
+                            "is_default": is_def,
+                        })
+                        if item.get("__template_key") != "api_key" or "api_url" not in item:
+                            changed = True
+                    else:
+                        changed = True
+                elif isinstance(item, str) and item.strip():
+                    migrated.append({
+                        "__template_key": "api_key",
+                        "tag": "默认" if idx == 0 else f"Key-{idx + 1}",
+                        "key": item.strip(),
+                        "api_url": "",
+                        "is_default": idx == 0,
+                    })
+                    changed = True
+                else:
+                    changed = True
+
+            if migrated and not any(it["is_default"] for it in migrated):
+                default_it = next((it for it in migrated if it["tag"] == "默认"), migrated[0])
+                default_it["is_default"] = True
+                changed = True
+
+            if changed:
+                self.conf["api_key_list"] = migrated
+                try:
+                    await self._persist_configuration()
+                    logger.info(f"已规范化 api_key_list 模板列表格式，共 {len(migrated)} 条")
+                except Exception as e:
+                    logger.error(f"规范化 api_key_list 配置失败: {e}")
+            return
+
+        # 若 api_key_list 未配置，从 generic_api_keys 自动迁移
+        generic_keys = self.conf.get("generic_api_keys", [])
+        if isinstance(generic_keys, str) and generic_keys.strip():
+            generic_keys = [generic_keys.strip()]
+        if not isinstance(generic_keys, list):
+            generic_keys = []
+
+        migrated_from_generic: List[Dict[str, Any]] = []
+        for idx, k in enumerate(generic_keys):
+            key = str(k or "").strip()
+            if key:
+                migrated_from_generic.append({
+                    "__template_key": "api_key",
+                    "tag": "默认" if idx == 0 else f"Key-{idx + 1}",
+                    "key": key,
+                    "api_url": "",
+                    "is_default": idx == 0,
+                })
+
+        if migrated_from_generic:
+            self.conf["api_key_list"] = migrated_from_generic
+            try:
+                await self._persist_configuration()
+                logger.info(f"已自动从 generic_api_keys 迁移到 api_key_list，共 {len(migrated_from_generic)} 条")
+            except Exception as e:
+                logger.error(f"自动迁移 generic_api_keys 配置失败: {e}")
+
     def _get_extra_prefixes(self) -> List[str]:
         raw_prefixes = self.conf.get("extra_prefix", "bnn")
         prefixes: List[str] = []
@@ -4689,24 +4982,27 @@ class FigurineProPlugin(Star):
         """Resolve per-attempt route and parameters without changing the actual model ID."""
         source_name = (source_model or "").strip()
         actual_name = (actual_model or source_name).strip()
+        parameters = self._get_effective_model_parameters(source_name, actual_name)
+        request_model = str((parameters or {}).get("request_model_name") or "").strip() or actual_name
         route_model = (
             actual_name if self._model_has_explicit_endpoint_route(actual_name)
+            else request_model if self._model_has_explicit_endpoint_route(request_model)
             else source_name if self._model_has_explicit_endpoint_route(source_name)
             else ""
         )
         gemini_models = self._normalize_model_list(self.conf.get("gemini_model_list", []))
-        api_route = "gemini" if route_model in gemini_models else "generic"
-        parameters = self._get_effective_model_parameters(source_name, actual_name)
+        api_route = "gemini" if (route_model in gemini_models or (not route_model and (actual_name in gemini_models or request_model in gemini_models))) else "generic"
         endpoint_type = "gemini_generate_content"
         if api_route == "generic":
             endpoint_type = self._get_generic_endpoint_type_for_model(
-                route_model,
+                route_model or request_model,
                 has_images,
                 parameters=parameters,
             )
         return {
             "source_model": source_name,
             "actual_model": actual_name,
+            "request_model_name": request_model,
             "route_model": route_model,
             "parameters": parameters,
             "api_route": api_route,
@@ -5119,22 +5415,169 @@ class FigurineProPlugin(Star):
         else:
             yield event.plain_result(f"❌ 序号无效。")
 
-    async def _get_pool_api_key(self, mode: str) -> str | None:
-        """Return a shared Generic key, with legacy Gemini keys as read-only fallback."""
-        async with self.key_lock:
-            generic_keys = self.conf.get("generic_api_keys", [])
-            if isinstance(generic_keys, list) and generic_keys:
-                key = generic_keys[self.generic_key_index % len(generic_keys)]
-                self.generic_key_index = (self.generic_key_index + 1) % len(generic_keys)
-                return key
+    @staticmethod
+    def _mask_api_key(key: Any) -> str:
+        s = str(key or "").strip()
+        if not s:
+            return ""
+        if len(s) <= 8:
+            return "****"
+        if len(s) <= 16:
+            return s[:3] + "****" + s[-3:]
+        return s[:4] + "****" + s[-4:]
 
+    def _get_normalized_api_key_list(self) -> List[Dict[str, Any]]:
+        raw_list = self.conf.get("api_key_list")
+        items: List[Dict[str, Any]] = []
+        if isinstance(raw_list, list) and raw_list:
+            for idx, item in enumerate(raw_list):
+                if isinstance(item, dict):
+                    tag = str(item.get("tag") or item.get("代号") or item.get("name") or "").strip()
+                    key = str(item.get("key") or item.get("api_key") or "").strip()
+                    api_url = str(item.get("api_url") or item.get("url") or item.get("base_url") or "").strip()
+                    is_def = bool(item.get("is_default", False))
+                    if key:
+                        items.append({
+                            "__template_key": "api_key",
+                            "tag": tag or ("默认" if idx == 0 else f"Key-{idx + 1}"),
+                            "key": key,
+                            "api_url": api_url,
+                            "is_default": is_def,
+                        })
+                elif isinstance(item, str) and item.strip():
+                    items.append({
+                        "__template_key": "api_key",
+                        "tag": "默认" if idx == 0 else f"Key-{idx + 1}",
+                        "key": item.strip(),
+                        "api_url": "",
+                        "is_default": idx == 0,
+                    })
+
+        if not items:
+            # Fallback to generic_api_keys if present
+            generic_keys = self.conf.get("generic_api_keys", [])
+            if isinstance(generic_keys, str) and generic_keys.strip():
+                generic_keys = [generic_keys.strip()]
+            if isinstance(generic_keys, list):
+                for idx, k in enumerate(generic_keys):
+                    key = str(k or "").strip()
+                    if key:
+                        items.append({
+                            "__template_key": "api_key",
+                            "tag": "默认",
+                            "key": key,
+                            "api_url": "",
+                            "is_default": True,
+                        })
+
+        if items and not any(it.get("is_default") for it in items):
+            default_it = next((it for it in items if it["tag"] == "默认"), items[0])
+            default_it["is_default"] = True
+
+        return items
+
+    def _get_api_key_tags(self) -> List[str]:
+        items = self._get_normalized_api_key_list()
+        tags: List[str] = []
+        for it in items:
+            t = it["tag"]
+            if t not in tags:
+                tags.append(t)
+        if "默认" not in tags:
+            tags.insert(0, "默认")
+        return tags
+
+    def _get_api_key_tag_options(self) -> List[Dict[str, str]]:
+        items = self._get_normalized_api_key_list()
+        default_tags = {it["tag"] for it in items if it.get("is_default")}
+        tags = self._get_api_key_tags()
+        options = []
+        for t in tags:
+            is_def = t in default_tags or (t == "默认" and not default_tags)
+            label = f"{t} (默认 Key)" if is_def else t
+            options.append({"value": t, "label": label})
+        return options
+
+    async def _get_api_key_item_for_request(
+        self,
+        mode: str,
+        request_context: Optional[Dict[str, Any]] = None,
+        model_name: Optional[str] = None,
+    ) -> Dict[str, Any] | None:
+        """Return the API key item matching the model's bound tag, with graceful fallback to default."""
+        async with self.key_lock:
+            bound_tag = None
+            if request_context and isinstance(request_context.get("parameters"), dict):
+                bound_tag = request_context["parameters"].get("api_key_tag")
+            if not bound_tag and model_name:
+                parameters = self._parameters_for_request(model_name)
+                if parameters:
+                    bound_tag = parameters.get("api_key_tag")
+            tag = str(bound_tag or "默认").strip() or "默认"
+
+            all_items = self._get_normalized_api_key_list()
+            if not hasattr(self, "tag_key_indices"):
+                self.tag_key_indices = {}
+
+            if all_items:
+                # 1. 尝试匹配目标代号
+                matching_items = [
+                    it for it in all_items
+                    if it.get("tag") == tag and it.get("key")
+                ]
+                if matching_items:
+                    idx = self.tag_key_indices.get(tag, 0) % len(matching_items)
+                    self.tag_key_indices[tag] = (idx + 1) % len(matching_items)
+                    return matching_items[idx]
+
+                # 2. 目标代号未匹配且不是“默认”，记录日志并回退默认 Key
+                if tag != "默认":
+                    logger.warning(f"未找到绑定代号为 '{tag}' 的 API Key，回退到默认 Key")
+
+                # 3. 回退默认 Key：优先 is_default，其次代号为“默认”，最后首个有效 Key
+                default_items = [
+                    it for it in all_items
+                    if it.get("is_default") and it.get("key")
+                ]
+                if not default_items:
+                    default_items = [
+                        it for it in all_items
+                        if it.get("tag") == "默认" and it.get("key")
+                    ]
+                if not default_items:
+                    default_items = [it for it in all_items if it.get("key")]
+
+                if default_items:
+                    def_slot = "__default__"
+                    idx = self.tag_key_indices.get(def_slot, 0) % len(default_items)
+                    self.tag_key_indices[def_slot] = (idx + 1) % len(default_items)
+                    return default_items[idx]
+
+            # 4. Gemini 历史兼容兜底
             if mode == "gemini":
                 legacy_keys = self.conf.get("gemini_api_keys", [])
                 if isinstance(legacy_keys, list) and legacy_keys:
                     key = legacy_keys[self.gemini_key_index % len(legacy_keys)]
                     self.gemini_key_index = (self.gemini_key_index + 1) % len(legacy_keys)
-                    return key
+                    return {"tag": "gemini_legacy", "key": key, "api_url": "", "is_default": False}
+
             return None
+
+    async def _get_api_key_for_request(
+        self,
+        mode: str,
+        request_context: Optional[Dict[str, Any]] = None,
+        model_name: Optional[str] = None,
+    ) -> str | None:
+        """Return the API key matching the model's bound tag, with graceful fallback to default."""
+        item = await self._get_api_key_item_for_request(
+            mode, request_context=request_context, model_name=model_name
+        )
+        return item.get("key") if item else None
+
+    async def _get_pool_api_key(self, mode: str) -> str | None:
+        """Return a shared Generic key, with legacy Gemini keys as read-only fallback."""
+        return await self._get_api_key_for_request(mode, None)
 
     @staticmethod
     def _looks_like_image_mime(mime_type: Any) -> bool:
@@ -6258,6 +6701,11 @@ class FigurineProPlugin(Star):
         api_mode = request_context.get("api_route") or "generic"
         endpoint_type = request_context.get("endpoint_type") or "chat_completions"
         route_model = request_context.get("route_model") or model_name
+        request_model_name = str(
+            request_context.get("request_model_name")
+            or (parameters or {}).get("request_model_name")
+            or model_name
+        ).strip() or model_name
         final_url = ""
 
         def make_error(error_type: str, message: str, status: int = 0, **kwargs: Any) -> Tuple[Dict[str, Any], int]:
@@ -6280,13 +6728,24 @@ class FigurineProPlugin(Star):
 
         base_url = self._get_api_base_url()
 
+        key_item = await self._get_api_key_item_for_request(
+            api_mode,
+            request_context=request_context,
+            model_name=model_name,
+        )
+        if not key_item or not key_item.get("key"):
+            return make_error("config_error", "无可用 API Key (请在 Key 列表中添加 Key)", 0)
+
+        api_key = key_item["key"]
+        custom_url = str(key_item.get("api_url") or "").strip()
+        if custom_url:
+            base_url = custom_url
+        else:
+            base_url = self._get_api_base_url()
+
         if not base_url:
             base_url = ""
             return make_error("config_error", "API URL 未配置", 0)
-
-        api_key = await self._get_pool_api_key(api_mode)
-        if not api_key:
-            return make_error("config_error", "无可用 API Key (请在共享 Key 池中添加 Key)", 0)
 
         # --- 构造最终 Prompt (支持按模型指定预设提示词模板) ---
         final_prompt = self._build_final_prompt(prompt, model_name, len(image_bytes_list))
@@ -6311,7 +6770,7 @@ class FigurineProPlugin(Star):
 
         if api_mode == "gemini":
             headers["Content-Type"] = "application/json"
-            final_url = self._resolve_gemini_endpoint_url(base_url, model_name)
+            final_url = self._resolve_gemini_endpoint_url(base_url, request_model_name)
             headers["x-goog-api-key"] = api_key
 
             parts = [{"text": final_prompt}]
@@ -6369,7 +6828,7 @@ class FigurineProPlugin(Star):
 
             if generic_endpoint_type == "images_edits":
                 form_data = self._build_generic_images_edits_form(
-                    model_name,
+                    request_model_name,
                     final_prompt,
                     image_bytes_list,
                     resolution,
@@ -6380,7 +6839,7 @@ class FigurineProPlugin(Star):
             elif generic_endpoint_type == "images_generations":
                 headers["Content-Type"] = "application/json"
                 payload = self._build_generic_images_payload(
-                    model_name,
+                    request_model_name,
                     final_prompt,
                     image_bytes_list,
                     resolution,
@@ -6409,7 +6868,7 @@ class FigurineProPlugin(Star):
 
                 use_stream = self.conf.get("use_stream", True)
                 payload = {
-                    "model": model_name,
+                    "model": request_model_name,
                     "stream": use_stream,
                     "messages": messages
                 }
@@ -6417,15 +6876,16 @@ class FigurineProPlugin(Star):
                     payload["max_tokens"] = max_output_tokens
 
         safe_log_url = self._sanitize_request_log_url(final_url)
+        log_model_str = f"model={model_name}" + (f" (实际请求={request_model_name})" if request_model_name != model_name else "")
         logger.info(
-            f"调用图片生成端点: model={model_name}, endpoint_type={endpoint_type}, "
+            f"调用图片生成端点: {log_model_str}, endpoint_type={endpoint_type}, "
             f"endpoint={safe_log_url}, image_count={len(image_bytes_list)}"
         )
 
         if form_data is not None:
             body_type = "multipart/form-data"
             request_parameters = self._build_images_edits_log_parameters(
-                model_name,
+                request_model_name,
                 final_prompt,
                 image_bytes_list,
                 resolution,

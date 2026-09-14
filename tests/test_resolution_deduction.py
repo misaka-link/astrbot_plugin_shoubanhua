@@ -43,6 +43,25 @@ class _TestConfig(dict):
 
 
 def _install_import_stubs():
+    image_module = types.ModuleType("PIL.Image")
+
+    def open_image(value):
+        data = value if isinstance(value, bytes) else value.getvalue()
+        dimensions = {
+            b"small": (1600, 1200),      # 最长边 1600 <= 2000
+            b"wide_2k": (3000, 2000),    # 边长 > 2000 → 2K 档
+            b"tall_2k": (1500, 2500),    # 边长 > 2000 → 2K 档
+        }
+        if data not in dimensions:
+            raise ValueError("invalid test image")
+        return _FakeImage(dimensions[data])
+
+    image_module.open = open_image
+    pil_module = types.ModuleType("PIL")
+    pil_module.Image = image_module
+    sys.modules["PIL"] = pil_module
+    sys.modules["PIL.Image"] = image_module
+
     if "resolution_deduction_test_plugin" in sys.modules:
         # Reuse already-installed stubs from the sibling test module if present.
         return
@@ -147,6 +166,9 @@ FigurineProPlugin = PLUGIN_MODULE.FigurineProPlugin
 
 
 class ResolutionDeductionTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+
     @staticmethod
     def make_plugin(model_parameters, **extra_conf):
         plugin = object.__new__(FigurineProPlugin)

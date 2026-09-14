@@ -109,6 +109,18 @@
                         "default": "none",
                         "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
                     },
+                    "api_key_tag": {
+                        "label": "绑定 Key",
+                        "type": "string",
+                        "default": "默认",
+                        "hint": "选择本模型专用的 API Key 代号。默认使用“默认”Key；也可在已配置的 Key 代号列表中选择其他 Key。API 提交时将使用绑定的 Key。"
+                    },
+                    "request_model_name": {
+                        "label": "实际请求模型名",
+                        "type": "string",
+                        "default": "",
+                        "hint": "向上游 API 发送请求时实际提交的模型 ID。默认留空，留空时使用本条目配置的“模型”名；填写后请求上游时将把提交给接口的 model 参数或端点替换为该值。"
+                    },
                     "reference_image_limit": {
                         "label": "参考图数量限制",
                         "type": "int",
@@ -463,6 +475,39 @@
         "type": "string",
         "hint": "可直接填写服务根地址，例如 `http://10.10.10.99:3000` 或末尾带 `/` 的地址。模型命中 Gemini模型列表时自动拼接 Gemini `v1beta/models/{model}:generateContent`；其余模型按下方端点模型列表拼接 OpenAI `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`。也兼容完整 OpenAI 端点 URL。",
         "default": "https://api.bltcy.ai/v1/chat/completions"
+    },
+    "api_key_list": {
+        "description": "【通用】API Key 列表",
+        "type": "template_list",
+        "hint": "配置 API Key 及其代号与可选自定义 API 地址。代号为“默认”或首个条目为默认 Key；模型参数未单独绑定时默认使用该 Key；也可在“模型参数设置”中单独为模型绑定指定的 Key 代号。自定义 API 地址留空时自动使用全局默认的“共享 API 地址”。",
+        "default": [],
+        "templates": {
+            "api_key": {
+                "name": "API Key 条目",
+                "item_label": "Key 代号",
+                "hint": "配置一个 API Key 及其代号与可选自定义 API 地址。",
+                "items": {
+                    "tag": {
+                        "label": "代号",
+                        "type": "string",
+                        "default": "默认",
+                        "hint": "Key 的代号/名称，例如 默认、主Key、备用Key、Gemini专线 等。"
+                    },
+                    "key": {
+                        "label": "API Key",
+                        "type": "string",
+                        "default": "",
+                        "hint": "实际的 API Key，形如 sk-..."
+                    },
+                    "api_url": {
+                        "label": "自定义 API 地址",
+                        "type": "string",
+                        "default": "",
+                        "hint": "该 Key 专用的 API 地址（如中转地址、反代地址等）。留空则使用全局默认的“共享 API 地址”。"
+                    }
+                }
+            }
+        }
     },
     "generic_api_keys": {
         "description": "【Generic】API Key 池",

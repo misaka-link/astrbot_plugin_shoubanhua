@@ -1525,6 +1525,39 @@ class ResolutionDeductionTests(unittest.TestCase):
         c2 = plugin._get_model_failover_candidates("source", rotate=True)
         self.assertEqual(c2, ["pri10-b", "pri10-a", "pri5-b", "pri5-a"])
 
+    def test_load_balance_with_hot_backup_degradation(self):
+        # 用户需求场景：两个 2 权重的模型之间负载均衡，若均失败再降级到 1 权重的热备模型
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-2a", "priority": 2},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-2b", "priority": 2},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-1", "priority": 1},
+            ]
+        )
+
+        # 第 1 次请求调度顺序：2 权重先轮到 2a，备用为 2b，最后降级到 1
+        call1_candidates = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(call1_candidates, ["model-2a", "model-2b", "model-1"])
+
+        # 第 2 次请求调度顺序：2 权重轮到 2b，备用为 2a，最后降级到 1
+        call2_candidates = plugin._get_model_failover_candidates("source", rotate=True)
+        self.assertEqual(call2_candidates, ["model-2b", "model-2a", "model-1"])
+
+        # 模拟调用执行：当 2a 和 2b 都失败时，验证降级调用到 model-1
+        attempts = []
+        async def mock_call_api_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-1":
+                return b"success-image-bytes", 200
+            return {"error": f"{override_model} simulated failure"}, 500
+
+        plugin._call_api_once = mock_call_api_once
+        result, status = asyncio.run(plugin._call_api([], "test prompt", override_model="source"))
+        self.assertEqual(result, b"success-image-bytes")
+        self.assertEqual(status, 200)
+        # 验证调用链：先尝试 2 权重首选 (2a)，失败后尝试同级 2 权重 (2b)，再次失败后降级到 1 权重 (model-1)
+        self.assertEqual(attempts, ["model-2a", "model-2b", "model-1"])
+
 
 if __name__ == "__main__":
     unittest.main()

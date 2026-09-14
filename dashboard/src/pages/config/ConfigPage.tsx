@@ -769,7 +769,7 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
             showIcon
             style={{ marginBottom: 12 }}
             message="热备调度与负载均衡规则"
-            description="优先权重数值越大越优先调用。若同一源模型下配置了多个权重相同的映射模型，系统将自动进行负载均衡轮询调度；当首选模型调用失败时，自动切换至同级其他模型或下一优先级的热备模型。权重设为 -1 时停用不参与调度。"
+            description="按优先权重数值大小优先调度（数字大的优先调度）。若同一源模型配置了多个权重相同的映射模型（例如两个权重均为 2），系统将在它们之间自动进行负载均衡轮询；若同权重模型均调用失败，则自动降级到更低权重（例如权重 1）的热备模型。权重设为 -1 时停用不参与调度。"
           />
           <Table
             rowKey={(_, index) => String(index)}

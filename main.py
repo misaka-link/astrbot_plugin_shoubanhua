@@ -269,7 +269,7 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
-    "2.0.2",
+    "2.1.0",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):

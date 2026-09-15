@@ -11,6 +11,7 @@ import math
 import random
 import re
 import unicodedata
+import uuid
 from dataclasses import field as dataclass_field
 from logging.handlers import TimedRotatingFileHandler
 from datetime import datetime, timedelta
@@ -324,6 +325,7 @@ class FigurineProPlugin(Star):
     }
     IMAGE_INPUT_FIDELITY_OPTIONS = {"auto", "low", "high"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+    SEND_RETRY_DELAY = 1.0
     GROK_RESOLUTION_OPTIONS = {"1k", "2k"}
     GROK_ASPECT_RATIO_ORDER = (
         "1:2", "9:20", "9:19.5", "9:16", "2:3", "3:4", "1:1",
@@ -6300,6 +6302,133 @@ class FigurineProPlugin(Star):
     def _build_image_result(self, event: AstrMessageEvent, image_bytes: bytes, text: str):
         return self._reply_chain_result(event, [Image.fromBytes(image_bytes), Plain(text)])
 
+    def _save_failed_image(self, image_bytes: bytes, label: str = "") -> Path:
+        """将发送失败的原始图片保存到插件数据目录备查，防止内存释放后丢失。"""
+        failed_dir = self.plugin_data_dir / "failed_images"
+        failed_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_label = re.sub(r"[^\w\-_]", "_", label)[:20].strip("_") if label else ""
+        label_part = f"_{safe_label}" if safe_label else ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rnd = uuid.uuid4().hex[:6]
+
+        ext = ".png"
+        if image_bytes.startswith(b"\xff\xd8\xff"):
+            ext = ".jpg"
+        elif image_bytes.startswith(b"RIFF") and b"WEBP" in image_bytes[:16]:
+            ext = ".webp"
+
+        failed_file = failed_dir / f"fail_{ts}_{rnd}{label_part}{ext}"
+        try:
+            failed_file.write_bytes(image_bytes)
+            logger.warning(f"图片发送失败，已安全暂存至插件数据目录: {failed_file}")
+        except Exception as e:
+            logger.error(f"暂存失败图片到磁盘异常: {e}")
+        return failed_file
+
+    def _convert_image_high_quality(self, image_bytes: bytes, quality: int = 99) -> Tuple[bytes, str]:
+        """将图片转为高质量 (99%) JPEG 或 WebP 格式字节，以大幅缩减体积避免 WebSocket 超时。"""
+        preferred_fmt = str(self.conf.get("retry_image_format", "auto") or "auto").strip().lower()
+        try:
+            with PILImage.open(io.BytesIO(image_bytes)) as img:
+                out = io.BytesIO()
+                mode = getattr(img, "mode", "RGB")
+                info = getattr(img, "info", {})
+                has_alpha = mode in ("RGBA", "LA", "PA") or (mode == "P" and "transparency" in info)
+
+                # 如果要求 WebP 或带有透明图层，转 WebP
+                if preferred_fmt == "webp" or (preferred_fmt == "auto" and has_alpha):
+                    try:
+                        img.save(out, format="WEBP", quality=quality, method=6)
+                        return out.getvalue(), "image/webp"
+                    except Exception as ex_webp:
+                        logger.warning(f"转为 WebP 失败 ({ex_webp})，回退到 JPEG")
+                        out = io.BytesIO()
+
+                # JPEG 处理 (需转 RGB)
+                if mode in ("RGBA", "LA", "PA", "P"):
+                    bg = PILImage.new("RGB", img.size, (255, 255, 255))
+                    rgba_img = img.convert("RGBA") if hasattr(img, "convert") else img
+                    mask = rgba_img.split()[-1] if hasattr(rgba_img, "split") else None
+                    bg.paste(rgba_img, mask=mask)
+                    target = bg
+                else:
+                    target = img if mode == "RGB" else (img.convert("RGB") if hasattr(img, "convert") else img)
+
+                try:
+                    target.save(out, format="JPEG", quality=quality, subsampling=0)
+                    return out.getvalue(), "image/jpeg"
+                except Exception:
+                    out = io.BytesIO()
+                    target.save(out, format="WEBP", quality=quality, method=6)
+                    return out.getvalue(), "image/webp"
+        except Exception as e:
+            logger.error(f"高质量图片压缩转换失败: {e}，将回退使用原始图片数据")
+            return image_bytes, "application/octet-stream"
+
+    async def _send_image_with_retry(
+        self,
+        event: AstrMessageEvent,
+        image_bytes: bytes,
+        text: str,
+        label: str = "",
+    ) -> Tuple[bool, Optional[Path]]:
+        """
+        发送图片消息链，支持配置开关、原样重试及高质量 JPEG/WebP (99%) 重试。
+        返回 (是否发送成功, 暂存文件路径)。
+        """
+        enable_retry = bool(self.conf.get("enable_send_retry", True))
+
+        # 1. 首次原样尝试发送
+        try:
+            await event.send(self._build_image_result(event, image_bytes, text))
+            return True, None
+        except Exception as initial_exc:
+            logger.warning(f"图片初次发送失败 ({initial_exc})，准备处理暂存与重试...")
+
+        # 首次发送失败，立即将原图存盘备查，防止内存丢失
+        saved_file = self._save_failed_image(image_bytes, label=label)
+
+        if not enable_retry:
+            logger.warning("重试开关已关闭，保留暂存文件并结束发送。")
+            return False, saved_file
+
+        # 2. 第一次重试：原样重试
+        retry_delay = getattr(self, "SEND_RETRY_DELAY", 1.0)
+        if retry_delay > 0:
+            await asyncio.sleep(retry_delay)
+        try:
+            logger.info("【发送重试 1/2】正在原样重试发送图片...")
+            await event.send(self._build_image_result(event, image_bytes, text))
+            logger.info(f"【发送重试 1/2】原样重试成功！正在清理暂存文件: {saved_file.name}")
+            if saved_file and saved_file.exists():
+                try:
+                    saved_file.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning(f"清理暂存文件失败: {exc}")
+            return True, None
+        except Exception as retry1_exc:
+            logger.warning(f"【发送重试 1/2】原样重试仍然失败: {retry1_exc}")
+
+        # 3. 第二次重试：转为 JPEG / WebP 格式，质量 99%
+        if retry_delay > 0:
+            await asyncio.sleep(retry_delay)
+        try:
+            logger.info("【发送重试 2/2】正在转换为高质量 (质量 99%) JPEG/WebP 格式重试发送...")
+            compressed_bytes, mime = self._convert_image_high_quality(image_bytes, quality=99)
+            logger.info(f"图片压缩完成: 原 {len(image_bytes)} 字节 -> 压缩后 {len(compressed_bytes)} 字节 ({mime})")
+            await event.send(self._build_image_result(event, compressed_bytes, text))
+            logger.info(f"【发送重试 2/2】高质量重试发送成功！正在清理暂存文件: {saved_file.name}")
+            if saved_file and saved_file.exists():
+                try:
+                    saved_file.unlink(missing_ok=True)
+                except Exception as exc:
+                    logger.warning(f"清理暂存文件失败: {exc}")
+            return True, None
+        except Exception as retry2_exc:
+            logger.error(f"【发送重试 2/2】高质量重试仍然失败: {retry2_exc}。原始图片已保留在插件数据目录: {saved_file}")
+            return False, saved_file
+
     async def _send_llm_image_once(
             self,
             event: AstrMessageEvent,
@@ -7698,7 +7827,10 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            yield self._build_image_result(event, res, message_text)
+            sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=display_label)
+            if not sent:
+                file_hint = f"\n📁 原始图片已安全暂存至服务器备查: {failed_file.name}" if failed_file else ""
+                yield self._reply_plain_result(event, f"❌ 图片发送失败 (网络超时)。{file_hint}")
 
         total_elapsed = (datetime.now() - start_time).total_seconds()
         if content_policy_violation_detected:
@@ -8011,7 +8143,10 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            yield self._build_image_result(event, res, message_text)
+            sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=actual_model)
+            if not sent:
+                file_hint = f"\n📁 原始图片已安全暂存至服务器备查: {failed_file.name}" if failed_file else ""
+                yield self._reply_plain_result(event, f"❌ 图片发送失败 (网络超时)。{file_hint}")
         else:
             if should_send_content_policy_warning:
                 msg = self._get_content_policy_warning_message(

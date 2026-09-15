@@ -217,6 +217,7 @@ class MessageFlowTests(unittest.TestCase):
         plugin.conf = _TestConfig(config)
         plugin.prompt_map = {}
         plugin._dashboard_config_lock = asyncio.Lock()
+        plugin.SEND_RETRY_DELAY = 0.0
         return plugin
 
     def test_build_reply_chain_uses_standard_and_raw_message_ids(self):
@@ -252,6 +253,88 @@ class MessageFlowTests(unittest.TestCase):
         self.assertEqual(result[1].data, b"generated-image")
         self.assertEqual(result[2].text, "done")
         self.assertEqual(event.sent_results, [])
+
+    def test_save_failed_image_and_retry_workflow(self):
+        plugin = self.make_plugin()
+        temp_dir = Path(tempfile.mkdtemp())
+        plugin.plugin_data_dir = temp_dir
+
+        image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        saved_file = plugin._save_failed_image(image_bytes, label="test_label")
+        self.assertTrue(saved_file.exists())
+        self.assertTrue(saved_file.name.endswith("_test_label.png"))
+        self.assertEqual(saved_file.read_bytes(), image_bytes)
+
+    def test_send_image_with_retry_success_cleans_up(self):
+        plugin = self.make_plugin()
+        temp_dir = Path(tempfile.mkdtemp())
+        plugin.plugin_data_dir = temp_dir
+
+        event = _FakeEvent()
+        image_bytes = b"fake-png-bytes"
+        sent, failed_file = asyncio.run(plugin._send_image_with_retry(event, image_bytes, "caption", label="test"))
+        self.assertTrue(sent)
+        self.assertIsNone(failed_file)
+        self.assertEqual(len(event.sent_results), 1)
+
+    def test_send_image_with_retry_recovers_on_retry(self):
+        plugin = self.make_plugin()
+        temp_dir = Path(tempfile.mkdtemp())
+        plugin.plugin_data_dir = temp_dir
+
+        attempts = 0
+        event = _FakeEvent()
+        orig_send = event.send
+
+        async def fail_once(result):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("WebSocket API call timeout")
+            await orig_send(result)
+
+        event.send = fail_once
+        image_bytes = b"fake-png-bytes"
+        sent, failed_file = asyncio.run(plugin._send_image_with_retry(event, image_bytes, "caption", label="retry1"))
+        self.assertTrue(sent)
+        self.assertIsNone(failed_file)
+        self.assertEqual(attempts, 2)
+        failed_dir = temp_dir / "failed_images"
+        self.assertEqual(len(list(failed_dir.glob("*"))), 0)
+
+    def test_send_image_with_retry_all_fail_preserves_file(self):
+        plugin = self.make_plugin()
+        temp_dir = Path(tempfile.mkdtemp())
+        plugin.plugin_data_dir = temp_dir
+
+        event = _FakeEvent(send_error=RuntimeError("persistent timeout"))
+        image_bytes = b"fake-png-bytes"
+        sent, failed_file = asyncio.run(plugin._send_image_with_retry(event, image_bytes, "caption", label="all_fail"))
+        self.assertFalse(sent)
+        self.assertIsNotNone(failed_file)
+        self.assertTrue(failed_file.exists())
+        self.assertEqual(failed_file.read_bytes(), image_bytes)
+
+    def test_send_image_with_retry_disabled(self):
+        plugin = self.make_plugin(enable_send_retry=False)
+        temp_dir = Path(tempfile.mkdtemp())
+        plugin.plugin_data_dir = temp_dir
+
+        attempts = 0
+        event = _FakeEvent()
+
+        async def count_fails(result):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("timeout")
+
+        event.send = count_fails
+        image_bytes = b"fake-png-bytes"
+        sent, failed_file = asyncio.run(plugin._send_image_with_retry(event, image_bytes, "caption", label="no_retry"))
+        self.assertFalse(sent)
+        self.assertEqual(attempts, 1)
+        self.assertIsNotNone(failed_file)
+        self.assertTrue(failed_file.exists())
 
     def test_reply_images_are_loaded_before_current_images(self):
         workflow = FigurineProPlugin.ImageWorkflow(max_retries=0)

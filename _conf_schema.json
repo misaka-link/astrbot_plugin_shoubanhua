@@ -643,6 +643,23 @@
         "hint": "开启后，生成成功或失败时会在消息里附加“模型: xxx”，方便确认当前请求实际走的是默认模型还是临时指定的模型。",
         "default": false
     },
+    "enable_send_retry": {
+        "description": "【发送】启用发送失败自动重试与兜底保存",
+        "type": "bool",
+        "default": true,
+        "hint": "开启后，若图片发送失败（如 WebSocket 超时/网络抖动），会自动先将原图暂存至插件数据目录，随后执行2次重试：第1次原样重试；第2次自动转为高质量 JPEG/WebP (质量 99%) 重试。若重试成功自动删除暂存文件，若全部失败则保留文件备查防丢。"
+    },
+    "retry_image_format": {
+        "description": "【发送】第2次重试压缩格式",
+        "type": "string",
+        "options": [
+            "auto",
+            "jpeg",
+            "webp"
+        ],
+        "default": "auto",
+        "hint": "第2次重试采用的高画质格式：auto（透明图自动用 WebP，非透明用 JPEG）、jpeg、webp。画质固定为 99% 极致无损。默认 auto。"
+    },
     "debug_mode": {
         "description": "【调试】调试模式",
         "type": "bool",

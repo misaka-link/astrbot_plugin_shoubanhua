@@ -215,10 +215,12 @@
                             "low",
                             "medium",
                             "high",
+                            "xhigh",
+                            "max",
                             "auto"
                         ],
                         "default": "auto",
-                        "hint": "图片生成质量。可选 low、medium、high、auto，默认 auto。"
+                        "hint": "图片生成质量。可选 low、medium、high、xhigh（超高）、max（极致）、auto，默认 auto。其中 xhigh 与 max 为 gpt-image-2.5 系列新增画质档位。"
                     },
                     "moderation": {
                         "label": "审核",
@@ -240,6 +242,17 @@
                         ],
                         "default": "auto",
                         "hint": "仅 GPT 参数模式生效，generations 与 edits 请求都会发送。auto（默认）：不发送 background 参数，由模型按提示词自动决定背景，与旧版行为一致；transparent：透明背景（gpt-image-2 预览功能，仅支持 png/webp 输出，插件会自动改用 png 输出，第三方中转是否生效取决于网关透传）；opaque：强制不透明背景。"
+                    },
+                    "input_fidelity": {
+                        "label": "参考图保真度",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "low",
+                            "high"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 GPT 参数模式且包含参考图时生效（GPT Edits 接口）。控制模型对输入参考图的特征与风格（特别是人脸细节）的贴合保真程度。auto（默认）：不传递该参数，由模型默认决定；low：低保真度（快速风格化）；high：高保真度（最大程度贴合原图特征与人脸）。"
                     },
                     "adaptive_aspect_ratio": {
                         "label": "自适应比例",

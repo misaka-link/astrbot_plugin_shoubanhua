@@ -319,7 +319,10 @@ class FigurineProPlugin(Star):
         "seedream": "enable_seedream_parameters",
     }
 
-    IMAGE_QUALITY_OPTIONS = {"low", "medium", "high", "auto"}
+    IMAGE_QUALITY_OPTIONS = {
+        "low", "medium", "high", "xhigh", "max", "auto",
+    }
+    IMAGE_INPUT_FIDELITY_OPTIONS = {"auto", "low", "high"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
     GROK_RESOLUTION_OPTIONS = {"1k", "2k"}
     GROK_ASPECT_RATIO_ORDER = (
@@ -1421,12 +1424,17 @@ class FigurineProPlugin(Star):
             {"name": "request_model_name", "label": "实际请求模型名", "group": "基础与额度", "type": "text", "default": "", "max_length": 128},
             {"name": "enable_gpt_parameters", "label": "启用 GPT 参数", "group": "GPT", "type": "boolean", "default": False},
             {"name": "omit_n_parameter", "label": "不传递 n 参数", "group": "GPT", "type": "boolean", "default": False},
-            {"name": "quality", "label": "质量", "group": "GPT", "type": "select", "default": "auto", "options": ["low", "medium", "high", "auto"]},
+            {"name": "quality", "label": "质量", "group": "GPT", "type": "select", "default": "auto", "options": ["low", "medium", "high", "xhigh", "max", "auto"]},
             {"name": "moderation", "label": "审核", "group": "GPT", "type": "select", "default": "auto", "options": ["auto", "low"]},
             {"name": "gpt_background", "label": "背景", "group": "GPT", "type": "select", "default": "auto", "options": [
                 {"value": "auto", "label": "auto（自动：不发送参数，由模型按提示词决定）"},
                 {"value": "transparent", "label": "transparent（透明背景，仅 png/webp 输出）"},
                 {"value": "opaque", "label": "opaque（不透明背景）"},
+            ]},
+            {"name": "input_fidelity", "label": "参考图保真度", "group": "GPT", "type": "select", "default": "auto", "options": [
+                {"value": "auto", "label": "auto（自动：不发送参数，由模型默认决定）"},
+                {"value": "low", "label": "low（低保真度：默认快速风格化）"},
+                {"value": "high", "label": "high（高保真度：最大程度还原输入图片特征与人脸）"},
             ]},
             {"name": "adaptive_aspect_ratio", "label": "自适应比例", "group": "GPT", "type": "boolean", "default": False},
             {"name": "adaptive_resolution", "label": "自适应比例分辨率", "group": "GPT", "type": "select", "default": "1K", "options": ["1K", "2K", "4K"]},
@@ -1455,7 +1463,7 @@ class FigurineProPlugin(Star):
         ]
         generic_image_fields = {
             "default_resolution", "send_default_size", "enable_gpt_parameters", "omit_n_parameter",
-            "quality", "moderation", "gpt_background", "adaptive_aspect_ratio", "adaptive_resolution",
+            "quality", "moderation", "gpt_background", "input_fidelity", "adaptive_aspect_ratio", "adaptive_resolution",
             "auto_upgrade_1k_adaptive_resolution", "force_resolution_limit",
         }
         gemini_fields = {
@@ -1487,6 +1495,7 @@ class FigurineProPlugin(Star):
             "quality": "enable_gpt_parameters",
             "moderation": "enable_gpt_parameters",
             "gpt_background": "enable_gpt_parameters",
+            "input_fidelity": "enable_gpt_parameters",
             "adaptive_aspect_ratio": "enable_gpt_parameters",
             "adaptive_resolution": "enable_gpt_parameters",
             "auto_upgrade_1k_adaptive_resolution": "enable_gpt_parameters",
@@ -3436,6 +3445,7 @@ class FigurineProPlugin(Star):
                 quality: Any = "auto",
                 moderation: Any = "auto",
                 gpt_background: Any = "auto",
+                input_fidelity: Any = "auto",
                 adaptive_aspect_ratio: Any = False,
                 adaptive_resolution: Any = "1K",
                 auto_upgrade_1k_adaptive_resolution: Any = False,
@@ -3486,6 +3496,7 @@ class FigurineProPlugin(Star):
                 "quality": normalize_option(quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
                 "gpt_background": normalize_gpt_background(gpt_background),
+                "input_fidelity": normalize_option(input_fidelity, self.IMAGE_INPUT_FIDELITY_OPTIONS, "auto"),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
                 "adaptive_resolution": normalize_resolution(adaptive_resolution),
                 "auto_upgrade_1k_adaptive_resolution": auto_upgrade_1k,
@@ -3537,6 +3548,7 @@ class FigurineProPlugin(Star):
                         get_value(parameters, "quality", "质量", default="auto"),
                         get_value(parameters, "moderation", "审核", default="auto"),
                         get_value(parameters, "gpt_background", "GPT背景", "背景", default="auto"),
+                        get_value(parameters, "input_fidelity", "参考图保真度", "保真度", default="auto"),
                         get_value(parameters, "adaptive_aspect_ratio", "自适应比例", default=False),
                         get_value(
                             parameters,
@@ -3720,6 +3732,7 @@ class FigurineProPlugin(Star):
                 get_value(item, "quality", "质量", default="auto"),
                 get_value(item, "moderation", "审核", default="auto"),
                 get_value(item, "gpt_background", "GPT背景", "背景", default="auto"),
+                get_value(item, "input_fidelity", "参考图保真度", "保真度", default="auto"),
                 get_value(item, "adaptive_aspect_ratio", "自适应比例", default=False),
                 get_value(
                     item,
@@ -3906,6 +3919,7 @@ class FigurineProPlugin(Star):
             self,
             model_name: str,
             parameters: Optional[Dict[str, Any]] = None,
+            image_bytes_list: Optional[List[bytes]] = None,
     ) -> Dict[str, str]:
         parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_gpt_parameters"):
@@ -3920,6 +3934,10 @@ class FigurineProPlugin(Star):
             if background == "transparent":
                 # 透明背景仅支持 png/webp 输出，显式锁定 png，避免网关默认 jpeg
                 result["output_format"] = "png"
+        if image_bytes_list:
+            input_fidelity = parameters.get("input_fidelity") or "auto"
+            if input_fidelity != "auto":
+                result["input_fidelity"] = input_fidelity
         return result
 
     def _get_max_output_tokens(
@@ -4759,7 +4777,7 @@ class FigurineProPlugin(Star):
         if not model_parameters:
             return {}
 
-        parameters = self._get_model_parameters(model_name, model_parameters)
+        parameters = self._get_model_parameters(model_name, model_parameters, image_bytes_list)
         adaptive_size = self._get_adaptive_image_size(
             model_name,
             image_bytes_list,

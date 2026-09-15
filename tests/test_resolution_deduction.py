@@ -711,6 +711,85 @@ class ResolutionDeductionTests(unittest.TestCase):
                 "gpt_background": "bogus",
             }], {"m1"})
 
+    def test_gpt_quality_tiers_and_input_fidelity(self):
+        entry = {
+            "model": "m",
+            "parameter_mode": "gpt",
+            "quality": "xhigh",
+            "moderation": "auto",
+            "input_fidelity": "high",
+        }
+        plugin = self.make_plugin([entry])
+        params = plugin._get_model_parameter_map()["m"]
+        self.assertEqual(params["quality"], "xhigh")
+        self.assertEqual(params["input_fidelity"], "high")
+
+        # max 质量档位
+        plugin.conf["model_parameter_list"] = [{**entry, "quality": "max"}]
+        params = plugin._get_model_parameter_map()["m"]
+        self.assertEqual(params["quality"], "max")
+
+        # 无参考图时（文生图），即使配置了 input_fidelity 也不发送
+        payload_no_image = plugin._build_generic_images_payload("m", "prompt", [], parameters=params)
+        self.assertEqual(payload_no_image["quality"], "max")
+        self.assertNotIn("input_fidelity", payload_no_image)
+
+        # 有参考图时（图生图），携带 input_fidelity
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        payload_with_image = plugin._build_generic_images_payload("m", "prompt", [fake_png], parameters=params)
+        self.assertEqual(payload_with_image["input_fidelity"], "high")
+
+        # input_fidelity 为 low 时
+        plugin.conf["model_parameter_list"] = [{**entry, "input_fidelity": "low"}]
+        params = plugin._get_model_parameter_map()["m"]
+        payload_low = plugin._build_generic_images_payload("m", "prompt", [fake_png], parameters=params)
+        self.assertEqual(payload_low["input_fidelity"], "low")
+
+        # input_fidelity 为 auto 时，不发送 input_fidelity
+        plugin.conf["model_parameter_list"] = [{**entry, "input_fidelity": "auto"}]
+        params = plugin._get_model_parameter_map()["m"]
+        payload_auto = plugin._build_generic_images_payload("m", "prompt", [fake_png], parameters=params)
+        self.assertNotIn("input_fidelity", payload_auto)
+
+        # 非法值回退
+        plugin.conf["model_parameter_list"] = [{**entry, "quality": "invalid_tier", "input_fidelity": "invalid_fidelity"}]
+        params = plugin._get_model_parameter_map()["m"]
+        self.assertEqual(params["quality"], "auto")
+        self.assertEqual(params["input_fidelity"], "auto")
+
+    def test_dashboard_model_parameters_quality_and_fidelity_validation(self):
+        plugin = self.make_dashboard_plugin()
+
+        # 验证新档位在仪表盘归一化中均能通过
+        for quality in ("xhigh", "max"):
+            normalized = plugin._dashboard_normalize_model_parameters([{
+                "model": "m1",
+                "parameter_mode": "gpt",
+                "quality": quality,
+                "input_fidelity": "high",
+            }], {"m1"})[0]
+            self.assertEqual(normalized["quality"], quality)
+            self.assertEqual(normalized["input_fidelity"], "high")
+
+        # 验证非法 input_fidelity 被拦截
+        with self.assertRaises(ValueError):
+            plugin._dashboard_normalize_model_parameters([{
+                "model": "m1",
+                "parameter_mode": "gpt",
+                "input_fidelity": "super_high",
+            }], {"m1"})
+
+        # 验证字段元数据中的依赖和端点类型
+        fields = {f["name"]: f for f in plugin._dashboard_parameter_fields()}
+        self.assertIn("input_fidelity", fields)
+        self.assertEqual(fields["input_fidelity"]["group"], "GPT")
+        self.assertEqual(fields["input_fidelity"]["depends_on"], {
+            "field": "enable_gpt_parameters", "equals": True,
+        })
+        self.assertEqual(fields["input_fidelity"]["endpoint_types"], [
+            "images_generations", "images_edits",
+        ])
+
     def test_usage_endpoint_details_preserves_inherited_source_route(self):
         plugin = self.make_plugin([],
             gemini_model_list=[],

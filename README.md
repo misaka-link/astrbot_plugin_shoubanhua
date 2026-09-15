@@ -100,5 +100,5 @@ git clone https://github.com/misaka-link/astrbot_plugin_shoubanhua.git
 
 ## 📄 开源许可与致谢
 
-- 本项目基于维拉大佬的原型启发重构与开发，感谢维拉大佬的贡献与社区支持。
+- 本项目基于 [shskjw/astrbot_plugin_shoubanhua](https://github.com/shskjw/astrbot_plugin_shoubanhua) 进行重构与二次开发，感谢原作者 @shskjw 与开源社区的贡献支持！
 - 本插件遵循 [GNU AGPLv3](./LICENSE) 协议开源。

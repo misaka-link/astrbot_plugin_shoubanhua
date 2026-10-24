@@ -16,6 +16,7 @@ const { Text } = Typography;
 interface PresetItem {
   command: string;
   prompt: string;
+  aspect_ratio?: string;
   legacy_alias?: string;
 }
 
@@ -34,7 +35,13 @@ export default function PresetsPage({ refreshSignal }: { refreshSignal: number }
     try {
       const data = await apiGet<{ revision: string; presets: PresetItem[] }>("presets");
       setRevision(data.revision || "");
-      setItems((data.presets || []).map((item) => ({ command: item.command, prompt: item.prompt })));
+      setItems(
+        (data.presets || []).map((item) => ({
+          command: item.command,
+          prompt: item.prompt,
+          aspect_ratio: item.aspect_ratio ?? "",
+        })),
+      );
       setDirty(false);
     } catch (err) {
       setError((err as Error).message);
@@ -58,7 +65,7 @@ export default function PresetsPage({ refreshSignal }: { refreshSignal: number }
   };
 
   const add = () => {
-    setItems((prev) => [...prev, { command: "", prompt: "" }]);
+    setItems((prev) => [...prev, { command: "", prompt: "", aspect_ratio: "" }]);
     setDirty(true);
   };
 
@@ -68,10 +75,20 @@ export default function PresetsPage({ refreshSignal }: { refreshSignal: number }
     try {
       const data = await apiPost<{ revision: string; presets: PresetItem[]; message?: string }>("presets", {
         revision,
-        presets: items.map((item) => ({ command: item.command.trim(), prompt: item.prompt })),
+        presets: items.map((item) => ({
+          command: item.command.trim(),
+          prompt: item.prompt,
+          aspect_ratio: (item.aspect_ratio || "").trim(),
+        })),
       });
       setRevision(data.revision || "");
-      setItems((data.presets || []).map((item) => ({ command: item.command, prompt: item.prompt })));
+      setItems(
+        (data.presets || []).map((item) => ({
+          command: item.command,
+          prompt: item.prompt,
+          aspect_ratio: item.aspect_ratio ?? "",
+        })),
+      );
       setDirty(false);
       message.success(data.message || "预设提示词已保存");
     } catch (err) {
@@ -148,13 +165,22 @@ export default function PresetsPage({ refreshSignal }: { refreshSignal: number }
                 </Button>
               }
             >
-              <Input.TextArea
-                value={item.prompt}
-                onChange={(event) => update(index, { prompt: event.target.value })}
-                placeholder="该指令发送给绘图接口的提示词内容"
-                autoSize={{ minRows: 2, maxRows: 10 }}
-                maxLength={20000}
-              />
+              <Space direction="vertical" size={8} style={{ width: "100%" }}>
+                <Input
+                  value={item.aspect_ratio ?? ""}
+                  onChange={(event) => update(index, { aspect_ratio: event.target.value })}
+                  placeholder="比例（如 1:1，可留空）"
+                  maxLength={32}
+                  style={{ maxWidth: 320 }}
+                />
+                <Input.TextArea
+                  value={item.prompt}
+                  onChange={(event) => update(index, { prompt: event.target.value })}
+                  placeholder="该指令发送给绘图接口的提示词内容"
+                  autoSize={{ minRows: 2, maxRows: 10 }}
+                  maxLength={20000}
+                />
+              </Space>
             </Card>
           ))}
         </Space>

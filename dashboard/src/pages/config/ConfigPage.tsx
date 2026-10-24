@@ -102,6 +102,7 @@ const AUTO_DERIVED_FIELDS = new Set([
   "enable_gemini_parameters",
   "enable_grok_parameters",
   "enable_seedream_parameters",
+  "enable_omni_parameters",
 ]);
 
 const GROUP_TO_MODE: Record<string, string> = {
@@ -109,6 +110,7 @@ const GROUP_TO_MODE: Record<string, string> = {
   Gemini: "gemini",
   Grok: "grok",
   Seedream: "seedream",
+  Omni: "omni",
 };
 
 function optionValue(option: string | FieldOption): string {

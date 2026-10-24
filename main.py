@@ -10,6 +10,7 @@ import logging
 import math
 import random
 import re
+import time
 import unicodedata
 import uuid
 from dataclasses import field as dataclass_field
@@ -28,6 +29,16 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import At, Image, Reply, Plain, Node, Nodes
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+
+try:  # 视频消息组件（部分 AstrBot 版本没有 Video，需要降级为发送链接）
+    from astrbot.core.message.components import Video
+except ImportError:  # pragma: no cover - 取决于宿主 AstrBot 版本
+    Video = None
+
+try:  # 文件消息段：NapCat/aiocqhttp 会把「引用的视频」下发成 File 段
+    from astrbot.core.message.components import File as FileSegment
+except ImportError:  # pragma: no cover - 取决于宿主 AstrBot 版本
+    FileSegment = None
 
 from .usage_store import (
     LEGACY_COUNT_TO_YUAN,
@@ -312,12 +323,14 @@ class FigurineProPlugin(Star):
         ("gemini", "Gemini"),
         ("grok", "Grok"),
         ("seedream", "Seedream"),
+        ("omni", "Omni 视频"),
     )
     PARAMETER_MODE_ENABLE_FIELDS = {
         "gpt": "enable_gpt_parameters",
         "gemini": "enable_gemini_parameters",
         "grok": "enable_grok_parameters",
         "seedream": "enable_seedream_parameters",
+        "omni": "enable_omni_parameters",
     }
 
     IMAGE_QUALITY_OPTIONS = {
@@ -374,6 +387,34 @@ class FigurineProPlugin(Star):
     SEEDREAM_ASPECT_RATIO_ORDER = (
         "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9",
     )
+    # --- Omni 1.1 Flash 视频（flow2api）---
+    OMNI_DURATION_OPTIONS = ("4", "6", "8", "10")
+    OMNI_DURATION_DEFAULT = "8"
+    OMNI_ASPECT_MODE_OPTIONS = ("auto", "portrait", "landscape")
+    OMNI_ASPECT_MODE_DEFAULT = "auto"
+    OMNI_DEFAULT_ASPECT_OPTIONS = ("portrait", "landscape")
+    OMNI_DEFAULT_ASPECT_DEFAULT = "portrait"
+    OMNI_RESOLUTION_OPTIONS = ("1080p", "4k")
+    OMNI_RESOLUTION_DEFAULT = "1080p"
+    OMNI_AGENT_UI_OPTIONS = ("default", "on", "off", "keep")
+    OMNI_AGENT_UI_DEFAULT = "default"
+    OMNI_MODEL_TEMPLATE_DEFAULT = "omni-1.1-flash-{duration}s-{orientation}"
+    OMNI_UPSCALE_START_MESSAGE_DEFAULT = (
+        "🎬 视频已生成（生成耗时 {generate_time}），开始 {resolution} 超分辨率处理，请稍候…"
+    )
+    OMNI_UPSCALE_START_PATTERN_DEFAULT = r"视频生成完成.*?放大"
+    OMNI_RESULT_CAPTION_DEFAULT = "✅ 视频生成完成 | 生成耗时 {generate_time} | 超分耗时 {upscale_time}"
+    OMNI_PREVIEW_GIF_CAPTION_DEFAULT = "🔍 超分前预览 · {resolution}，超分完成后发送视频"
+    OMNI_ORIG_VIDEO_PATTERN_DEFAULT = r"原视频[:：]\s*(https?://\S+)"
+    OMNI_ORIG_VIDEO_CAPTION_DEFAULT = "🎬 超分前原片 · {resolution} 超分处理中，完成后发送超分版"
+    OMNI_TIMEOUT_DEFAULT = 2400
+    OMNI_TIMEOUT_MIN = 30
+    OMNI_TIMEOUT_MAX = 3600
+    OMNI_MAX_REFERENCE_IMAGES_DEFAULT = 3
+    # 视频素材内联上限：超过则改走 POST /v1/uploads/video 拿 upload_id（upload://）
+    # 上游契约：内联 ≤64MB（base64 膨胀 ×1.33），这里留安全余量取 60MB。
+    OMNI_VIDEO_INLINE_LIMIT = 60 * 1024 * 1024
+    OMNI_ORIENTATION_DISPLAY = {"portrait": "竖屏", "landscape": "横屏"}
     ADAPTIVE_RESOLUTION_LONG_EDGES = {
         "1K": 1024,
         "2K": 2048,
@@ -420,7 +461,10 @@ class FigurineProPlugin(Star):
             timeout: int = 60,
             download_timeout: int | None = None,
             max_download_bytes: int = 120 * 1024 * 1024,
+            context: Any = None,
         ):
+            # AstrBot Context：用于向平台(OneBot/NapCat)换取**新鲜**的文件 URL
+            self.context = context
             self.proxy: str | None = None  # HTTP/HTTPS 代理
             self._socks_proxy_url: str | None = None
             self._socks_proxy_cls = None
@@ -446,6 +490,10 @@ class FigurineProPlugin(Star):
             self.download_timeout = download_timeout or timeout
             self.max_download_bytes = max(1, max_download_bytes)
             self._chunk_size = 512 * 1024  # 512KB
+            self.max_videos = 2  # 单次消息最多收集的视频素材数（引用链优先）
+            logger.info(f"[素材] Video 组件: {'可用' if Video is not None else '不可用(降级)'}")
+            # 最近一次 get_videos() 的结果（供后续对接上游视频输入使用）
+            self.last_videos: List[Dict[str, Any]] = []
 
         async def terminate(self):
             """清理资源"""
@@ -678,6 +726,480 @@ class FigurineProPlugin(Star):
             
             return img_bytes_list
 
+        # 视频扩展名（File 段按名字判断是否视频）
+        _VIDEO_EXTENSIONS = (
+            ".mp4", ".m4v", ".mov", ".webm", ".avi", ".3gp", ".mkv", ".flv",
+        )
+
+        @staticmethod
+        def _looks_like_video(data: bytes) -> bool:
+            """按魔数判断是否视频容器。"""
+            if not data or len(data) < 12:
+                return False
+            return (
+                data[4:8] == b"ftyp"
+                or data[:4] == b"\x1a\x45\xdf\xa3"
+                or (data[:4] == b"RIFF" and data[8:12] == b"AVI ")
+            )
+
+        @staticmethod
+        def _find_file_ids(obj: Any, _depth: int = 0) -> List[str]:
+            """从原始消息结构里递归找出所有 file_id（用于向平台换新 URL）。"""
+            found: List[str] = []
+            if _depth > 6:
+                return found
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    if k in ("file_id", "fileId", "fileid") and isinstance(v, str) and v:
+                        found.append(v)
+                    elif k == "file" and isinstance(v, str) and re.fullmatch(
+                        r"[0-9a-fA-F-]{16,}", v or ""
+                    ):
+                        found.append(v)
+                    else:
+                        found.extend(FigurineProPlugin.ImageWorkflow._find_file_ids(v, _depth + 1))
+            elif isinstance(obj, (list, tuple)):
+                for v in obj:
+                    found.extend(FigurineProPlugin.ImageWorkflow._find_file_ids(v, _depth + 1))
+            return found
+
+        async def _download_with_headers(
+                self, url: str, headers: Dict[str, str]
+        ) -> bytes | None:
+            """带自定义请求头下载（QQ CDN 对 UA/Referer 敏感）。"""
+            timeout_cfg = _build_client_timeout(self.timeout, self.download_timeout)
+            try:
+                async with self.create_client_session(timeout_cfg) as session:
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            logger.warning(
+                                f"[素材] 带自定义头下载失败 HTTP {resp.status}: {url[:90]}"
+                            )
+                            return None
+                        data = bytearray()
+                        total = 0
+                        async for chunk in resp.content.iter_chunked(self._chunk_size):
+                            data.extend(chunk)
+                            total += len(chunk)
+                            if total > self.max_download_bytes:
+                                raise ValueError("超过体积上限")
+                        logger.info(f"[素材] 带自定义头下载成功 ({total / 1024 / 1024:.2f} MB)")
+                        return bytes(data)
+            except Exception as exc:
+                logger.warning(f"[素材] 带自定义头下载异常: {exc}")
+                return None
+
+        async def _fetch_file_via_platform(self, event: AstrMessageEvent) -> bytes | None:
+            """向平台(OneBot)换取**新鲜**文件 URL 再下载。
+
+            背景：NapCat/Lagrange 给的 ``file`` 段 URL 是**有时效**的；用户引用
+            一条较早的消息时旧 URL 会 403 Forbidden。这里用原始消息里的
+            ``file_id`` 调 ``get_group_file_url`` / ``get_private_file_url`` 换新。
+            """
+            if self.context is None or event is None:
+                return None
+            try:
+                platform_id = event.get_platform_id()
+                inst = self.context.get_platform_inst(platform_id)
+            except Exception as exc:
+                logger.warning(f"[素材] 取平台实例失败: {exc}")
+                return None
+            bot = getattr(inst, "bot", None)
+            if bot is None or not hasattr(bot, "call_action"):
+                logger.warning("[素材] 平台实例没有 OneBot 客户端，无法换新 URL")
+                return None
+            raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+            file_ids = self._find_file_ids(raw)
+            if not file_ids:
+                logger.info("[素材] 原始消息里没有 file_id，无法换新 URL")
+                return None
+            group_id = event.get_group_id()
+            for fid in file_ids[:4]:
+                attempts: List[Dict[str, Any]] = []
+                if group_id:
+                    attempts.append(
+                        {
+                            "action": "get_group_file_url",
+                            "params": {
+                                "file_id": fid,
+                                "group_id": int(group_id) if str(group_id).isdigit() else group_id,
+                            },
+                        }
+                    )
+                else:
+                    attempts.append({"action": "get_private_file_url", "params": {"file_id": fid}})
+                # 视频段更常用 OneBot 的 get_file
+                attempts.append({"action": "get_file", "params": {"file_id": fid}})
+                attempts.append({"action": "get_file", "params": {"file": fid}})
+                for att in attempts:
+                    try:
+                        ret = await bot.call_action(action=att["action"], **att["params"])
+                    except Exception as exc:
+                        logger.warning(f"[素材] {att['action']} 调用失败: {exc}")
+                        continue
+                    url = ""
+                    if isinstance(ret, dict):
+                        url = str(
+                            ret.get("url")
+                            or (ret.get("data") or {}).get("url")
+                            or ret.get("file")
+                            or (ret.get("data") or {}).get("file")
+                            or ""
+                        )
+                    if url.startswith("http"):
+                        logger.info(f"[素材] 平台换到新 URL({att['action']})，重新下载")
+                        if data := await self._download_image(url):
+                            return data
+                    elif url and Path(url).is_file():
+                        try:
+                            logger.info(f"[素材] 平台直接给出本地文件({att['action']})")
+                            return await asyncio.get_running_loop().run_in_executor(
+                                None, Path(url).read_bytes
+                            )
+                        except Exception as exc:
+                            logger.warning(f"[素材] 读取平台本地文件失败: {exc}")
+            return None
+
+        async def _load_file_segment_bytes(self, seg: Any, event: AstrMessageEvent = None) -> bytes | None:
+            """从 ``File`` 段取字节。
+
+            NapCat/aiocqhttp 会把用户「引用的视频」下发成 ``File`` 段
+            （``name`` / ``file_`` / ``url``），而不是 ``Video`` 段。
+            """
+            loop = asyncio.get_running_loop()
+            raw_path = getattr(seg, "file_", None)
+            if raw_path:
+                p = str(raw_path)
+                if p.startswith("file://"):
+                    p = unquote(urlparse(p).path)
+                if Path(p).is_file():
+                    try:
+                        return await loop.run_in_executor(None, Path(p).read_bytes)
+                    except Exception as exc:
+                        logger.warning(f"File 段本地读取失败: {exc}")
+            try:
+                got = await seg.get_file()  # 可能触发下载
+                if got and Path(str(got)).is_file():
+                    return await loop.run_in_executor(None, Path(str(got)).read_bytes)
+            except Exception as exc:
+                logger.warning(f"File 段 get_file() 失败: {exc}")
+            url = str(getattr(seg, "url", "") or "")
+            if url.startswith("http"):
+                if data := await self._download_image(url):
+                    return data
+            # 旧 URL 常已过期（403）→ 向平台换一条新鲜的再试
+            logger.info("[素材] 直连文件 URL 失败，尝试向平台换取新 URL...")
+            return await self._fetch_file_via_platform(event)
+
+        async def _load_video_bytes(self, src: str) -> bytes | None:
+            """加载视频**原始字节**（不做首帧抽取，区别于 ``_load_bytes``）。"""
+            loop = asyncio.get_running_loop()
+            src = (src or "").strip()
+            try:
+                if src.startswith("data:") and "," in src:
+                    return await loop.run_in_executor(None, base64.b64decode, src.split(",", 1)[1])
+                if src.startswith("file://"):
+                    file_path = unquote(urlparse(src).path)
+                    if re.match(r"^/[a-zA-Z]:/", file_path):
+                        file_path = file_path.lstrip("/")
+                    if Path(file_path).is_file():
+                        return await loop.run_in_executor(None, Path(file_path).read_bytes)
+                if Path(src).is_file():
+                    return await loop.run_in_executor(None, Path(src).read_bytes)
+                if src.startswith("http"):
+                    return await self._download_image(src)
+                if src.startswith("base64://"):
+                    return await loop.run_in_executor(None, base64.b64decode, src[9:])
+            except Exception as exc:
+                logger.warning(f"视频资源解析失败: {exc}")
+            return None
+
+        async def get_videos(self, event: AstrMessageEvent) -> List[Dict[str, Any]]:
+            """收集消息中的视频素材，**引用链优先**（顺序语义与 ``get_images`` 一致）。
+
+            当前只做「识别 + 下载 + 暂存」：上游 flow2api 尚未开放视频输入，
+            这里先把字节拿到手、并记好来源顺序，等上游接口就绪即可直接对接。
+
+            Returns:
+                ``[{"bytes": bytes, "source": "reply"|"current", "filename": str, "size": int}, ...]``
+            """
+            videos: List[Dict[str, Any]] = []
+            if Video is None:
+                logger.info("当前 AstrBot 版本没有 Video 组件，跳过视频素材收集")
+                return videos
+
+            message_obj = getattr(event, "message_obj", None)
+            message_segments = getattr(message_obj, "message", None)
+            if not isinstance(message_segments, (list, tuple)):
+                message_segments = ()
+
+            async def _collect(seg: Any, source: str) -> None:
+                if len(videos) >= self.max_videos:
+                    return
+                label = "引用链" if source == "reply" else "当前消息"
+                src = (
+                    getattr(seg, "url", None)
+                    or getattr(seg, "file", None)
+                    or getattr(seg, "path", None)
+                )
+                if not src:
+                    logger.info(f"在{label}中发现视频，但没有可用地址，跳过")
+                    return
+                logger.info(f"在{label}中发现视频")
+                data = await self._load_video_bytes(str(src))
+                if not data:
+                    logger.warning("视频下载失败，跳过")
+                    return
+                raw_name = str(
+                    getattr(seg, "name", None) or getattr(seg, "file", None) or ""
+                )
+                filename = Path(raw_name).name if raw_name else "video.mp4"
+                videos.append(
+                    {
+                        "bytes": data,
+                        "source": source,
+                        "filename": filename or "video.mp4",
+                        "size": len(data),
+                    }
+                )
+                logger.info(
+                    f"成功下载视频 ({len(data) / 1024 / 1024:.2f} MB, 来源={label})"
+                )
+
+            # 1. 引用链（排最前，与图片的顺序语义一致）
+            for seg in message_segments:
+                if not isinstance(seg, Reply):
+                    continue
+                reply_chain = getattr(seg, "chain", None)
+                if not isinstance(reply_chain, (list, tuple)):
+                    continue
+                for s_chain in reply_chain:
+                    if isinstance(s_chain, Video):
+                        await _collect(s_chain, "reply")
+            reply_count = len(videos)
+
+            # 2. 当前消息
+            for seg in message_segments:
+                if isinstance(seg, Video):
+                    await _collect(seg, "current")
+
+            logger.info(
+                f"=== 视频资源获取完成 === 引用链 {reply_count} 个 / "
+                f"当前消息 {len(videos) - reply_count} 个"
+            )
+            return videos
+
+        async def get_assets_ordered(
+                self,
+                event: AstrMessageEvent,
+                max_images: int = 10,
+        ) -> List[Dict[str, Any]]:
+            """**按 content 顺序**统一收集「图 + 视频」素材（跨类型保序）。
+
+            与 ``get_images`` / ``get_videos`` 的区别：那两个是各自独立收集，
+            跨类型相对顺序会丢（图全在前、视频全在后）；本方法**一趟走完**，
+            因此支持「图2 / 视频1」这种位置语义。
+
+            顺序：1) 引用链（最前）→ 2) 当前消息 → 3) @用户头像（最后）。
+
+            Returns:
+                ``[{"kind": "image"|"video", "bytes": bytes, "source": "reply"|"current"|"avatar",
+                     "filename": str}, ...]``
+            """
+            assets: List[Dict[str, Any]] = []
+            img_n = 0
+            vid_n = 0
+
+            message_obj = getattr(event, "message_obj", None)
+            message_segments = getattr(message_obj, "message", None)
+            if not isinstance(message_segments, (list, tuple)):
+                message_segments = ()
+
+            async def _add(seg: Any, source: str) -> None:
+                nonlocal img_n, vid_n
+                # 兼容：某些平台/版本下段的类不是同一个类对象，用**类名兜底**
+                _cname = type(seg).__name__
+                _is_image = isinstance(seg, Image) or _cname == "Image"
+                _is_video = (Video is not None and isinstance(seg, Video)) or _cname == "Video"
+                _is_file = (
+                    (FileSegment is not None and isinstance(seg, FileSegment)) or _cname == "File"
+                )
+                if _is_image:
+                    if img_n >= max_images:
+                        return
+                    src = getattr(seg, "url", None) or getattr(seg, "file", None)
+                    data = await self._load_bytes(str(src)) if src else None
+                    if not data:
+                        return
+                    assets.append(
+                        {"kind": "image", "bytes": data, "source": source, "filename": ""}
+                    )
+                    img_n += 1
+                elif _is_video:
+                    if vid_n >= self.max_videos:
+                        return
+                    src = (
+                        getattr(seg, "url", None)
+                        or getattr(seg, "file", None)
+                        or getattr(seg, "path", None)
+                    )
+                    if not src:
+                        logger.info(
+                            f"发现视频段但没有可用地址，跳过 "
+                            f"(cls={type(seg).__module__}.{_cname})"
+                        )
+                        return
+                    data = await self._load_video_bytes(str(src))
+                    if not data and str(src).startswith("http"):
+                        # QQ CDN（multimedia.nt.qq.com.cn 等）对请求头敏感 → 换 QQ 风格头重试
+                        logger.info("[素材] 视频直连失败，改用 QQ 风格请求头重试...")
+                        data = await self._download_with_headers(
+                            str(src),
+                            {
+                                "User-Agent": (
+                                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    "Chrome/120.0.0.0 Safari/537.36"
+                                ),
+                                "Referer": "https://qun.qq.com/",
+                                "Accept": "*/*",
+                            },
+                        )
+                    if not data and str(src).startswith("http"):
+                        # 仍失败 → 向平台(OneBot)换一条新鲜 URL
+                        logger.info("[素材] 仍失败，尝试向平台换取新文件 URL...")
+                        data = await self._fetch_file_via_platform(event)
+                    if not data:
+                        raw_dump = str(
+                            getattr(getattr(event, "message_obj", None), "raw_message", None)
+                        )[:500]
+                        logger.warning(f"视频下载失败，跳过；raw 摘要={raw_dump}")
+                        return
+                    raw_name = str(getattr(seg, "name", None) or getattr(seg, "file", None) or "")
+                    assets.append(
+                        {
+                            "kind": "video",
+                            "bytes": data,
+                            "source": source,
+                            "filename": (Path(raw_name).name if raw_name else "video.mp4"),
+                        }
+                    )
+                    vid_n += 1
+                    logger.info(
+                        f"在{'引用链' if source == 'reply' else '当前消息'}中发现视频 "
+                        f"({len(data) / 1024 / 1024:.2f} MB)"
+                    )
+                elif _is_file:
+                    # ★ NapCat/aiocqhttp 把用户「引用的视频」下发成 File 段（不是 Video）
+                    if vid_n >= self.max_videos:
+                        return
+                    label = "引用链" if source == "reply" else "当前消息"
+                    name = str(getattr(seg, "name", "") or "")
+                    url = str(getattr(seg, "url", "") or "")
+                    hint = (name or url).lower().split("?")[0]
+                    if hint and not hint.endswith(self._VIDEO_EXTENSIONS):
+                        logger.info(f"[素材] {label} File 段不是视频，跳过 (name={name!r})")
+                        return
+                    raw_dump = str(
+                        getattr(getattr(event, "message_obj", None), "raw_message", None)
+                    )[:500]
+                    logger.info(
+                        f"[素材] {label} File 段: name={name!r} url={url[:90]!r} "
+                        f"file_={getattr(seg, 'file_', None)!r}"
+                    )
+                    data = await self._load_file_segment_bytes(seg, event)
+                    if not data:
+                        logger.warning(
+                            f"[素材] {label} File 段下载失败，跳过 (name={name!r})；"
+                            f"raw 摘要={raw_dump}"
+                        )
+                        return
+                    if not self._looks_like_video(data):
+                        logger.info(
+                            f"[素材] {label} File 段不是视频容器，跳过 "
+                            f"(name={name!r}, {len(data)} 字节)"
+                        )
+                        return
+                    assets.append(
+                        {
+                            "kind": "video",
+                            "bytes": data,
+                            "source": source,
+                            "filename": (Path(name).name if name else "video.mp4"),
+                        }
+                    )
+                    vid_n += 1
+                    logger.info(
+                        f"在{label}中发现视频（File 段, "
+                        f"{len(data) / 1024 / 1024:.2f} MB, name={name!r}）"
+                    )
+
+            # 1. 引用链（最前）
+            reply_types: List[str] = []
+            for seg in message_segments:
+                if not isinstance(seg, Reply):
+                    continue
+                chain = getattr(seg, "chain", None)
+                if not isinstance(chain, (list, tuple)):
+                    logger.info(
+                        f"[素材] 引用段未携带可解析内容链 (id={getattr(seg, 'id', None)})"
+                    )
+                    continue
+                for s_chain in chain:
+                    reply_types.append(type(s_chain).__name__)
+                    await _add(s_chain, "reply")
+
+            # 2. 当前消息（按 content 数组顺序）
+            for seg in message_segments:
+                await _add(seg, "current")
+
+            # 诊断：把两处段的真实类型打出来（排查「视频没被吃到」）
+            logger.info(
+                f"[素材] 段类型扫描: 引用链={reply_types or '[]'} | "
+                f"当前消息={[type(s).__name__ for s in message_segments]}"
+            )
+            if reply_types and vid_n == 0:
+                logger.info(
+                    "[素材] 引用链段全名: "
+                    + str([
+                        f"{type(s).__module__}.{type(s).__name__}"
+                        for seg0 in message_segments if isinstance(seg0, Reply)
+                        for s in (getattr(seg0, 'chain', None) or [])
+                    ])
+                )
+
+            # 3. @用户头像（最后，与 get_images 的既有语义一致）
+            at_user_ids: List[str] = []
+            for seg in message_segments:
+                if isinstance(seg, At):
+                    user_id = getattr(seg, "qq", None)
+                    if user_id not in (None, ""):
+                        at_user_ids.append(str(user_id))
+            for qq in re.findall(r"@(\d+)", str(getattr(event, "message_str", "") or "")):
+                if qq not in at_user_ids:
+                    at_user_ids.append(qq)
+            for user_id in at_user_ids:
+                if img_n >= max_images:
+                    break
+                if avatar := await self._get_avatar(user_id):
+                    assets.append(
+                        {
+                            "kind": "image",
+                            "bytes": avatar,
+                            "source": "avatar",
+                            "filename": "",
+                        }
+                    )
+                    img_n += 1
+
+            n_img = sum(1 for a in assets if a["kind"] == "image")
+            n_vid = sum(1 for a in assets if a["kind"] == "video")
+            logger.info(
+                f"=== 有序素材收集完成 === 图 {n_img} / 视频 {n_vid}"
+                f"（顺序: 引用链 → 当前消息 → @头像）"
+            )
+            return assets
+
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.conf = config
@@ -702,6 +1224,7 @@ class FigurineProPlugin(Star):
         self.daily_stats: Dict[str, Any] = {}
         self.usage_store: Optional[UsageStore] = None
         self.prompt_map: Dict[str, str] = {}
+        self.preset_ratio_map: Dict[str, str] = {}
         self.preset_images: Dict[str, str] = {}  # 预设词 -> 图片文件名映射
         self.request_timeout = 120
         self.download_timeout = 240
@@ -740,6 +1263,7 @@ class FigurineProPlugin(Star):
             timeout=self.request_timeout,
             download_timeout=self.download_timeout,
             max_download_bytes=self.max_download_bytes,
+            context=getattr(self, "context", None),
         )
 
         await self._load_user_balances()
@@ -975,6 +1499,16 @@ class FigurineProPlugin(Star):
     def _preset_alias(value: Any) -> str:
         return str(value or "").strip()
 
+    @staticmethod
+    def _normalize_preset_aspect_ratio(value: Any) -> str:
+        """归一化预设比例：去首尾空白、全角冒号转半角，非法或空返回空串。"""
+        normalized = str(value or "").strip().replace("：", ":")
+        if not normalized:
+            return ""
+        if FigurineProPlugin._parse_aspect_ratio(normalized) is None:
+            return ""
+        return normalized
+
     @classmethod
     def _schema_default_preset_items(cls) -> List[Dict[str, str]]:
         prompt_list = cls._dashboard_schema().get("prompt_list", {})
@@ -997,6 +1531,8 @@ class FigurineProPlugin(Star):
             }
             if alias := cls._preset_alias(item.get("legacy_alias")):
                 preset["legacy_alias"] = alias
+            if ratio := cls._normalize_preset_aspect_ratio(item.get("aspect_ratio")):
+                preset["aspect_ratio"] = ratio
             presets.append(preset)
         return presets
 
@@ -1022,10 +1558,12 @@ class FigurineProPlugin(Star):
             command = ""
             prompt = ""
             alias = ""
+            ratio = ""
             if isinstance(item, dict):
                 command = str(item.get("command") or item.get("指令") or item.get("name") or "").strip()
                 prompt = str(item.get("prompt") or item.get("提示词") or item.get("value") or "").strip()
                 alias = self._preset_alias(item.get("legacy_alias"))
+                ratio = self._normalize_preset_aspect_ratio(item.get("aspect_ratio"))
             elif isinstance(item, str) and ":" in item:
                 command, prompt = (part.strip() for part in item.split(":", 1))
             if not command or not prompt or command in seen:
@@ -1039,6 +1577,8 @@ class FigurineProPlugin(Star):
             alias = alias if alias in valid_aliases else schema_aliases.get(command, "")
             if alias:
                 preset["legacy_alias"] = alias
+            if ratio:
+                preset["aspect_ratio"] = ratio
             presets.append(preset)
         return presets
 
@@ -1349,6 +1889,7 @@ class FigurineProPlugin(Star):
                 "command": preset["command"],
                 "prompt": preset["prompt"],
                 **({"legacy_alias": preset["legacy_alias"]} if preset.get("legacy_alias") else {}),
+                "aspect_ratio": preset.get("aspect_ratio", ""),
             }
             for preset in self._normalized_preset_items()
         ]
@@ -1462,6 +2003,42 @@ class FigurineProPlugin(Star):
             {"name": "seedream_max_side_2000", "label": "Seedream宽高均不超过2000", "group": "Seedream", "type": "boolean", "default": True},
             {"name": "seedream_side_over_2000_auto_2k", "label": "边长超2000自动升2K", "group": "Seedream", "type": "boolean", "default": True},
             {"name": "seedream_optimize_prompt_mode", "label": "Seedream提示词优化模式", "group": "Seedream", "type": "select", "default": "standard", "options": ["standard", "fast"]},
+            {"name": "enable_omni_parameters", "label": "启用 Omni 视频参数", "group": "Omni", "type": "boolean", "default": False},
+            {"name": "omni_model_template", "label": "Omni实际模型名模板", "group": "Omni", "type": "text", "default": self.OMNI_MODEL_TEMPLATE_DEFAULT, "max_length": 128},
+            {"name": "omni_video_duration", "label": "Omni视频时长(秒)", "group": "Omni", "type": "select", "default": self.OMNI_DURATION_DEFAULT, "options": list(self.OMNI_DURATION_OPTIONS)},
+            {"name": "omni_aspect_mode", "label": "Omni画面方向", "group": "Omni", "type": "select", "default": self.OMNI_ASPECT_MODE_DEFAULT, "options": [
+                {"value": "auto", "label": "auto（按第一张参考图自动识别横竖）"},
+                {"value": "portrait", "label": "portrait（强制竖屏）"},
+                {"value": "landscape", "label": "landscape（强制横屏）"},
+            ]},
+            {"name": "omni_default_aspect", "label": "Omni默认方向", "group": "Omni", "type": "select", "default": self.OMNI_DEFAULT_ASPECT_DEFAULT, "options": [
+                {"value": "portrait", "label": "portrait（竖屏，默认）"},
+                {"value": "landscape", "label": "landscape（横屏）"},
+            ]},
+            {"name": "omni_super_resolution", "label": "Omni超分辨率", "group": "Omni", "type": "boolean", "default": False},
+            {"name": "omni_super_resolution_target", "label": "Omni超分目标分辨率", "group": "Omni", "type": "select", "default": self.OMNI_RESOLUTION_DEFAULT, "options": list(self.OMNI_RESOLUTION_OPTIONS)},
+            {"name": "omni_agent_ui", "label": "Omni智能体开关", "group": "Omni", "type": "select", "default": self.OMNI_AGENT_UI_DEFAULT, "options": [
+                {"value": "default", "label": "不传（默认，由上游决定）"},
+                {"value": "on", "label": "on（开启智能体界面）"},
+                {"value": "off", "label": "off（关闭智能体界面）"},
+                {"value": "keep", "label": "keep（保持当前状态）"},
+            ]},
+            {"name": "omni_upscale_start_message", "label": "Omni超分开始提示", "group": "Omni", "type": "text", "default": self.OMNI_UPSCALE_START_MESSAGE_DEFAULT, "max_length": 512},
+            {"name": "omni_upscale_start_pattern", "label": "Omni阶段切换识别正则", "group": "Omni", "type": "text", "default": self.OMNI_UPSCALE_START_PATTERN_DEFAULT, "max_length": 256},
+            {"name": "omni_result_caption", "label": "Omni完成文案", "group": "Omni", "type": "text", "default": self.OMNI_RESULT_CAPTION_DEFAULT, "max_length": 512},
+            {"name": "omni_show_timing", "label": "Omni显示两段耗时", "group": "Omni", "type": "boolean", "default": True},
+            {"name": "omni_send_preview_gif", "label": "Omni发送超分预览GIF", "group": "Omni", "type": "boolean", "default": False},
+            {"name": "omni_preview_gif_caption", "label": "Omni预览GIF文案", "group": "Omni", "type": "text", "default": self.OMNI_PREVIEW_GIF_CAPTION_DEFAULT, "max_length": 512},
+            {"name": "omni_send_orig_video", "label": "Omni发送超分前原视频", "group": "Omni", "type": "boolean", "default": True},
+            {"name": "omni_orig_video_pattern", "label": "Omni原视频行识别正则", "group": "Omni", "type": "text", "default": self.OMNI_ORIG_VIDEO_PATTERN_DEFAULT, "max_length": 256},
+            {"name": "omni_orig_video_caption", "label": "Omni原视频文案", "group": "Omni", "type": "text", "default": self.OMNI_ORIG_VIDEO_CAPTION_DEFAULT, "max_length": 512},
+            {"name": "omni_timeout", "label": "Omni生成超时(秒)", "group": "Omni", "type": "number", "default": self.OMNI_TIMEOUT_DEFAULT, "min": self.OMNI_TIMEOUT_MIN, "max": self.OMNI_TIMEOUT_MAX},
+            {"name": "omni_max_reference_images", "label": "Omni参考图上限", "group": "Omni", "type": "number", "default": self.OMNI_MAX_REFERENCE_IMAGES_DEFAULT, "min": 0, "max": 10},
+            {"name": "omni_charge_amount_4s", "label": "Omni 4s单次扣费(元，0=继承)", "group": "Omni", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "omni_charge_amount_6s", "label": "Omni 6s单次扣费(元，0=继承)", "group": "Omni", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "omni_charge_amount_8s", "label": "Omni 8s单次扣费(元，0=继承)", "group": "Omni", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "omni_charge_amount_10s", "label": "Omni 10s单次扣费(元，0=继承)", "group": "Omni", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
+            {"name": "omni_upscale_extra_charge", "label": "Omni超分加收(元)", "group": "Omni", "type": "number", "default": 0, "min": 0, "max": 100000, "step": 0.001, "float": True},
         ]
         generic_image_fields = {
             "default_resolution", "send_default_size", "enable_gpt_parameters", "omit_n_parameter",
@@ -1480,11 +2057,23 @@ class FigurineProPlugin(Star):
             "seedream_adaptive_aspect_ratio", "seedream_max_side_2000",
             "seedream_side_over_2000_auto_2k", "seedream_optimize_prompt_mode",
         }
+        omni_fields = {
+            "enable_omni_parameters", "omni_model_template", "omni_video_duration",
+            "omni_aspect_mode", "omni_default_aspect", "omni_super_resolution",
+            "omni_super_resolution_target", "omni_agent_ui", "omni_upscale_start_message",
+            "omni_upscale_start_pattern", "omni_result_caption", "omni_show_timing",
+            "omni_send_preview_gif", "omni_preview_gif_caption",
+            "omni_send_orig_video", "omni_orig_video_pattern", "omni_orig_video_caption",
+            "omni_timeout", "omni_max_reference_images", "omni_charge_amount_4s",
+            "omni_charge_amount_6s", "omni_charge_amount_8s", "omni_charge_amount_10s",
+            "omni_upscale_extra_charge",
+        }
         mode_by_field = {
             **{name: "gpt" for name in generic_image_fields},
             **{name: "gemini" for name in gemini_fields},
             **{name: "grok" for name in grok_fields},
             **{name: "seedream" for name in seedream_fields},
+            **{name: "omni" for name in omni_fields},
         }
         for field_name in {
             *self.PARAMETER_MODE_ENABLE_FIELDS.values(),
@@ -1519,6 +2108,29 @@ class FigurineProPlugin(Star):
             "seedream_max_side_2000": "enable_seedream_parameters",
             "seedream_side_over_2000_auto_2k": "enable_seedream_parameters",
             "seedream_optimize_prompt_mode": "enable_seedream_parameters",
+            "omni_model_template": "enable_omni_parameters",
+            "omni_video_duration": "enable_omni_parameters",
+            "omni_aspect_mode": "enable_omni_parameters",
+            "omni_default_aspect": "enable_omni_parameters",
+            "omni_super_resolution": "enable_omni_parameters",
+            "omni_super_resolution_target": "enable_omni_parameters",
+            "omni_agent_ui": "enable_omni_parameters",
+            "omni_upscale_start_message": "enable_omni_parameters",
+            "omni_upscale_start_pattern": "enable_omni_parameters",
+            "omni_result_caption": "enable_omni_parameters",
+            "omni_show_timing": "enable_omni_parameters",
+            "omni_send_preview_gif": "enable_omni_parameters",
+            "omni_preview_gif_caption": "enable_omni_parameters",
+            "omni_send_orig_video": "enable_omni_parameters",
+            "omni_orig_video_pattern": "enable_omni_parameters",
+            "omni_orig_video_caption": "enable_omni_parameters",
+            "omni_timeout": "enable_omni_parameters",
+            "omni_max_reference_images": "enable_omni_parameters",
+            "omni_charge_amount_4s": "enable_omni_parameters",
+            "omni_charge_amount_6s": "enable_omni_parameters",
+            "omni_charge_amount_8s": "enable_omni_parameters",
+            "omni_charge_amount_10s": "enable_omni_parameters",
+            "omni_upscale_extra_charge": "enable_omni_parameters",
         }
         schema_parameter_items = (
             self._dashboard_schema().get("model_parameter_list", {}).get("templates", {})
@@ -1542,6 +2154,9 @@ class FigurineProPlugin(Star):
             elif name in seedream_fields:
                 field["route"] = "generic"
                 field["endpoint_types"] = ["images_generations"]
+            elif name in omni_fields:
+                field["route"] = "generic"
+                field["endpoint_types"] = ["chat_completions"]
             if name in dependencies:
                 field["depends_on"] = {"field": dependencies[name], "equals": True}
             field["parameter_mode"] = mode_by_field.get(name, "base")
@@ -1913,6 +2528,12 @@ class FigurineProPlugin(Star):
                     raise ValueError("预设包含重复的历史兼容别名")
                 preset["legacy_alias"] = alias
                 used_aliases.add(alias)
+            raw_ratio = item.get("aspect_ratio")
+            normalized_ratio = self._normalize_preset_aspect_ratio(raw_ratio)
+            if str(raw_ratio or "").strip() and not normalized_ratio:
+                raise ValueError("预设比例格式无效，示例: 1:1")
+            if normalized_ratio:
+                preset["aspect_ratio"] = normalized_ratio
             preset_commands.add(command)
             presets.append(preset)
         return presets
@@ -2020,10 +2641,15 @@ class FigurineProPlugin(Star):
                             self.conf.pop(key, None)
                     raise
                 await self._load_prompt_map()
+            # 回显“已落库”的预设：空比例不写键（与落库规则一致），
+            # 而非 GET 用的 _dashboard_preset_items()（其始终带 aspect_ratio 键）。
             return self._dashboard_json({
                 "ok": True,
                 "revision": self._dashboard_preset_revision(),
-                "presets": self._dashboard_preset_items(),
+                "presets": [
+                    {key: value for key, value in preset.items() if key != "__template_key"}
+                    for preset in presets
+                ],
                 "message": "预设提示词已保存。",
             })
         except ValueError as exc:
@@ -2931,9 +3557,15 @@ class FigurineProPlugin(Star):
             logger.error(f"自动迁移 prompt_list 配置失败: {exc}")
 
     async def _load_prompt_map(self):
+        normalized_presets = self._normalized_preset_items()
         self.prompt_map = {
             preset["command"]: preset["prompt"]
-            for preset in self._normalized_preset_items()
+            for preset in normalized_presets
+        }
+        self.preset_ratio_map = {
+            preset["command"]: preset["aspect_ratio"]
+            for preset in normalized_presets
+            if preset.get("aspect_ratio")
         }
 
     def _get_custom_preset_prompt(self, preset_name: str) -> Optional[str]:
@@ -2942,27 +3574,38 @@ class FigurineProPlugin(Star):
             return None
         return self.prompt_map.get(command)
 
+    def _get_custom_preset_ratio(self, preset_name: str) -> Optional[str]:
+        command = (preset_name or "").strip()
+        if command in self._get_default_preset_commands():
+            return None
+        return self.preset_ratio_map.get(command)
+
     def _resolve_bnn_prompt(
             self,
             raw_prompt: str,
             allow_append: bool,
             separator: str,
-    ) -> Tuple[str, str]:
-        """展开 bnn 后的自定义预设，返回（最终提示词，命中的预设名）。"""
+    ) -> Tuple[str, str, str]:
+        """展开 bnn 后的自定义预设，返回（最终提示词，命中的预设名，命中预设的比例）。"""
         raw_prompt = str(raw_prompt or "").strip()
         if not raw_prompt:
-            return "", ""
+            return "", "", ""
 
         if allow_append and separator and separator in raw_prompt:
             candidate_name, candidate_append = raw_prompt.split(separator, 1)
             candidate_prompt = self._get_custom_preset_prompt(candidate_name)
             if candidate_prompt is not None:
-                return candidate_prompt + candidate_append.strip(), candidate_name.strip()
+                matched_name = candidate_name.strip()
+                return (
+                    candidate_prompt + candidate_append.strip(),
+                    matched_name,
+                    self._get_custom_preset_ratio(matched_name) or "",
+                )
 
         preset_prompt = self._get_custom_preset_prompt(raw_prompt)
         if preset_prompt is not None:
-            return preset_prompt, raw_prompt
-        return raw_prompt, ""
+            return preset_prompt, raw_prompt, self._get_custom_preset_ratio(raw_prompt) or ""
+        return raw_prompt, "", ""
 
     @staticmethod
     def _normalize_model_list(raw_list: Any) -> List[str]:
@@ -3341,8 +3984,9 @@ class FigurineProPlugin(Star):
             "gemini": ("enable_gemini_parameters", "gemini_parameters", "Gemini参数设置"),
             "grok": ("enable_grok_parameters", "grok_parameters", "Grok参数设置"),
             "seedream": ("enable_seedream_parameters", "seedream_parameters", "Seedream参数设置"),
+            "omni": ("enable_omni_parameters", "omni_parameters", "Omni参数设置"),
         }
-        for mode in ("gpt", "gemini", "grok", "seedream"):
+        for mode in ("gpt", "gemini", "grok", "seedream", "omni"):
             if is_enabled(*legacy_enable_fields[mode]):
                 return mode
         return configured_mode if configured_mode in known_modes else "none"
@@ -3418,6 +4062,62 @@ class FigurineProPlugin(Star):
         def normalize_default_resolution(value: Any) -> str:
             return str(value or "auto").strip() or "auto"
 
+        def normalize_omni_duration(value: Any) -> str:
+            normalized = str(value if value is not None else "").strip().rstrip("sS")
+            if normalized.endswith(".0"):
+                normalized = normalized[:-2]
+            return normalized if normalized in self.OMNI_DURATION_OPTIONS else self.OMNI_DURATION_DEFAULT
+
+        def normalize_omni_aspect_mode(value: Any) -> str:
+            normalized = str(value or "").strip().lower()
+            if normalized in {"竖屏", "vertical", "9:16", "portrait"}:
+                return "portrait"
+            if normalized in {"横屏", "horizontal", "16:9", "landscape"}:
+                return "landscape"
+            if normalized in {"", "auto", "自动"}:
+                return self.OMNI_ASPECT_MODE_DEFAULT
+            return normalized if normalized in self.OMNI_ASPECT_MODE_OPTIONS else self.OMNI_ASPECT_MODE_DEFAULT
+
+        def normalize_omni_default_aspect(value: Any) -> str:
+            normalized = str(value or "").strip().lower()
+            if normalized in {"竖屏", "vertical", "9:16"}:
+                return "portrait"
+            if normalized in {"横屏", "horizontal", "16:9"}:
+                return "landscape"
+            return normalized if normalized in self.OMNI_DEFAULT_ASPECT_OPTIONS else self.OMNI_DEFAULT_ASPECT_DEFAULT
+
+        def normalize_omni_resolution(value: Any) -> str:
+            normalized = str(value or "").strip().lower()
+            if normalized in {"1080", "1080p", "fhd", "fullhd"}:
+                return "1080p"
+            if normalized in {"4k", "2160p", "uhd"}:
+                return "4k"
+            return normalized if normalized in self.OMNI_RESOLUTION_OPTIONS else self.OMNI_RESOLUTION_DEFAULT
+
+        def normalize_omni_text(value: Any, default: str) -> str:
+            text = str(value if value is not None else "").strip()
+            return text or default
+
+        def normalize_omni_agent_ui(value: Any) -> str:
+            normalized = str(value if value is not None else "").strip().lower()
+            aliases = {"开": "on", "开启": "on", "关": "off", "关闭": "off", "保持": "keep", "": "default"}
+            normalized = aliases.get(normalized, normalized)
+            return normalized if normalized in self.OMNI_AGENT_UI_OPTIONS else self.OMNI_AGENT_UI_DEFAULT
+
+        def normalize_omni_timeout(value: Any) -> int:
+            timeout = _normalize_nonnegative_int(value)
+            if timeout <= 0:
+                return self.OMNI_TIMEOUT_DEFAULT
+            return max(self.OMNI_TIMEOUT_MIN, min(self.OMNI_TIMEOUT_MAX, timeout))
+
+        def normalize_omni_max_reference_images(value: Any) -> int:
+            if value is None:
+                return self.OMNI_MAX_REFERENCE_IMAGES_DEFAULT
+            return max(
+                0,
+                min(self.OMNI_MAX_REFERENCE_IMAGES_DEFAULT, _normalize_nonnegative_int(value)),
+            )
+
         def get_value(item: Dict[str, Any], *keys: str, default: Any = None) -> Any:
             for key in keys:
                 if key in item and item[key] is not None:
@@ -3486,10 +4186,12 @@ class FigurineProPlugin(Star):
                 seedream_optimize_prompt_mode: Any = "standard",
                 api_key_tag: Any = "默认",
                 request_model_name: Any = "",
+                raw_entry: Any = None,
         ):
             model_name = str(model or "").strip()
             if not model_name:
                 return
+            entry = raw_entry if isinstance(raw_entry, dict) else {}
             auto_upgrade_1k = normalize_bool(auto_upgrade_1k_adaptive_resolution)
             parameter_mode = self._get_parameter_mode_from_entry(raw_entries.get(model_name))
             enabled_field = self.PARAMETER_MODE_ENABLE_FIELDS.get(parameter_mode, "")
@@ -3538,6 +4240,78 @@ class FigurineProPlugin(Star):
                 "seedream_max_side_2000": normalize_bool(seedream_max_side_2000),
                 "seedream_side_over_2000_auto_2k": normalize_bool(seedream_side_over_2000_auto_2k),
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
+                "enable_omni_parameters": enabled_field == "enable_omni_parameters",
+                "omni_model_template": normalize_omni_text(
+                    get_value(entry, "omni_model_template", "Omni实际模型名模板", "实际模型名模板"),
+                    self.OMNI_MODEL_TEMPLATE_DEFAULT,
+                ),
+                "omni_video_duration": normalize_omni_duration(
+                    get_value(entry, "omni_video_duration", "Omni视频时长", "视频时长")
+                ),
+                "omni_aspect_mode": normalize_omni_aspect_mode(
+                    get_value(entry, "omni_aspect_mode", "Omni画面方向", "画面方向")
+                ),
+                "omni_default_aspect": normalize_omni_default_aspect(
+                    get_value(entry, "omni_default_aspect", "Omni默认方向", "默认方向")
+                ),
+                "omni_super_resolution": normalize_bool(
+                    get_value(entry, "omni_super_resolution", "Omni超分辨率", "超分辨率", default=False)
+                ),
+                "omni_super_resolution_target": normalize_omni_resolution(
+                    get_value(entry, "omni_super_resolution_target", "Omni超分目标分辨率", "超分目标分辨率")
+                ),
+                "omni_agent_ui": normalize_omni_agent_ui(
+                    get_value(entry, "omni_agent_ui", "Omni智能体开关", "智能体开关")
+                ),
+                "omni_upscale_start_message": normalize_omni_text(
+                    get_value(entry, "omni_upscale_start_message", "Omni超分开始提示", "超分开始提示"),
+                    self.OMNI_UPSCALE_START_MESSAGE_DEFAULT,
+                ),
+                "omni_upscale_start_pattern": normalize_omni_text(
+                    get_value(entry, "omni_upscale_start_pattern", "Omni阶段切换识别正则", "阶段切换识别正则"),
+                    self.OMNI_UPSCALE_START_PATTERN_DEFAULT,
+                ),
+                "omni_result_caption": normalize_omni_text(
+                    get_value(entry, "omni_result_caption", "Omni完成文案", "完成文案"),
+                    self.OMNI_RESULT_CAPTION_DEFAULT,
+                ),
+                "omni_show_timing": normalize_bool(
+                    get_value(entry, "omni_show_timing", "Omni显示两段耗时", "显示两段耗时", default=True)
+                ),
+                "omni_send_preview_gif": normalize_bool(
+                    get_value(entry, "omni_send_preview_gif", "Omni发送超分预览GIF", "发送超分预览GIF", default=False)
+                ),
+                "omni_preview_gif_caption": normalize_omni_text(
+                    get_value(entry, "omni_preview_gif_caption", "Omni预览GIF文案", "预览GIF文案"),
+                    self.OMNI_PREVIEW_GIF_CAPTION_DEFAULT,
+                ),
+                "omni_send_orig_video": normalize_bool(
+                    get_value(entry, "omni_send_orig_video", "Omni发送超分前原视频", "发送超分前原视频", default=True)
+                ),
+                "omni_orig_video_pattern": normalize_omni_text(
+                    get_value(entry, "omni_orig_video_pattern", "Omni原视频行识别正则", "原视频行识别正则"),
+                    self.OMNI_ORIG_VIDEO_PATTERN_DEFAULT,
+                ),
+                "omni_orig_video_caption": normalize_omni_text(
+                    get_value(entry, "omni_orig_video_caption", "Omni原视频文案", "原视频文案"),
+                    self.OMNI_ORIG_VIDEO_CAPTION_DEFAULT,
+                ),
+                "omni_timeout": normalize_omni_timeout(
+                    get_value(entry, "omni_timeout", "Omni生成超时", "生成超时")
+                ),
+                "omni_max_reference_images": normalize_omni_max_reference_images(
+                    get_value(
+                        entry,
+                        "omni_max_reference_images",
+                        "Omni参考图上限",
+                        "参考图上限",
+                    )
+                ),
+                "omni_charge_amount_4s": max(0, yuan_to_amount(get_value(entry, "omni_charge_amount_4s", "Omni 4s单次扣费", default=0))),
+                "omni_charge_amount_6s": max(0, yuan_to_amount(get_value(entry, "omni_charge_amount_6s", "Omni 6s单次扣费", default=0))),
+                "omni_charge_amount_8s": max(0, yuan_to_amount(get_value(entry, "omni_charge_amount_8s", "Omni 8s单次扣费", default=0))),
+                "omni_charge_amount_10s": max(0, yuan_to_amount(get_value(entry, "omni_charge_amount_10s", "Omni 10s单次扣费", default=0))),
+                "omni_upscale_extra_charge": max(0, yuan_to_amount(get_value(entry, "omni_upscale_extra_charge", "Omni超分加收", default=0))),
                 "api_key_tag": str(api_key_tag or "默认").strip() or "默认",
                 "request_model_name": str(request_model_name or "").strip(),
             }
@@ -3720,6 +4494,7 @@ class FigurineProPlugin(Star):
                         ),
                         get_value(parameters, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
                         get_value(parameters, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
+                        raw_entry=parameters,
                     )
             return mapping
 
@@ -3904,6 +4679,7 @@ class FigurineProPlugin(Star):
                 ),
                 get_value(item, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
                 get_value(item, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
+                raw_entry=item,
             )
 
         return mapping
@@ -4765,6 +5541,146 @@ class FigurineProPlugin(Star):
         else:
             request["size"] = parameters["seedream_resolution"]
         return request
+
+    # ------------------------------------------------------------------
+    # Omni 1.1 Flash 视频（flow2api 厂商参数模式）
+    # ------------------------------------------------------------------
+    @classmethod
+    def _format_elapsed_seconds(cls, seconds: Optional[float]) -> str:
+        if seconds is None or seconds < 0:
+            return "-"
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        minutes, remain = divmod(int(round(seconds)), 60)
+        return f"{minutes}分{remain}秒"
+
+    def _is_video_parameters(self, parameters: Optional[Dict[str, Any]]) -> bool:
+        """参数模式为 omni 时走视频链路（由最终生效模型决定，与图片链路共用入口）。"""
+        if not isinstance(parameters, dict):
+            return False
+        if str(parameters.get("parameter_mode") or "").strip().lower() == "omni":
+            return True
+        return bool(parameters.get("enable_omni_parameters"))
+
+    def _get_omni_parameters(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        parameters = self._parameters_for_request(model_name, parameters)
+        if not self._is_video_parameters(parameters):
+            return None
+        return parameters
+
+    def _render_omni_model_name(
+            self,
+            parameters: Optional[Dict[str, Any]],
+            orientation: str,
+            resolution: str = "",
+    ) -> str:
+        """按模板拼装实际请求模型名（超分开启时自动追加 -1080p/-4k）。"""
+        parameters = parameters or {}
+        template = str(parameters.get("omni_model_template") or "").strip() or self.OMNI_MODEL_TEMPLATE_DEFAULT
+        duration = str(parameters.get("omni_video_duration") or self.OMNI_DURATION_DEFAULT)
+        base_model = str(parameters.get("request_model_name") or "").strip()
+        variables = {
+            "duration": duration,
+            "orientation": orientation,
+            "resolution": resolution,
+            "resolution_suffix": f"-{resolution}" if resolution else "",
+            "model": base_model,
+        }
+        name = self._render_prompt_template(template, variables).strip()
+        if resolution and "{resolution}" not in template and "{resolution_suffix}" not in template:
+            name = f"{name}-{resolution}"
+        return name.strip("- ").strip()
+
+    def _resolve_omni_orientation(
+            self,
+            parameters: Optional[Dict[str, Any]],
+            image_bytes_list: Optional[List[bytes]] = None,
+    ) -> str:
+        """画面方向：强制值优先；auto 时按第一张参考图识别，无法识别回落默认（默认竖屏）。"""
+        parameters = parameters or {}
+        mode = str(parameters.get("omni_aspect_mode") or self.OMNI_ASPECT_MODE_DEFAULT).strip().lower()
+        if mode in ("portrait", "landscape"):
+            return mode
+        default_aspect = str(
+            parameters.get("omni_default_aspect") or self.OMNI_DEFAULT_ASPECT_DEFAULT
+        ).strip().lower()
+        if default_aspect not in self.OMNI_DEFAULT_ASPECT_OPTIONS:
+            default_aspect = self.OMNI_DEFAULT_ASPECT_DEFAULT
+        return self._detect_first_image_orientation(image_bytes_list) or default_aspect
+
+    @classmethod
+    def _detect_first_image_orientation(cls, image_bytes_list: Optional[List[bytes]]) -> Optional[str]:
+        """按第一张参考图的宽高判定横竖；正方形/无法判定返回 None。"""
+        for raw in image_bytes_list or []:
+            if not isinstance(raw, (bytes, bytearray)) or not raw:
+                continue
+            try:
+                from PIL import ImageOps
+
+                with PILImage.open(io.BytesIO(bytes(raw))) as image:
+                    normalized = ImageOps.exif_transpose(image)
+                    width, height = normalized.size
+            except Exception as exc:
+                logger.warning(f"读取 Omni 首图尺寸失败，跳过横竖自动识别: {exc}")
+                continue
+            if width <= 0 or height <= 0:
+                continue
+            if height > width:
+                return "portrait"
+            if width > height:
+                return "landscape"
+            return None
+        return None
+
+    def _get_omni_charge_amount(
+            self,
+            parameters: Optional[Dict[str, Any]],
+            duration: Optional[str] = None,
+            upscale: bool = False,
+    ) -> int:
+        """按时长分档计费（厘）：命中 omni_charge_amount_{N}s，否则继承 charge_amount。"""
+        parameters = parameters or {}
+        duration = str(duration or parameters.get("omni_video_duration") or self.OMNI_DURATION_DEFAULT)
+        if duration not in self.OMNI_DURATION_OPTIONS:
+            duration = self.OMNI_DURATION_DEFAULT
+        amount = _normalize_nonnegative_int(parameters.get(f"omni_charge_amount_{duration}s", 0))
+        if amount <= 0:
+            base = _normalize_nonnegative_int(parameters.get("charge_amount", 0))
+            amount = base if base > 0 else yuan_to_amount(1.0)
+        if upscale:
+            amount += _normalize_nonnegative_int(parameters.get("omni_upscale_extra_charge", 0))
+        return amount
+
+    def _render_omni_message(
+            self,
+            template: str,
+            *,
+            parameters: Optional[Dict[str, Any]] = None,
+            orientation: str = "",
+            duration: str = "",
+            resolution: str = "",
+            generate_seconds: Optional[float] = None,
+            upscale_seconds: Optional[float] = None,
+            cost_text: str = "",
+            preview_gif: str = "",
+    ) -> str:
+        parameters = parameters or {}
+        variables = {
+            "generate_time": self._format_elapsed_seconds(generate_seconds),
+            "upscale_time": self._format_elapsed_seconds(upscale_seconds),
+            "resolution": resolution or "-",
+            "preview_gif": preview_gif or "-",
+            "duration": duration or str(parameters.get("omni_video_duration") or self.OMNI_DURATION_DEFAULT),
+            "orientation": orientation,
+            "orientation_cn": self.OMNI_ORIENTATION_DISPLAY.get(orientation, orientation),
+            "model": str(parameters.get("request_model_name") or "").strip(),
+            "cost": cost_text,
+        }
+        return self._render_prompt_template(str(template or ""), variables)
 
     def _get_image_request_parameters(
             self,
@@ -5887,6 +6803,19 @@ class FigurineProPlugin(Star):
         b64 = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:{mime_type};base64,{b64}"
 
+    def _video_bytes_to_data_url(self, data: bytes) -> str:
+        """把视频字节转成 data-url（按魔数嗅探容器格式）。"""
+        if data[4:8] == b"ftyp":
+            mime = "video/mp4"
+        elif data[:4] == b"\x1a\x45\xdf\xa3":
+            mime = "video/webm"
+        elif data[:4] == b"RIFF":
+            mime = "video/avi"
+        else:
+            mime = "video/mp4"
+        b64 = base64.b64encode(data).decode("utf-8")
+        return f"data:{mime};base64,{b64}"
+
     def _sanitize_request_log_value(self, value: Any, field_name: str = "") -> Any:
         normalized_field = field_name.strip().lower().replace("-", "_")
         if normalized_field in {
@@ -6072,6 +7001,13 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
             parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
+        parameters = self._parameters_for_request(model_name, parameters)
+        if self._is_video_parameters(parameters):
+            return self._get_omni_charge_amount(
+                parameters,
+                (parameters or {}).get("omni_video_duration"),
+                bool((parameters or {}).get("omni_super_resolution")),
+            )
         tier = self._get_resolution_charge_tier(
             model_name,
             resolution,
@@ -6298,6 +7234,15 @@ class FigurineProPlugin(Star):
 
     def _reply_chain_result(self, event: AstrMessageEvent, chain: List[Any]):
         return event.chain_result([*self._build_reply_chain(event), *chain])
+
+    def _video_only_result(self, event: AstrMessageEvent, video_component: Any):
+        """视频消息**绝不能**带引用回复等其它段。
+
+        QQ(aiocqhttp) 会直接拒收：
+        ``retcode=1400 message element "video" must be the only segment in a message``。
+        因此这里不前置 ``Reply``（文案由调用方另发一条）。
+        """
+        return event.chain_result([video_component])
 
     def _build_image_result(self, event: AstrMessageEvent, image_bytes: bytes, text: str):
         return self._reply_chain_result(event, [Image.fromBytes(image_bytes), Plain(text)])
@@ -6785,6 +7730,896 @@ class FigurineProPlugin(Star):
         if self.conf.get("debug_mode", False):
             logger.error(f"调试模式错误详情: {detail}")
         return summary
+
+    # ------------------------------------------------------------------
+    # Omni 视频链路：请求 / SSE 解析 / 发送 / 主流程
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _extract_video_url_from_text(text: str) -> Optional[str]:
+        """从上游文本解析视频地址：<video src>、markdown 图片、裸视频链接。"""
+        if not text:
+            return None
+        match = re.search(r"<video[^>]*\bsrc=['\"]([^'\"]+)['\"]", text, re.IGNORECASE)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+        match = re.search(r"!\[[^\]]*\]\((https?://[^)\s]+)\)", text)
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+        match = re.search(
+            r"(https?://[^\s\"'<>]+\.(?:mp4|webm|mov)(?:\?[^\s\"'<>]*)?)",
+            text,
+            re.IGNORECASE,
+        )
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+        return None
+
+    async def _upload_video_get_id(
+            self,
+            data: bytes,
+            filename: str,
+            base_url: str,
+            api_key: str,
+    ) -> Optional[str]:
+        """``POST {base}/v1/uploads/video`` —— 原始字节直传，返回 ``upload_id``。
+
+        用于视频素材超过内联上限（``OMNI_VIDEO_INLINE_LIMIT``）时；
+        失败返回 ``None``（调用方跳过该素材，不静默伪造）。
+        """
+        root = (base_url or "").rstrip("/")
+        if root.endswith("/v1"):
+            root = root[: -len("/v1")]
+        url = f"{root}/v1/uploads/video"
+        headers = {
+            "Content-Type": "application/octet-stream",
+            "Authorization": f"Bearer {api_key}",
+            "X-File-Name": filename or "video.mp4",
+        }
+        logger.info(
+            f"视频素材超过内联上限，改走上传接口: {url} "
+            f"({len(data) / 1024 / 1024:.2f} MB)"
+        )
+        if not self.iwf:
+            return None
+        timeout_cfg = _build_client_timeout(self.request_timeout, self.download_timeout)
+        try:
+            async with self.iwf.create_client_session(timeout_cfg) as session:
+                async with session.post(url, data=data, headers=headers) as resp:
+                    text = await resp.text()
+                    if resp.status != 200:
+                        logger.error(f"视频上传失败 HTTP {resp.status}: {text[:300]}")
+                        return None
+                    payload = json.loads(text)
+                    upload_id = str(payload.get("upload_id") or "").strip()
+                    if not upload_id:
+                        logger.error(f"视频上传返回缺少 upload_id: {text[:300]}")
+                        return None
+                    logger.info(f"视频上传成功 upload_id={upload_id}")
+                    return upload_id
+        except Exception as exc:
+            logger.error(f"视频上传异常: {exc}")
+            return None
+
+    async def _resolve_video_assets(
+            self,
+            assets: List[Any],
+            base_url: str,
+            api_key: str,
+    ) -> List[Dict[str, Any]]:
+        """把视频素材解析成可直接放进 ``content`` 的 url。
+
+        ≤ ``OMNI_VIDEO_INLINE_LIMIT`` → 内联 ``data:video/mp4;base64,…``；
+        超过 → 上传拿 ``upload_id`` → ``upload://<upload_id>``。
+        """
+        resolved: List[Dict[str, Any]] = []
+        for asset in assets or []:
+            if not isinstance(asset, dict):
+                resolved.append({"kind": "image", "bytes": asset})
+                continue
+            item = dict(asset)
+            if str(item.get("kind")) == "video" and not item.get("url"):
+                data = item.get("bytes") or b""
+                if not data:
+                    continue
+                if len(data) <= self.OMNI_VIDEO_INLINE_LIMIT:
+                    item["url"] = self._video_bytes_to_data_url(data)
+                else:
+                    upload_id = await self._upload_video_get_id(
+                        data,
+                        str(item.get("filename") or "video.mp4"),
+                        base_url,
+                        api_key,
+                    )
+                    if not upload_id:
+                        logger.error("视频素材过大且上传失败，已跳过该素材")
+                        continue
+                    item["url"] = f"upload://{upload_id}"
+            resolved.append(item)
+        return resolved
+
+    def _build_omni_video_payload(
+            self,
+            request_model_name: str,
+            prompt: str,
+            assets: List[Any],
+            orientation: str,
+            resolution: str = "",
+            agent_ui: str = "",
+    ) -> Dict[str, Any]:
+        """构造 flow2api 的 /v1/chat/completions 视频请求体（必须 stream）。
+
+        ``assets`` 是**有序**素材表（图与视频统一按顺序挂载，顺序即语义）：
+        ``[{"kind": "image"|"video", "bytes": bytes, "url": 可选}, ...]``；
+        兼容旧的「纯图片字节列表」写法。
+        """
+        content_items: List[Dict[str, Any]] = []
+        for asset in assets or []:
+            if not isinstance(asset, dict):
+                content_items.append({
+                    "type": "image_url",
+                    "image_url": {"url": self._image_bytes_to_data_url(asset)},
+                })
+                continue
+            if str(asset.get("kind")) == "video":
+                url = str(asset.get("url") or "")
+                if not url:
+                    data = asset.get("bytes") or b""
+                    if not data:
+                        continue
+                    url = self._video_bytes_to_data_url(data)
+                content_items.append({"type": "video_url", "video_url": {"url": url}})
+            else:
+                data = asset.get("bytes") or b""
+                if not data:
+                    continue
+                content_items.append({
+                    "type": "image_url",
+                    "image_url": {"url": self._image_bytes_to_data_url(data)},
+                })
+
+        content: Any = prompt
+        if content_items:
+            content = [{"type": "text", "text": prompt}, *content_items]
+        payload: Dict[str, Any] = {
+            "model": request_model_name,
+            "stream": True,
+            "messages": [{"role": "user", "content": content}],
+        }
+        image_config: Dict[str, Any] = {"aspectRatio": orientation}
+        if resolution:
+            image_config["imageSize"] = resolution
+        payload["generationConfig"] = {"imageConfig": image_config}
+        if agent_ui and agent_ui != self.OMNI_AGENT_UI_DEFAULT:
+            payload["agent_ui"] = agent_ui
+        return payload
+
+    async def _call_omni_video_once(
+            self,
+            *,
+            model_name: str,
+            request_model_name: str,
+            prompt: str,
+            assets: List[Dict[str, Any]],
+            request_context: Dict[str, Any],
+            orientation: str,
+            resolution: str,
+            timeout: int,
+            upscale_pattern: str,
+            agent_ui: str = "",
+            orig_video_pattern: str = "",
+            on_upscale_start: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+            on_preview_gif: Optional[Callable[[str], Awaitable[None]]] = None,
+            on_orig_video: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
+        """流式调用视频链路，返回 (结果, HTTP状态, 计时信息)。"""
+        api_mode = request_context.get("api_route") or "generic"
+        timings: Dict[str, Any] = {
+            "generate_seconds": None,
+            "upscale_seconds": None,
+            "upscale_started": False,
+            "total_seconds": None,
+        }
+
+        def make_error(
+                error_type: str,
+                message: str,
+                status: int = 0,
+                **kwargs: Any,
+        ) -> Tuple[Dict[str, Any], int, Dict[str, Any]]:
+            return (
+                self._build_api_error(
+                    error_type,
+                    message,
+                    http_status=status,
+                    api_mode=api_mode,
+                    model=model_name,
+                    endpoint=request_model_name,
+                    **kwargs,
+                ),
+                status,
+                timings,
+            )
+
+        base_url = self._get_api_base_url()
+        key_item = await self._get_api_key_item_for_request(
+            api_mode,
+            request_context=request_context,
+            model_name=model_name,
+        )
+        if not key_item or not key_item.get("key"):
+            return make_error("config_error", "无可用 API Key (请在 Key 列表中添加 Key)", 0)
+        api_key = key_item["key"]
+        custom_url = str(key_item.get("api_url") or "").strip()
+        if custom_url:
+            base_url = custom_url
+        if not base_url:
+            return make_error("config_error", "API URL 未配置", 0)
+
+        if not self.iwf:
+            return make_error("config_error", "工作流未初始化", 0)
+
+        final_url = self._resolve_generic_endpoint_url(base_url, "chat_completions")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+        request_user_agent = " ".join(
+            str(
+                self.conf.get("request_user_agent", self.DEFAULT_REQUEST_USER_AGENT) or ""
+            ).splitlines()
+        ).strip()
+        if request_user_agent:
+            headers["User-Agent"] = request_user_agent
+
+        resolved_assets = await self._resolve_video_assets(assets, base_url, api_key)
+        payload = self._build_omni_video_payload(
+            request_model_name,
+            prompt,
+            resolved_assets,
+            orientation,
+            resolution,
+            agent_ui,
+        )
+        try:
+            pattern = re.compile(upscale_pattern or self.OMNI_UPSCALE_START_PATTERN_DEFAULT)
+        except re.error as exc:
+            logger.warning(f"Omni 阶段切换正则无效({exc})，回退默认值")
+            pattern = re.compile(self.OMNI_UPSCALE_START_PATTERN_DEFAULT)
+
+        try:
+            orig_pattern = re.compile(orig_video_pattern or self.OMNI_ORIG_VIDEO_PATTERN_DEFAULT)
+        except re.error as exc:
+            logger.warning(f"Omni 原视频行正则无效({exc})，回退默认值")
+            orig_pattern = re.compile(self.OMNI_ORIG_VIDEO_PATTERN_DEFAULT)
+
+        logger.info(
+            f"提交 Omni 视频请求: model={request_model_name}, orientation={orientation}, "
+            f"resolution={resolution or '-'}, assets={len(assets)}, timeout={timeout}s"
+        )
+
+        timeout_cfg = _build_client_timeout(self.request_timeout, timeout)
+        started_at = time.monotonic()
+        http_status = 0
+        accumulated = ""   # 终态产物（delta.content / message.content）
+        progress = ""      # 过程文字（delta.reasoning_content）
+        direct_url = ""
+        upscale_fired = False
+        preview_gif = ""
+        orig_video_url = ""
+
+        try:
+            session_request_kwargs = self.iwf.get_request_kwargs()
+            async with self.iwf.create_client_session(timeout=timeout_cfg) as session:
+                async with session.post(
+                    final_url,
+                    headers=headers,
+                    json=payload,
+                    **session_request_kwargs,
+                ) as resp:
+                    http_status = resp.status
+                    if resp.status != 200:
+                        text = await resp.text()
+                        try:
+                            error_json: Any = json.loads(text) if text.strip() else {}
+                        except json.JSONDecodeError:
+                            error_json = text
+                        provider_fields = self._extract_provider_error_fields(error_json)
+                        provider_message = provider_fields.get("provider_message") or text or f"HTTP {resp.status}"
+                        return make_error(
+                            "http_error",
+                            f"API 请求失败 (HTTP {resp.status}): {provider_message}",
+                            resp.status,
+                            detail=self._safe_error_text(text, 2000),
+                            raw_response=self._safe_error_text(text, 2000),
+                            **provider_fields,
+                        )
+
+                    buffer = b""
+                    async for chunk in resp.content.iter_chunked(4096):
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            line_data, buffer = buffer.split(b"\n", 1)
+                            line_str = line_data.decode("utf-8", errors="ignore").strip()
+                            if not line_str or line_str.startswith(":"):
+                                continue
+                            if not line_str.startswith("data: "):
+                                continue
+                            json_str = line_str[6:].strip()
+                            if not json_str or json_str == "[DONE]":
+                                continue
+                            try:
+                                chunk_json = json.loads(json_str)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(chunk_json, dict):
+                                continue
+                            if chunk_json.get("error"):
+                                error_obj = chunk_json.get("error")
+                                error_status = http_status
+                                if isinstance(error_obj, dict):
+                                    try:
+                                        error_status = int(error_obj.get("status_code") or 0) or http_status
+                                    except (TypeError, ValueError):
+                                        error_status = http_status
+                                return make_error(
+                                    "api_error",
+                                    self._safe_error_text(error_obj),
+                                    error_status,
+                                    **self._extract_provider_error_fields(chunk_json),
+                                )
+                            if not direct_url and isinstance(chunk_json.get("url"), str):
+                                direct_url = chunk_json["url"].strip()
+                            progress_text = ""
+                            product_text = ""
+                            choices = chunk_json.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                delta = choices[0].get("delta") or {}
+                                message = choices[0].get("message") or {}
+                                # 契约：过程文字走 reasoning_content，终态产物才走 content
+                                progress_text = str(delta.get("reasoning_content") or "")
+                                product_text = str(
+                                    delta.get("content")
+                                    or message.get("content")
+                                    or ""
+                                )
+                            if progress_text:
+                                progress += progress_text
+                                if not preview_gif:
+                                    # 扫累计进度，避免 URL 被拆到多个 chunk 时漏掉
+                                    gif_match = re.search(
+                                        r"(https?://[^\s\"'<>]+\.gif(?:\?[^\s\"'<>]*)?)",
+                                        progress,
+                                    )
+                                    if gif_match:
+                                        preview_gif = gif_match.group(1)
+                                        timings["preview_gif"] = preview_gif
+                                        logger.info(f"发现超分预览 GIF: {preview_gif}")
+                                        if on_preview_gif:
+                                            try:
+                                                await on_preview_gif(preview_gif)
+                                            except Exception as exc:
+                                                logger.warning(f"发送超分预览 GIF 失败: {exc}")
+                                if not orig_video_url:
+                                    # 上游若把「超分前基础片」URL 流出来（建议格式：`原视频: <url>`），
+                                    # 这里立刻抓取并交给上层下载发送；拿不到就静默跳过。
+                                    orig_match = orig_pattern.search(progress)
+                                    if orig_match:
+                                        orig_video_url = orig_match.group(1).strip()
+                                        timings["orig_video_url"] = orig_video_url
+                                        logger.info(f"发现超分前原视频: {orig_video_url}")
+                                        if on_orig_video:
+                                            try:
+                                                await on_orig_video(orig_video_url)
+                                            except Exception as exc:
+                                                logger.warning(f"发送超分前原视频失败: {exc}")
+                            if product_text:
+                                accumulated += product_text
+                            if not progress_text and not product_text:
+                                continue
+                            if not upscale_fired and pattern.search(f"{progress}\n{accumulated}"):
+                                upscale_fired = True
+                                timings["upscale_started"] = True
+                                timings["generate_seconds"] = time.monotonic() - started_at
+                                if preview_gif:
+                                    timings["preview_gif"] = preview_gif
+                                if on_upscale_start:
+                                    try:
+                                        await on_upscale_start(dict(timings))
+                                    except Exception as exc:
+                                        logger.warning(f"Omni 超分阶段回调失败: {exc}")
+        except asyncio.TimeoutError:
+            return make_error("timeout", f"视频生成超时（{timeout}s 内未完成）", 0)
+        except aiohttp.ClientError as exc:
+            return make_error("network_error", f"视频请求网络错误: {exc}", 0)
+        except Exception as exc:
+            return make_error("unknown_error", f"视频请求异常: {exc}", 0)
+
+        total_seconds = time.monotonic() - started_at
+        timings["total_seconds"] = total_seconds
+        if preview_gif:
+            timings["preview_gif"] = preview_gif
+        elif resolution:
+            logger.info("本次上游未提供超分预览 GIF（flow2api 需 bridge 视频后端 + 超分档才给）")
+        if orig_video_url:
+            timings["orig_video_url"] = orig_video_url
+        elif resolution:
+            logger.info("本次上游未提供「超分前原视频」行（需上游在阶段标记处流出基础片 URL）")
+        if timings["upscale_started"] and timings["generate_seconds"] is not None:
+            timings["upscale_seconds"] = max(0.0, total_seconds - timings["generate_seconds"])
+        else:
+            timings["generate_seconds"] = total_seconds
+
+        video_url = direct_url or self._extract_video_url_from_text(accumulated)
+        if not video_url:
+            fallback = self._extract_video_url_from_text(progress)
+            if fallback and not fallback.lower().split("?")[0].endswith(".gif"):
+                video_url = fallback
+        if not video_url:
+            return make_error(
+                "empty_result",
+                "视频生成结束但未解析到视频地址。",
+                http_status,
+                detail=self._safe_error_text(accumulated or progress, 1000),
+            )
+        result_payload: Dict[str, Any] = {
+            "video_url": video_url,
+            "model": request_model_name,
+            "timings": timings,
+        }
+        if timings.get("preview_gif"):
+            result_payload["preview_gif"] = timings["preview_gif"]
+        return result_payload, http_status, timings
+
+    def _save_video_file(self, video_bytes: bytes, label: str = "") -> Path:
+        """把视频落盘到插件数据目录，供发送失败排查/重发。"""
+        video_dir = self.plugin_data_dir / "videos"
+        video_dir.mkdir(parents=True, exist_ok=True)
+        safe_label = re.sub(r"[^\w\-_]", "_", label)[:20].strip("_") if label else ""
+        label_part = f"_{safe_label}" if safe_label else ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rnd = uuid.uuid4().hex[:6]
+        video_file = video_dir / f"video_{ts}_{rnd}{label_part}.mp4"
+        try:
+            video_file.write_bytes(video_bytes)
+        except Exception as exc:
+            logger.error(f"暂存视频到磁盘异常: {exc}")
+        return video_file
+
+    async def _download_video_bytes(self, url: str) -> Optional[bytes]:
+        if not url or not self.iwf:
+            return None
+        timeout_cfg = _build_client_timeout(self.request_timeout, self.download_timeout)
+        try:
+            session_request_kwargs = self.iwf.get_request_kwargs()
+            async with self.iwf.create_client_session(timeout=timeout_cfg) as session:
+                async with session.get(url, **session_request_kwargs) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"下载视频失败，状态码: {resp.status}")
+                        return None
+                    data = await resp.read()
+                    return data or None
+        except Exception as exc:
+            logger.warning(f"下载视频异常: {exc}")
+            return None
+
+    async def _send_preview_gif(
+            self,
+            event: AstrMessageEvent,
+            gif_url: str,
+            text: str,
+    ) -> bool:
+        """把超分预览 GIF 当图片发出去；失败则下载后发字节，再失败回落到发链接。"""
+        if not gif_url:
+            return False
+        try:
+            await event.send(
+                self._reply_chain_result(event, [Image.fromURL(gif_url), Plain(text)])
+            )
+            return True
+        except Exception as exc:
+            logger.warning(f"超分预览 GIF 直链发送失败 ({exc})，尝试下载后发送...")
+
+        gif_bytes = await self._download_video_bytes(gif_url)
+        if gif_bytes:
+            try:
+                await event.send(
+                    self._reply_chain_result(event, [Image.fromBytes(gif_bytes), Plain(text)])
+                )
+                return True
+            except Exception as exc:
+                logger.warning(f"超分预览 GIF 字节发送失败: {exc}")
+
+        try:
+            await event.send(self._reply_plain_result(event, f"{text}\n🔍 预览: {gif_url}"))
+            return True
+        except Exception as exc:
+            logger.error(f"超分预览 GIF 兜底发送失败: {exc}")
+            return False
+
+    async def _send_video_with_retry(
+            self,
+            event: AstrMessageEvent,
+            video_url: str,
+            text: str,
+            label: str = "",
+    ) -> Tuple[bool, Optional[Path]]:
+        """发送视频。
+
+        注意：QQ(aiocqhttp) 等平台要求 **video 段必须是消息里唯一的段**
+        （否则 retcode=1400 `message element "video" must be the only segment`），
+        因此视频单独成一条消息，文案另发一条。
+        """
+        if Video is None:
+            try:
+                await event.send(self._reply_plain_result(event, f"{text}\n🎬 视频链接: {video_url}"))
+                return True, None
+            except Exception as exc:
+                logger.error(f"发送视频链接失败: {exc}")
+                return False, None
+
+        # 文案先单独发一条，保证即使视频发送失败用户也能看到结果说明
+        await self._send_text_quietly(event, text)
+
+        # 1) 直链发送：视频单独成一条，且**不带引用回复段**
+        try:
+            await event.send(self._video_only_result(event, Video.fromURL(video_url)))
+            return True, None
+        except Exception as exc:
+            logger.warning(f"视频直链发送失败 ({exc})，尝试下载后发送本地文件...")
+
+        # 2) 下载落盘后再发本地文件，同样单独成一条
+        saved_file: Optional[Path] = None
+        video_bytes = await self._download_video_bytes(video_url)
+        if video_bytes:
+            saved_file = self._save_video_file(video_bytes, label=label)
+            try:
+                await event.send(
+                    self._video_only_result(event, Video.fromFileSystem(str(saved_file)))
+                )
+                return True, saved_file
+            except Exception as exc:
+                logger.warning(f"本地视频文件发送失败: {exc}")
+
+        # 3) 兜底：发链接
+        try:
+            await event.send(self._reply_plain_result(event, f"🎬 视频链接: {video_url}"))
+            return True, saved_file
+        except Exception as exc:
+            logger.error(f"视频兜底发送失败: {exc}")
+            return False, saved_file
+
+    async def _send_text_quietly(self, event: AstrMessageEvent, text: str) -> None:
+        if not text:
+            return
+        try:
+            await event.send(self._reply_plain_result(event, text))
+        except Exception as exc:
+            logger.warning(f"发送文案失败: {exc}")
+
+    async def _run_omni_video(
+            self,
+            *,
+            event: AstrMessageEvent,
+            user_prompt: str,
+            assets: List[Dict[str, Any]],
+            display_label: str,
+            model_in_use: str,
+            candidate_contexts: List[Dict[str, Any]],
+            sender_id: str,
+            group_id: Optional[str],
+    ):
+        """Omni 视频分支：访问校验 → 生成 → 超分阶段提示 → 发送视频 → 结算。"""
+        source_model = model_in_use
+        primary = candidate_contexts[0]
+        parameters = primary.get("parameters") or {}
+
+        raw_max_images = parameters.get("omni_max_reference_images")
+        omni_max_images = (
+            self.OMNI_MAX_REFERENCE_IMAGES_DEFAULT
+            if raw_max_images is None
+            else max(0, _normalize_nonnegative_int(raw_max_images))
+        )
+        max_videos = self.iwf.max_videos if self.iwf else 2
+        # 有序素材：图与视频统一按顺序挂载（顺序即语义）；按类型分别限流，保持相对顺序
+        video_images: List[bytes] = []
+        assets_used: List[Dict[str, Any]] = []
+        n_img = 0
+        n_vid = 0
+        for asset in list(assets or []):
+            if str(asset.get("kind")) == "video":
+                if n_vid >= max_videos:
+                    continue
+                n_vid += 1
+            else:
+                if n_img >= omni_max_images:
+                    continue
+                n_img += 1
+                video_images.append(asset.get("bytes") or b"")
+            assets_used.append(asset)
+
+        duration = str(parameters.get("omni_video_duration") or self.OMNI_DURATION_DEFAULT)
+        upscale = bool(parameters.get("omni_super_resolution"))
+        resolution = (
+            str(parameters.get("omni_super_resolution_target") or self.OMNI_RESOLUTION_DEFAULT)
+            if upscale else ""
+        )
+        orientation = self._resolve_omni_orientation(parameters, video_images)
+
+        unit_cost = self._get_omni_charge_amount(parameters, duration, upscale)
+        allowed, deduction_source, deny_message = self._resolve_generation_access(
+            event, sender_id, group_id, unit_cost
+        )
+        if not allowed:
+            if deny_message:
+                yield self._reply_plain_result(event, deny_message)
+            return
+
+        orientation_cn = self.OMNI_ORIENTATION_DISPLAY.get(orientation, orientation)
+        if n_img and n_vid:
+            action_type = "参考图+参考视频"
+        elif n_vid:
+            action_type = "参考视频"
+        elif n_img:
+            action_type = "参考图视频"
+        else:
+            action_type = "文生视频"
+        info_lines = [
+            f"🎬 收到{action_type}请求，正在生成 [{display_label}]...",
+            f"时长: {duration}s | 方向: {orientation_cn} | 参考图: {n_img} 张 | 参考视频: {n_vid} 个",
+        ]
+        if upscale:
+            info_lines.append(f"超分辨率: 开启（目标 {resolution}）")
+        else:
+            info_lines.append("超分辨率: 关闭")
+        info_lines.append(
+            f"本次消耗: {self._get_generation_cost_text(deduction_source, True, unit_cost)}"
+        )
+        yield self._reply_plain_result(event, "\n".join(info_lines))
+
+        upscale_pattern = str(parameters.get("omni_upscale_start_pattern") or "").strip() \
+            or self.OMNI_UPSCALE_START_PATTERN_DEFAULT
+        upscale_message_template = str(parameters.get("omni_upscale_start_message") or "").strip() \
+            or self.OMNI_UPSCALE_START_MESSAGE_DEFAULT
+        result_caption_template = str(parameters.get("omni_result_caption") or "").strip() \
+            or self.OMNI_RESULT_CAPTION_DEFAULT
+        send_preview_gif = bool(parameters.get("omni_send_preview_gif", False))
+        preview_gif_caption_template = str(parameters.get("omni_preview_gif_caption") or "").strip() \
+            or self.OMNI_PREVIEW_GIF_CAPTION_DEFAULT
+        send_orig_video = bool(parameters.get("omni_send_orig_video", True))
+        orig_video_pattern = str(parameters.get("omni_orig_video_pattern") or "").strip() \
+            or self.OMNI_ORIG_VIDEO_PATTERN_DEFAULT
+        orig_video_caption_template = str(parameters.get("omni_orig_video_caption") or "").strip() \
+            or self.OMNI_ORIG_VIDEO_CAPTION_DEFAULT
+        show_timing = bool(parameters.get("omni_show_timing", True))
+        timeout = _normalize_nonnegative_int(
+            parameters.get("omni_timeout", self.OMNI_TIMEOUT_DEFAULT)
+        ) or self.OMNI_TIMEOUT_DEFAULT
+
+        last_error: Dict[str, Any] = {}
+        last_status = 0
+        last_model = primary.get("actual_model") or source_model
+        last_context = primary
+
+        for index, context in enumerate(candidate_contexts):
+            candidate_parameters = context.get("parameters") or parameters
+            if not self._is_video_parameters(candidate_parameters):
+                continue
+            actual_model = context.get("actual_model") or source_model
+            cand_duration = str(
+                candidate_parameters.get("omni_video_duration") or self.OMNI_DURATION_DEFAULT
+            )
+            cand_upscale = bool(candidate_parameters.get("omni_super_resolution"))
+            cand_resolution = (
+                str(candidate_parameters.get("omni_super_resolution_target") or self.OMNI_RESOLUTION_DEFAULT)
+                if cand_upscale else ""
+            )
+            cand_orientation = self._resolve_omni_orientation(candidate_parameters, video_images)
+            cand_agent_ui = str(
+                candidate_parameters.get("omni_agent_ui") or self.OMNI_AGENT_UI_DEFAULT
+            )
+            request_model_name = self._render_omni_model_name(
+                candidate_parameters, cand_orientation, cand_resolution
+            )
+            final_prompt = self._build_final_prompt(user_prompt, actual_model, n_img + n_vid)
+
+            async def _on_upscale_start(
+                    timings: Dict[str, Any],
+                    _params: Dict[str, Any] = candidate_parameters,
+                    _orientation: str = cand_orientation,
+                    _duration: str = cand_duration,
+                    _resolution: str = cand_resolution,
+            ) -> None:
+                text = self._render_omni_message(
+                    upscale_message_template,
+                    parameters=_params,
+                    orientation=_orientation,
+                    duration=_duration,
+                    resolution=_resolution,
+                    generate_seconds=timings.get("generate_seconds"),
+                    upscale_seconds=timings.get("upscale_seconds"),
+                    cost_text=self._get_generation_cost_text(deduction_source, True, unit_cost),
+                    preview_gif=str(timings.get("preview_gif") or ""),
+                )
+                try:
+                    await event.send(self._reply_plain_result(event, text))
+                except Exception as exc:
+                    logger.warning(f"发送超分阶段提示失败: {exc}")
+
+            async def _on_preview_gif(
+                    gif_url: str,
+                    _params: Dict[str, Any] = candidate_parameters,
+                    _orientation: str = cand_orientation,
+                    _duration: str = cand_duration,
+                    _resolution: str = cand_resolution,
+            ) -> None:
+                if not send_preview_gif or not gif_url:
+                    return
+                caption = self._render_omni_message(
+                    preview_gif_caption_template,
+                    parameters=_params,
+                    orientation=_orientation,
+                    duration=_duration,
+                    resolution=_resolution,
+                    cost_text=self._get_generation_cost_text(deduction_source, True, unit_cost),
+                )
+                logger.info(f"发送超分预览 GIF: {gif_url}")
+                await self._send_preview_gif(event, gif_url, caption)
+
+            async def _on_orig_video(
+                    orig_url: str,
+                    _params: Dict[str, Any] = candidate_parameters,
+                    _orientation: str = cand_orientation,
+                    _duration: str = cand_duration,
+                    _resolution: str = cand_resolution,
+            ) -> None:
+                if not send_orig_video or not orig_url:
+                    return
+                caption = self._render_omni_message(
+                    orig_video_caption_template,
+                    parameters=_params,
+                    orientation=_orientation,
+                    duration=_duration,
+                    resolution=_resolution,
+                    cost_text=self._get_generation_cost_text(deduction_source, True, unit_cost),
+                )
+                logger.info(f"发送超分前原视频: {orig_url}")
+                await self._send_video_with_retry(event, orig_url, caption, label=f"{display_label}-orig")
+
+            logger.info(
+                f"Omni 视频请求: source={source_model}, actual={actual_model}, "
+                f"model={request_model_name}, duration={cand_duration}s, "
+                f"orientation={cand_orientation}, upscale={cand_resolution or 'off'}, "
+                f"agent_ui={cand_agent_ui}, assets={n_img}图+{n_vid}视频"
+            )
+            result, http_status, timings = await self._call_omni_video_once(
+                model_name=actual_model,
+                request_model_name=request_model_name,
+                prompt=final_prompt,
+                assets=assets_used,
+                request_context=context,
+                orientation=cand_orientation,
+                resolution=cand_resolution,
+                timeout=timeout,
+                upscale_pattern=upscale_pattern,
+                agent_ui=cand_agent_ui,
+                orig_video_pattern=orig_video_pattern,
+                on_upscale_start=_on_upscale_start,
+                on_preview_gif=_on_preview_gif,
+                on_orig_video=_on_orig_video,
+            )
+            last_error = result if isinstance(result, dict) else {}
+            last_status = http_status
+            last_model = actual_model
+            last_context = context
+
+            # ★ 结果日志：失败时把上游错误落到插件日志（此前失败无痕，难排查）
+            _err_msg = ""
+            if isinstance(result, dict):
+                _err_msg = str(
+                    result.get("message")
+                    or result.get("error")
+                    or (result.get("error") or {}).get("message")
+                    or ""
+                )
+            logger.info(
+                f"Omni 视频返回: status={http_status}, "
+                f"error_type={last_error.get('error_type', '')}, "
+                f"video_url={'有' if (isinstance(result, dict) and result.get('video_url')) else '无'}"
+                + (f", 错误信息={_err_msg[:240]}" if _err_msg else "")
+            )
+
+            if isinstance(result, dict) and result.get("video_url"):
+                video_url = str(result["video_url"])
+                caption = self._render_omni_message(
+                    result_caption_template,
+                    parameters=candidate_parameters,
+                    orientation=cand_orientation,
+                    duration=cand_duration,
+                    resolution=cand_resolution,
+                    generate_seconds=timings.get("generate_seconds"),
+                    upscale_seconds=timings.get("upscale_seconds"),
+                    cost_text=self._get_generation_cost_text(deduction_source, True, unit_cost),
+                )
+                if not show_timing:
+                    caption = re.sub(
+                        r"(生成耗时|超分耗时)\s*[:：]?\s*[^\s|]+\s*\|?\s*",
+                        "",
+                        caption,
+                    ).strip(" |")
+                sent, _saved = await self._send_video_with_retry(
+                    event, video_url, caption, label=display_label
+                )
+                await self._settle_usage_generation(
+                    event=event,
+                    source="chat",
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    logical_model=source_model,
+                    actual_model=actual_model,
+                    has_images=bool(assets_used),
+                    outcome="success" if sent else "failed",
+                    http_status=http_status,
+                    output_count=1 if sent else 0,
+                    charged_amount=unit_cost if sent else 0,
+                    deduction_source=deduction_source,
+                    note=(
+                        f"视频 时长={cand_duration}s 方向={cand_orientation} "
+                        f"超分={cand_resolution or 'off'} "
+                        f"生成耗时={self._format_elapsed_seconds(timings.get('generate_seconds'))} "
+                        f"超分耗时={self._format_elapsed_seconds(timings.get('upscale_seconds'))}"
+                    ),
+                    request_context=context,
+                )
+                return
+
+            if index + 1 < len(candidate_contexts):
+                logger.warning(
+                    f"Omni 视频生成失败，切换热备模型: source={source_model}, "
+                    f"failed={actual_model}, status={http_status}, "
+                    f"error_type={last_error.get('error_type', 'unknown')}"
+                )
+                await self._settle_usage_generation(
+                    event=event,
+                    source="chat",
+                    sender_id=sender_id,
+                    group_id=group_id,
+                    logical_model=source_model,
+                    actual_model=actual_model,
+                    has_images=bool(assets_used),
+                    outcome="failed",
+                    http_status=http_status,
+                    output_count=0,
+                    charged_amount=0,
+                    deduction_source=None,
+                    note="视频热备切换前的中间失败",
+                    request_context=context,
+                )
+            if self._should_stop_model_failover(http_status, result):
+                break
+
+        message = str(last_error.get("message") or "视频生成失败")
+        detail = str(last_error.get("detail") or "").strip()
+        text = f"❌ {message}"
+        if detail and self.conf.get("send_full_error", False):
+            text += f"\n{detail}"
+        yield self._reply_plain_result(event, text)
+        if last_error:
+            await self._settle_usage_generation(
+                event=event,
+                source="chat",
+                sender_id=sender_id,
+                group_id=group_id,
+                logical_model=source_model,
+                actual_model=last_model,
+                has_images=bool(assets_used),
+                outcome="failed",
+                http_status=last_status,
+                output_count=0,
+                charged_amount=0,
+                deduction_source=None,
+                note="视频生成失败",
+                request_context=last_context,
+            )
 
     async def _call_api(
             self,
@@ -7372,6 +9207,7 @@ class FigurineProPlugin(Star):
         user_prompt = ""
         is_bnn = False
         bnn_preset_name = ""
+        preset_aspect_ratio = ""
 
         base_cmd = cmd
         append_text = ""
@@ -7398,7 +9234,7 @@ class FigurineProPlugin(Star):
         if base_cmd in extra_prefixes:
             matched_extra_prefix = base_cmd
             remaining_tokens = tokens[consumed_tokens:]
-            user_prompt, bnn_preset_name = self._resolve_bnn_prompt(
+            user_prompt, bnn_preset_name, preset_aspect_ratio = self._resolve_bnn_prompt(
                 " ".join(remaining_tokens),
                 allow_append,
                 separator,
@@ -7412,9 +9248,14 @@ class FigurineProPlugin(Star):
 
         elif base_cmd in self.prompt_map:
             user_prompt = self.prompt_map[base_cmd]
+            preset_aspect_ratio = self.preset_ratio_map.get(base_cmd, "")
             if append_text:
                 user_prompt = user_prompt + append_text
                 logger.info(f"将追加内容'{append_text}'添加到预设 prompt 后面")
+
+        # 命令手写比例优先；未手写时用命中预设的比例兜底（必须在扣费/生成之前）
+        if not requested_aspect_ratio and preset_aspect_ratio:
+            requested_aspect_ratio = preset_aspect_ratio
 
         if not user_prompt:
             if not is_bnn:
@@ -7431,10 +9272,24 @@ class FigurineProPlugin(Star):
         # --- 图片获取 (融合逻辑) ---
         images_to_process = []
         is_text_to_image = False
+        videos_to_process: List[Dict[str, Any]] = []
+        assets_ordered: List[Dict[str, Any]] = []
 
         if self.iwf:
-            # [修改] ImageWorkflow.get_images 现在不会自动获取头像
-            img_bytes_list = await self.iwf.get_images(event)
+            # 一趟走完、**按 content 顺序**统一收集「图 + 视频」（跨类型保序）
+            try:
+                assets_ordered = await self.iwf.get_assets_ordered(event)
+            except Exception as exc:
+                logger.warning(f"有序素材收集失败(忽略): {exc}")
+                assets_ordered = []
+            img_bytes_list = [a["bytes"] for a in assets_ordered if a.get("kind") != "video"]
+            videos_to_process = [a for a in assets_ordered if a.get("kind") == "video"]
+            self.iwf.last_videos = videos_to_process
+            if videos_to_process:
+                logger.info(
+                    f"检测到视频素材 {len(videos_to_process)} 个"
+                    f"（来源: {'引用链' if videos_to_process[0].get('source') == 'reply' else '当前消息'}）"
+                )
 
             if not img_bytes_list:
                 # [修改] 智能判断 BNN 模式
@@ -7446,6 +9301,10 @@ class FigurineProPlugin(Star):
                     is_text_to_image = True
                     images_to_process = []
                     logger.info("BNN模式下未检测到图片，自动切换为纯文生图模式")
+                elif videos_to_process:
+                    # 只有视频没有图：交给视频链路（omni / r2v），不要回退头像或直接报错
+                    is_text_to_image = False
+                    logger.info("未检测到图片但存在视频素材，交由视频链路处理")
                 else:
                     # 手办化等预设模式 + 无图 = 尝试取发送者头像 (兼容旧习惯)
                     logger.info(f"预设模式下未检测到图片，尝试获取发送者 [{sender_id}] 的头像...")
@@ -7513,6 +9372,27 @@ class FigurineProPlugin(Star):
             self._get_request_context(model_in_use, candidate_model, bool(images_to_process))
             for candidate_model in candidate_models
         ]
+
+        # 最终生效模型为 Omni 视频模式时，走独立视频链路（入口与图片共用）
+        if self._is_video_parameters(candidate_contexts[0].get("parameters")):
+            if batch_count > 1:
+                yield self._reply_plain_result(
+                    event, "⚠️ 视频生成不支持倍率批量，本次按 1 次执行。"
+                )
+            async for video_item in self._run_omni_video(
+                event=event,
+                user_prompt=user_prompt,
+                assets=assets_ordered,
+                display_label=display_label,
+                model_in_use=model_in_use,
+                candidate_contexts=candidate_contexts,
+                sender_id=sender_id,
+                group_id=group_id,
+            ):
+                yield video_item
+            event.stop_event()
+            return
+
         initial_request_context = candidate_contexts[0]
         initial_request_context["image_bytes_list"] = self._limit_reference_images(
             initial_actual_model,

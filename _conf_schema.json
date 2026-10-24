@@ -444,6 +444,189 @@
                         ],
                         "default": "standard",
                         "hint": "仅 Seedream参数设置开启时发送 optimize_prompt_options.mode。standard 为标准优化；fast 生成更快但可能影响效果；支持情况由实际接入的上游模型决定，插件不再按模型名过滤。"
+                    },
+                    "enable_omni_parameters": {
+                        "label": "Omni参数设置",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "旧配置兼容字段。Web 配置页会按「参数模式=Omni 视频」自动规范化为开启。该模式走 flow2api 的 /v1/chat/completions 视频链路（必须流式）：按模板拼装实际模型名 omni-1.1-flash-{时长}s-{横竖}[-{4k|1080p}]，支持文生视频与 1~3 张参考图视频；入口沿用现有命令，由最终生效模型的参数模式决定走图片还是视频。"
+                    },
+                    "omni_model_template": {
+                        "label": "Omni实际模型名模板",
+                        "type": "string",
+                        "default": "omni-1.1-flash-{duration}s-{orientation}",
+                        "hint": "实际请求模型名模板，支持 {duration}（时长秒）、{orientation}（portrait/landscape）、{resolution}（1080p/4k）、{model}（该条目配置的「实际请求模型名」）。模板中未使用 {resolution} 时，超分开启会自动追加 -{resolution}。默认 omni-1.1-flash-{duration}s-{orientation}。"
+                    },
+                    "omni_video_duration": {
+                        "label": "Omni视频时长(秒)",
+                        "type": "string",
+                        "options": [
+                            "4",
+                            "6",
+                            "8",
+                            "10"
+                        ],
+                        "default": "8",
+                        "hint": "视频时长，默认 8 秒。时长会写进模型名（如 omni-1.1-flash-8s-portrait），无需额外参数。"
+                    },
+                    "omni_aspect_mode": {
+                        "label": "Omni画面方向",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "portrait",
+                            "landscape"
+                        ],
+                        "default": "auto",
+                        "hint": "auto=按第一张参考图的宽高自动识别横竖；portrait=强制竖屏；landscape=强制横屏。无参考图或识别失败时使用「Omni默认方向」。"
+                    },
+                    "omni_default_aspect": {
+                        "label": "Omni默认方向",
+                        "type": "string",
+                        "options": [
+                            "portrait",
+                            "landscape"
+                        ],
+                        "default": "portrait",
+                        "hint": "无法从第一张参考图识别横竖（无图、读图失败或正方形）时使用的方向，默认竖屏。"
+                    },
+                    "omni_super_resolution": {
+                        "label": "Omni超分辨率",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "开启后在模型名后追加 -1080p / -4k。上游为「先生成、再放大」两步，放大由 Veo 3.1 upsampler 完成，耗时较长且会消耗上游点数；放大失败时上游会返回原始视频并给出提示。"
+                    },
+                    "omni_super_resolution_target": {
+                        "label": "Omni超分目标分辨率",
+                        "type": "string",
+                        "options": [
+                            "1080p",
+                            "4k"
+                        ],
+                        "default": "1080p",
+                        "hint": "仅「Omni超分辨率」开启时生效。"
+                    },
+                    "omni_agent_ui": {
+                        "label": "Omni智能体开关",
+                        "type": "string",
+                        "options": [
+                            "default",
+                            "on",
+                            "off",
+                            "keep"
+                        ],
+                        "default": "default",
+                        "hint": "对应 flow2api 的顶层 agent_ui 参数（on/off/keep，也认 开/关/保持），仅视频、且仅部分后端生效。default=不传该参数，由上游决定。"
+                    },
+                    "omni_upscale_start_message": {
+                        "label": "Omni超分开始提示",
+                        "type": "string",
+                        "default": "🎬 视频已生成（生成耗时 {generate_time}），开始 {resolution} 超分辨率处理，请稍候…",
+                        "hint": "视频生成完成、上游开始放大时发送的自定义提示。可用变量：{generate_time}、{upscale_time}、{resolution}、{duration}、{orientation}、{orientation_cn}、{model}、{cost}。"
+                    },
+                    "omni_upscale_start_pattern": {
+                        "label": "Omni阶段切换识别正则",
+                        "type": "string",
+                        "default": "视频生成完成.*?放大",
+                        "hint": "在流式响应里识别「生成完成 → 开始超分」切换点的正则，默认匹配 flow2api 的「视频生成完成，开始 4K 放大处理...」。上游文案变化时可在此调整。"
+                    },
+                    "omni_result_caption": {
+                        "label": "Omni完成文案",
+                        "type": "string",
+                        "default": "✅ 视频生成完成 | 生成耗时 {generate_time} | 超分耗时 {upscale_time}",
+                        "hint": "随视频一起发送的文案，可用变量同「Omni超分开始提示」；未触发超分时 {upscale_time} 显示为 -。"
+                    },
+                    "omni_show_timing": {
+                        "label": "Omni显示两段耗时",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "关闭后会从完成文案中移除「生成耗时/超分耗时」片段。"
+                    },
+                    "omni_send_preview_gif": {
+                        "label": "Omni发送超分预览GIF",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "默认关闭。上游 2026-10-08 已下架 GIF 下载变体（-gif 回落为 720p 原画质），一般无需开启；若上游确实流出了「预览 GIF: <url>」，开启后插件会把它当图片发出来（失败回落发链接）。"
+                    },
+                    "omni_preview_gif_caption": {
+                        "label": "Omni预览GIF文案",
+                        "type": "string",
+                        "default": "🔍 超分前预览 · {resolution}，超分完成后发送视频",
+                        "hint": "随预览 GIF 一起发送的文案，可用变量同「Omni超分开始提示」。"
+                    },
+                    "omni_send_orig_video": {
+                        "label": "Omni发送超分前原视频",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "开启后，若上游在流里给出「原视频: <url>」（超分前的基础片），插件会立刻下载并把它当视频发出来，作为超分等待期间的中间预览。上游未提供该行时静默跳过，不影响最终超分视频。"
+                    },
+                    "omni_orig_video_pattern": {
+                        "label": "Omni原视频行识别正则",
+                        "type": "string",
+                        "default": "原视频[:：]\\s*(https?://\\S+)",
+                        "hint": "在流式进度里识别「超分前原视频 URL」的正则，第 1 个捕获组须为 URL。上游文案变化时可在此调整。"
+                    },
+                    "omni_orig_video_caption": {
+                        "label": "Omni原视频文案",
+                        "type": "string",
+                        "default": "🎬 超分前原片 · {resolution} 超分处理中，完成后发送超分版",
+                        "hint": "随超分前原视频一起发送的文案，可用变量同「Omni超分开始提示」。"
+                    },
+                    "omni_timeout": {
+                        "label": "Omni生成超时(秒)",
+                        "type": "int",
+                        "default": 2400,
+                        "min": 30,
+                        "max": 3600,
+                        "hint": "单次视频请求的读超时（秒），默认 2400（40 分钟）。上游视频生成几分钟到几十分钟，带超分时额外可能 ~30 分钟，官方建议客户端超时 ≥1800s；如遇超时请调大。"
+                    },
+                    "omni_max_reference_images": {
+                        "label": "Omni参考图上限",
+                        "type": "int",
+                        "default": 3,
+                        "min": 0,
+                        "max": 10,
+                        "hint": "Omni 上游最多接受 3 张参考图，超出部分会被截断。"
+                    },
+                    "omni_charge_amount_4s": {
+                        "label": "Omni 4s单次扣费(元，0=继承)",
+                        "type": "float",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000,
+                        "hint": "4 秒视频单次扣费；填 0 时继承该模型的「该模型单次生成扣费」。"
+                    },
+                    "omni_charge_amount_6s": {
+                        "label": "Omni 6s单次扣费(元，0=继承)",
+                        "type": "float",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000,
+                        "hint": "6 秒视频单次扣费；填 0 时继承该模型的「该模型单次生成扣费」。"
+                    },
+                    "omni_charge_amount_8s": {
+                        "label": "Omni 8s单次扣费(元，0=继承)",
+                        "type": "float",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000,
+                        "hint": "8 秒视频单次扣费（默认时长档）；填 0 时继承该模型的「该模型单次生成扣费」。"
+                    },
+                    "omni_charge_amount_10s": {
+                        "label": "Omni 10s单次扣费(元，0=继承)",
+                        "type": "float",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000,
+                        "hint": "10 秒视频单次扣费；填 0 时继承该模型的「该模型单次生成扣费」。"
+                    },
+                    "omni_upscale_extra_charge": {
+                        "label": "Omni超分加收(元)",
+                        "type": "float",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000,
+                        "hint": "开启超分辨率时在该时长档费用上额外加收的金额。"
                     }
                 }
             }
@@ -1188,6 +1371,12 @@
                         "type": "string",
                         "default": "",
                         "invisible": true
+                    },
+                    "aspect_ratio": {
+                        "label": "比例",
+                        "type": "string",
+                        "default": "",
+                        "hint": "生成图片的宽高比，形如 1:1（半角/全角冒号都支持，保存时统一为半角 :）。留空表示不传递比例。命令中手写 =宽:高（如 #bnn=16:9）优先于预设比例。"
                     }
                 }
             }

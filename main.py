@@ -7766,6 +7766,25 @@ class FigurineProPlugin(Star):
 
         return msg
 
+    def _get_seedream_layer_unit_price(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """图层拆分「单张图」价格（厘）：取该模型条目的基础扣费 charge_amount。"""
+        parameters = self._parameters_for_request(model_name, parameters) or {}
+        unit = _normalize_nonnegative_int(parameters.get("charge_amount", 0))
+        return unit if unit > 0 else yuan_to_amount(1.0)
+
+    def _get_seedream_layer_cost(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+            image_count: int = 1,
+    ) -> int:
+        """图层拆分按返回图片数量计费：张数 × 单张价格（至少按 1 张计）。"""
+        return self._get_seedream_layer_unit_price(model_name, parameters) * max(1, int(image_count or 1))
+
     def _get_required_invocation_cost(
             self,
             model_name: str = "",
@@ -7776,6 +7795,9 @@ class FigurineProPlugin(Star):
             parameters: Optional[Dict[str, Any]] = None,
     ) -> int:
         parameters = self._parameters_for_request(model_name, parameters)
+        if self._get_seedream_layer_parameters(model_name, parameters):
+            # 图层拆分按「张数 × 单张价格」计费，调用前只按 1 张做余额校验
+            return self._get_seedream_layer_cost(model_name, parameters, 1)
         if self._is_video_parameters(parameters):
             return self._get_omni_charge_amount(
                 parameters,
@@ -7808,6 +7830,9 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
     ) -> int:
         """违规失败按实际调用模型的扣费档位结算（含超限参考图阶梯额外加费）。"""
+        parameters = self._parameters_for_request(model_name, parameters)
+        if self._get_seedream_layer_parameters(model_name, parameters):
+            return self._get_seedream_layer_cost(model_name, parameters, 1)
         tier = self._get_resolution_charge_tier(
             model_name,
             resolution,
@@ -10652,17 +10677,23 @@ class FigurineProPlugin(Star):
                 actual_model,
                 parameters,
             )
-            deduction_amount = (
-                invocation_cost
-                if isinstance(res, bytes)
-                else self._get_violation_deduction_cost(
+            if isinstance(res, LayerImageBundle):
+                # 图层拆分按返回图片数量计费：张数 × 单张价格
+                deduction_amount = self._get_seedream_layer_cost(
+                    actual_model,
+                    parameters,
+                    len(res.images),
+                )
+            elif isinstance(res, bytes):
+                deduction_amount = invocation_cost
+            else:
+                deduction_amount = self._get_violation_deduction_cost(
                     actual_model,
                     requested_resolution,
                     candidate_images,
                     parameters,
                     aspect_ratio=requested_aspect_ratio,
                 )
-            )
             should_send_content_policy_warning = self._should_send_content_policy_warning(
                 http_status,
                 res,
@@ -10678,7 +10709,7 @@ class FigurineProPlugin(Star):
                 has_images=bool(candidate_images),
                 outcome=outcome,
                 http_status=http_status,
-                output_count=1 if isinstance(res, bytes) else 0,
+                output_count=len(res.images) if isinstance(res, LayerImageBundle) else (1 if isinstance(res, bytes) else 0),
                 charged_amount=deduction_amount if should_deduct else 0,
                 deduction_source=deduction_source if should_deduct else None,
                 request_context=request_context,
@@ -10722,11 +10753,13 @@ class FigurineProPlugin(Star):
                 cost_value = self._get_generation_cost_value(deduction_source, should_deduct, deduction_amount)
 
                 # 替换占位符
-                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_value).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency))
+                message_text = custom_success_template.replace("{model}", actual_model).replace("{label}", display_label).replace("{image_count}", str(len(images_to_process))).replace("{elapsed}", f"{elapsed:.2f}").replace("{remaining}", remaining_text).replace("{group_balance}", group_balance_text).replace("{cost}", cost_value).replace("{prompt}", user_prompt[:50]).replace("{batch_count}", str(batch_count)).replace("{batch_index}", str(index)).replace("{max_batch_concurrency}", str(max_batch_concurrency)).replace("{layer_count}", str(len(res.images) if isinstance(res, LayerImageBundle) else 0))
             else:
                 # 使用默认消息格式
                 status_text = "生成成功"
                 caption_parts = [f"✅ {status_text} ({elapsed:.2f}s)", f"预设: {display_label}"]
+                if isinstance(res, LayerImageBundle):
+                    caption_parts.append(f"图层: {len(res.images)} 张")
                 if batch_count > 1:
                     caption_parts.append(f"批次: {index}/{batch_count}")
 
@@ -11008,14 +11041,19 @@ class FigurineProPlugin(Star):
             actual_model,
             parameters,
         )
-        deduction_amount = (
-            invocation_cost
-            if isinstance(res, bytes)
-            else self._get_violation_deduction_cost(
+        if isinstance(res, LayerImageBundle):
+            deduction_amount = self._get_seedream_layer_cost(
+                actual_model,
+                parameters,
+                len(res.images),
+            )
+        elif isinstance(res, bytes):
+            deduction_amount = invocation_cost
+        else:
+            deduction_amount = self._get_violation_deduction_cost(
                 actual_model,
                 parameters=parameters,
             )
-        )
         should_send_content_policy_warning = self._should_send_content_policy_warning(
             http_status,
             res,

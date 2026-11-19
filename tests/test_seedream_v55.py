@@ -540,3 +540,55 @@ class SeedreamExactRatioTests(unittest.TestCase):
         self.assertAlmostEqual(ratio, 16 / 9, places=4)
         self.assertIn("命令比例 16:9", source)
 
+
+
+class SeedreamLayerPerImageBillingTests(unittest.TestCase):
+    """图层拆分按「返回张数 × 单张价格」计费。"""
+
+    def setUp(self):
+        _install_import_stubs()
+
+    def make_plugin(self, entry):
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({"model_parameter_list": [entry]})
+        plugin.prompt_map = {}
+        return plugin
+
+    def test_layer_cost_scales_with_image_count(self):
+        plugin = self.make_plugin({
+            "model": "seedream-v5.5-layer",
+            "parameter_mode": "seedream_layer",
+            "charge_amount": 0.175,
+        })
+        params = plugin._get_model_parameter_map()["seedream-v5.5-layer"]
+        self.assertEqual(plugin._get_seedream_layer_unit_price("seedream-v5.5-layer", params), 175)
+        self.assertEqual(plugin._get_seedream_layer_cost("seedream-v5.5-layer", params, 1), 175)
+        self.assertEqual(plugin._get_seedream_layer_cost("seedream-v5.5-layer", params, 9), 1575)
+        self.assertEqual(plugin._get_seedream_layer_cost("seedream-v5.5-layer", params, 0), 175)
+
+    def test_required_cost_uses_single_image(self):
+        plugin = self.make_plugin({
+            "model": "seedream-v5.5-layer",
+            "parameter_mode": "seedream_layer",
+            "charge_amount": 0.175,
+            "seedream_layer_max_images": 30,
+        })
+        params = plugin._get_model_parameter_map()["seedream-v5.5-layer"]
+        self.assertEqual(plugin._get_required_invocation_cost("seedream-v5.5-layer", parameters=params), 175)
+        self.assertEqual(plugin._get_violation_deduction_cost("seedream-v5.5-layer", parameters=params), 175)
+
+    def test_generation_model_still_flat(self):
+        plugin = self.make_plugin({
+            "model": "seedream-v5.5",
+            "parameter_mode": "seedream",
+            "charge_amount": 0.26,
+            "charge_amount_2k": 0.26,
+            "charge_amount_4k": 0.26,
+        })
+        params = plugin._get_model_parameter_map()["seedream-v5.5"]
+        self.assertEqual(plugin._get_required_invocation_cost("seedream-v5.5", parameters=params), 260)
+        self.assertEqual(
+            plugin._get_required_invocation_cost("seedream-v5.5", image_bytes_list=[b"a", b"b"], parameters=params),
+            260,
+        )
+

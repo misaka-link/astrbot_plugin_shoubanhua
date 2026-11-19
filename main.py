@@ -7234,7 +7234,28 @@ class FigurineProPlugin(Star):
 
         if not images:
             return None
-        return LayerImageBundle(images[0], images, kept)
+        bundle = LayerImageBundle(images[0], images, kept)
+        # 只有底图（没有 z_index>0 的图层）说明上游没真正执行图层拆分
+        bundle.only_base = not self._layer_items_have_layers(kept)
+        return bundle
+
+    @staticmethod
+    def _layer_items_have_layers(items: List[Dict[str, Any]]) -> bool:
+        """响应里是否存在 z_index>0 的图层（只有底图时说明上游没拆分）。"""
+        for item in items or []:
+            try:
+                if int(item.get("z_index") or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    @staticmethod
+    def _layer_only_base_hint() -> str:
+        return (
+            "\n⚠️ 上游只返回了底图（没有任何图层）：对接的中转网关很可能丢弃了 layer_decomposition 参数，"
+            "需要在网关侧给该渠道开启「请求体透传」，或改用直连火山方舟的 Key。"
+        )
 
     @staticmethod
     def _detect_generic_endpoint_type(url: str) -> str:
@@ -9907,6 +9928,14 @@ class FigurineProPlugin(Star):
 
                     # 图层拆分：一次性取回全部输出图 + 元数据，走合并转发
                     if self._is_seedream_layer_request(model_name, parameters):
+                        raw_items = data.get("data") if isinstance(data, dict) else None
+                        logger.info(
+                            "图层拆分响应结构: top=%s, items=%s"
+                            % (
+                                list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                                [sorted(it.keys()) for it in raw_items[:3]] if isinstance(raw_items, list) else None,
+                            )
+                        )
                         layer_items = self._extract_seedream_layer_items(data)
                         if layer_items:
                             bundle = await self._download_seedream_layer_bundle(layer_items)
@@ -10536,6 +10565,8 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
+            if isinstance(res, LayerImageBundle) and getattr(res, "only_base", False):
+                message_text += self._layer_only_base_hint()
             if isinstance(res, LayerImageBundle):
                 sent, failed_file = await self._send_layer_bundle(
                     event,
@@ -10861,6 +10892,8 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
+            if isinstance(res, LayerImageBundle) and getattr(res, "only_base", False):
+                message_text += self._layer_only_base_hint()
             if isinstance(res, LayerImageBundle):
                 sent, failed_file = await self._send_layer_bundle(
                     event,

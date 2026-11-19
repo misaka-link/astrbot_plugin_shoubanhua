@@ -387,3 +387,21 @@ class RegisterDecoratorPlacementTests(unittest.TestCase):
             self.source.index("@register("),
         )
 
+
+
+class LayerOnlyBaseTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+        self.plugin = object.__new__(FigurineProPlugin)
+
+    def test_detect_layers(self):
+        self.assertFalse(FigurineProPlugin._layer_items_have_layers([{"z_index": 0}]))
+        self.assertFalse(FigurineProPlugin._layer_items_have_layers([]))
+        self.assertTrue(FigurineProPlugin._layer_items_have_layers([{"z_index": 0}, {"z_index": 1}]))
+        self.assertTrue(FigurineProPlugin._layer_items_have_layers([{"z_index": "3"}]))
+
+    def test_hint_text(self):
+        hint = FigurineProPlugin._layer_only_base_hint()
+        self.assertIn("layer_decomposition", hint)
+        self.assertIn("请求体透传", hint)
+

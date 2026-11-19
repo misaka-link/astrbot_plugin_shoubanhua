@@ -132,3 +132,24 @@
 - 价格/参考图阶梯：插件配置 → 模型参数设置 → 对应模型条目（`charge_amount`、`extra_reference_image_quota`、`extra_reference_image_charge`）。
 - 想给 `s5.5c` 显示图层元数据：把该条目的「图层拆分显示图层信息」打开；想返回 OCR 文本，再打开「图层拆分富文本OCR」（仅 5.5 支持）。
 - 想换触发词：改「触发指令绑定」里的 `command` 即可，模型名不用动。
+
+
+## 4. 为什么图层拆分只回了一张图（New API 网关丢字段）
+
+**现象**：`s5.5c` 只返回一张底图，插件日志为 `Seedream 图层拆分完成: images=1, z_index=[0]`，请求体里 `layer_decomposition: true` 确实发出去了。
+
+**原因**：对接的网关是 **New API v1.0.0-rc.51**。它的 `relaykit/dto.ImageRequest` 只声明了 `model`/`prompt`/`n`/`size`/`response_format` 等少数字段，未声明的字段会被塞进 `Extra`，而 `MarshalJSON` **故意不把 Extra 合并回请求体**（官方 issue #7340 明确说明）。因此 `layer_decomposition` / `layer_decomposition_options` 在网关就被丢掉，火山方舟收到的是一次普通生图，自然只回一张。
+
+**可选解决路径**（按可靠性排序）：
+
+1. **直连火山方舟**（最稳）：给图层拆分模型绑定一个 `api_url = https://ark.cn-beijing.volces.com/api/v3` 的 API Key，绕过 New API。
+2. **网关侧开启请求体透传**：New API 渠道设置里有 `pass_through_body_enabled`（请求体透传），开启后原始请求体会直接转发。
+   注意：这只解决请求方向；New API 还会把出图转存到自己的存储（`webstatic.aiproxy.vip`），响应侧是否保留多图取决于其响应转换实现，可能仍只回一张。
+3. **等 New API 支持**：需要在其 `dto.ImageRequest` 里声明 `layer_decomposition` / `layer_decomposition_options`（同 #7340 的修法，提 issue 或 PR）。
+
+**插件侧的兜底**：现在如果检测到「只有底图、没有任何图层」，回复里会自动追加提示：
+
+> ⚠️ 上游只返回了底图（没有任何图层）：对接的中转网关很可能丢弃了 layer_decomposition 参数，需要在网关侧给该渠道开启「请求体透传」，或改用直连火山方舟的 Key。
+
+同时日志会打印 `图层拆分响应结构: top=[...], items=[[...]]`，可据此判断网关到底返回了什么字段。
+

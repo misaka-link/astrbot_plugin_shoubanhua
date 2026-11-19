@@ -101,11 +101,34 @@
 | 3 张 | 0.225 |
 | 4 张 | 0.275 |
 
-### 2.2 应用方式
+### 2.2 部署状态（已执行）
 
-- **WebUI（推荐）**：AstrBot 管理面板 → 插件配置 → 模型列表/Images Generations 列表/触发指令绑定/模型参数设置，按上面 4 处填写并保存。
-- **直接改配置**：编辑 `data/config/astrbot_plugin_shoubanhua_config.json`（注意文件是 UTF-8 **带 BOM**），改完重载插件。
+两个 AstrBot 实例都已推送代码并写入配置，容器已重启并验证插件加载正常：
 
-### 2.3 图层拆分模型（可选）
+| 实例 | 容器 | 插件目录 | 备份目录 |
+| --- | --- | --- | --- |
+| 主 3058627484 | `astrbot-3058627484-port` | `/www/wwwroot/astrbot/3058627484/data/plugins/astrbot_plugin_shoubanhua` | `/www/wwwroot/astrbot/3058627484/backups/` |
+| 次 1878863124 | `astrbot-1878863124-port` | `/www/wwwroot/astrbot/1878863124/data/plugins/astrbot_plugin_shoubanhua` | `/www/wwwroot/astrbot/1878863124/backups/` |
 
-若还要单独的图层拆分入口，再建一条模型（例如 `seedream-layer`），参数模式选 **Seedream 图层拆分**，触发词自定（如 `s5.5c`），并按需设置分辨率/最大输出图数/OCR。
+实际写入的触发绑定：
+
+- `s5.5` → `seedream-v5.5`（生图：0.175 元/次，参考图 >2 张每张 +0.05，2K 档，background=auto，output_format=png）
+- `s5.5c` → `seedream-v5.5-layer`（图层拆分：request_model_name=`seedream-v5.5`，0.175 元/次，size=auto，max_images=30，只发拆分图）
+
+容器内实测（**未调用任何生成接口**）：
+
+```json
+// s5.5 实际请求体
+{"model":"seedream-v5.5","watermark":false,"output_format":"png","optimize_prompt_options":{"mode":"standard"},"background":"auto","size":"2K"}
+
+// s5.5c 实际请求体
+{"model":"seedream-v5.5","layer_decomposition":true,"layer_decomposition_options":{"max_images":30},"size":"auto","output_format":"png","watermark":false}
+```
+
+扣费实测：0 张 / 2 张参考图 = 0.175 元；3 张 = 0.225 元；4 张 = 0.275 元。
+
+### 2.3 后续手动调整
+
+- 价格/参考图阶梯：插件配置 → 模型参数设置 → 对应模型条目（`charge_amount`、`extra_reference_image_quota`、`extra_reference_image_charge`）。
+- 想给 `s5.5c` 显示图层元数据：把该条目的「图层拆分显示图层信息」打开；想返回 OCR 文本，再打开「图层拆分富文本OCR」（仅 5.5 支持）。
+- 想换触发词：改「触发指令绑定」里的 `command` 即可，模型名不用动。

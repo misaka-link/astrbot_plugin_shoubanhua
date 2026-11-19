@@ -1637,6 +1637,353 @@ class ResolutionDeductionTests(unittest.TestCase):
         # 验证调用链：先尝试 2 权重首选 (2a)，失败后尝试同级 2 权重 (2b)，再次失败后降级到 1 权重 (model-1)
         self.assertEqual(attempts, ["model-2a", "model-2b", "model-1"])
 
+    def test_multilevel_mapping_expands_chain(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-b", "mapped_model": "model-c", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-c", "mapped_model": "model-d", "priority": 0},
+            ]
+        )
+        self.assertEqual(
+            plugin._get_model_failover_candidates("source", rotate=False),
+            ["model-b", "model-c", "model-d"],
+        )
+        # 叶子模型仍只返回自身
+        self.assertEqual(
+            plugin._get_model_failover_candidates("model-d", rotate=False),
+            ["model-d"],
+        )
+
+    def test_multilevel_mapping_breadth_first_and_dedup(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-c", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-b", "mapped_model": "model-d", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-c", "mapped_model": "model-d", "priority": 0},
+            ]
+        )
+        # BFS：先直接候选 b、c，再下一层 d；d 去重只出现一次
+        self.assertEqual(
+            plugin._get_model_failover_candidates("source", rotate=False),
+            ["model-b", "model-c", "model-d"],
+        )
+
+    def test_multilevel_mapping_cycle_is_safe(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-b", "mapped_model": "source", "priority": 0},
+            ]
+        )
+        # A→B→A 不应死循环，也不应把 source 自己当成候选
+        self.assertEqual(
+            plugin._get_model_failover_candidates("source", rotate=False),
+            ["model-b"],
+        )
+
+    def test_multilevel_mapping_runtime_failover_reaches_grandchild(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+                {"__template_key": "model_mapping", "model": "model-b", "mapped_model": "model-c", "priority": 0},
+            ]
+        )
+        attempts = []
+
+        async def mock_call_api_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-c":
+                return b"grandchild-image", 200
+            return {"error_type": "upstream_error", "message": "fail"}, 500
+
+        plugin._call_api_once = mock_call_api_once
+        result, status, actual_model = asyncio.run(
+            plugin._call_api([], "prompt", override_model="source", return_actual_model=True)
+        )
+        self.assertEqual(result, b"grandchild-image")
+        self.assertEqual(status, 200)
+        self.assertEqual(actual_model, "model-c")
+        self.assertEqual(attempts, ["model-b", "model-c"])
+
+    def test_model_failover_delay_defaults_to_100ms(self):
+        plugin = self.make_dashboard_plugin()
+        self.assertEqual(plugin._get_model_failover_delay_seconds(), 0.1)
+        # 配置低于 100ms 时被钳制为 100ms
+        plugin.conf["model_failover_delay_ms"] = 10
+        self.assertEqual(plugin._get_model_failover_delay_seconds(), 0.1)
+        plugin.conf["model_failover_delay_ms"] = 500
+        self.assertEqual(plugin._get_model_failover_delay_seconds(), 0.5)
+
+    def test_model_failover_applies_delay_between_candidates(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-a", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+            ],
+            model_failover_delay_ms=100,
+        )
+        attempts = []
+
+        async def mock_call_api_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-b":
+                return b"ok", 200
+            return {"error_type": "upstream_error"}, 500
+
+        plugin._call_api_once = mock_call_api_once
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+
+        from unittest import mock as _mock
+        with _mock.patch.object(PLUGIN_MODULE.asyncio, "sleep", fake_sleep):
+            result, status, actual_model = asyncio.run(
+                plugin._call_api([], "prompt", override_model="source", return_actual_model=True)
+            )
+        self.assertEqual(result, b"ok")
+        self.assertEqual(actual_model, "model-b")
+        self.assertEqual(attempts, ["model-a", "model-b"])
+        self.assertEqual(sleeps, [0.1])
+
+    # ---- P0 回归：切换流程稳固性 ----
+
+    def test_call_api_continues_when_call_api_once_raises(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-a", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+            ]
+        )
+        plugin._get_model_failover_delay_seconds = lambda: 0.0
+        attempts = []
+
+        async def mock_call_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-a":
+                raise RuntimeError("prepare boom")
+            return b"ok", 200
+
+        plugin._call_api_once = mock_call_once
+        result, status, actual = asyncio.run(
+            plugin._call_api([], "p", override_model="source", return_actual_model=True)
+        )
+        self.assertEqual(result, b"ok")
+        self.assertEqual(actual, "model-b")
+        self.assertEqual(attempts, ["model-a", "model-b"])
+
+    def test_call_api_once_wrapper_converts_pretry_exception(self):
+        plugin = self.make_dashboard_plugin()
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("key boom")
+
+        plugin._get_api_key_item_for_request = boom
+        result, status = asyncio.run(
+            plugin._call_api_once([], "p", override_model="m1")
+        )
+        self.assertEqual(status, 0)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result.get("error_type"), "internal_error")
+
+    def test_on_attempt_exception_does_not_break_failover(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-a", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+            ],
+            failure_deduction_status_codes=[400],
+        )
+        plugin._get_model_failover_delay_seconds = lambda: 0.0
+        attempts = []
+
+        async def mock_call_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-a":
+                return {"error_type": "upstream_error"}, 502
+            return b"ok", 200
+
+        async def bad_attempt(*args, **kwargs):
+            raise RuntimeError("usage store down")
+
+        plugin._call_api_once = mock_call_once
+        result, status, actual = asyncio.run(
+            plugin._call_api(
+                [], "p", override_model="source",
+                return_actual_model=True, on_attempt=bad_attempt,
+            )
+        )
+        self.assertEqual(result, b"ok")
+        self.assertEqual(actual, "model-b")
+        self.assertEqual(attempts, ["model-a", "model-b"])
+
+    def test_failover_stop_decoupled_from_failure_deduction_codes(self):
+        plugin = self.make_dashboard_plugin(
+            failure_deduction_status_codes=[400, 451, 413],
+            failover_stop_status_codes=[],
+        )
+        self.assertFalse(plugin._should_stop_model_failover(400, {"message": "bad request"}))
+        self.assertFalse(plugin._should_stop_model_failover(413, {"message": "payload too large"}))
+        self.assertFalse(plugin._should_stop_model_failover(451, {"message": "legal"}))
+        self.assertFalse(plugin._should_send_content_policy_warning(413, {"message": "payload too large"}))
+        # 显式配置后才停止
+        plugin.conf["failover_stop_status_codes"] = [401]
+        self.assertTrue(plugin._should_stop_model_failover(401, {"message": "unauthorized"}))
+
+    def test_413_fails_over_to_next_candidate(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-a", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+            ],
+            failure_deduction_status_codes=[400, 451, 413],
+            failover_stop_status_codes=[],
+        )
+        plugin._get_model_failover_delay_seconds = lambda: 0.0
+        attempts = []
+
+        async def mock_call_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-a":
+                return {"error_type": "http_error", "message": "payload too large"}, 413
+            return b"ok", 200
+
+        plugin._call_api_once = mock_call_once
+        result, status, actual = asyncio.run(
+            plugin._call_api([], "p", override_model="source", return_actual_model=True)
+        )
+        self.assertEqual(result, b"ok")
+        self.assertEqual(actual, "model-b")
+        self.assertEqual(attempts, ["model-a", "model-b"])
+
+    def test_true_violation_stops_failover(self):
+        plugin = self.make_dashboard_plugin(
+            model_mapping_list=[
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-a", "priority": 0},
+                {"__template_key": "model_mapping", "model": "source", "mapped_model": "model-b", "priority": 0},
+            ]
+        )
+        plugin._get_model_failover_delay_seconds = lambda: 0.0
+        attempts = []
+
+        async def mock_call_once(images, prompt, override_model=None, **kwargs):
+            attempts.append(override_model)
+            if override_model == "model-a":
+                return {"error_type": "safety_block", "message": "blocked"}, 200
+            return b"ok", 200
+
+        plugin._call_api_once = mock_call_once
+        result, status, actual = asyncio.run(
+            plugin._call_api([], "p", override_model="source", return_actual_model=True)
+        )
+        self.assertEqual(actual, "model-a")
+        self.assertEqual(attempts, ["model-a"])
+
+    def test_content_policy_keyword_false_positive_excluded(self):
+        plugin = self.make_dashboard_plugin()
+        self.assertFalse(plugin._is_content_policy_violation(
+            {"message": "Safety system overloaded, please retry later"}, 503))
+        self.assertFalse(plugin._is_content_policy_violation(
+            {"message": "Rate limit reached for content moderation pipeline"}, 429))
+        self.assertTrue(plugin._is_content_policy_violation(
+            {"message": "blocked by safety system"}, 200))
+        self.assertTrue(plugin._is_content_policy_violation(
+            {"error_type": "content_policy_violation"}, 200))
+
+    def test_deduct_still_works_for_failure_code_when_warning_decoupled(self):
+        plugin = self.make_dashboard_plugin(
+            failure_deduction_status_codes=[400],
+            deduct_on_failure_status_codes=True,
+        )
+        self.assertTrue(plugin._should_deduct_generation_result(
+            {"error_type": "http_error", "message": "bad request"}, 400, "m1"))
+        self.assertFalse(plugin._should_send_content_policy_warning(
+            400, {"error_type": "http_error", "message": "bad request"}))
+
+    def test_cancelled_error_propagates_from_call_api_once_wrapper(self):
+        plugin = self.make_dashboard_plugin()
+
+        async def cancel_impl(*args, **kwargs):
+            raise asyncio.CancelledError()
+
+        plugin._call_api_once_impl = cancel_impl
+        with self.assertRaises(asyncio.CancelledError):
+            asyncio.run(plugin._call_api_once([], "p", override_model="m1"))
+
+    # ---- GPT Image 2.6 新参数 ----
+
+    def _make_gpt26_plugin(self, **overrides):
+        entry = {
+            "__template_key": "model_parameters",
+            "model": "m1",
+            "parameter_mode": "gpt",
+            "quality": "high",
+            "moderation": "auto",
+            "gpt_background": "auto",
+            "input_fidelity": "auto",
+            "gpt_complexity": "low",
+            "gpt_output_format": "gif",
+            "gpt_output_compression": 80,
+            "gpt_frame_count": 9,
+            "gpt_frame_duration_ms": 200,
+        }
+        entry.update(overrides)
+        return self.make_plugin([entry])
+
+    def test_gpt26_runtime_parameters(self):
+        plugin = self._make_gpt26_plugin()
+        params = plugin._get_model_parameters("m1")
+        self.assertEqual(params.get("complexity"), "low")
+        self.assertEqual(params.get("output_format"), "gif")
+        self.assertEqual(params.get("frame_count"), 9)
+        self.assertEqual(params.get("frame_duration_ms"), 200)
+        # gif 不支持压缩
+        self.assertNotIn("output_compression", params)
+
+        plugin_webp = self._make_gpt26_plugin(gpt_output_format="webp")
+        params_webp = plugin_webp._get_model_parameters("m1")
+        self.assertEqual(params_webp.get("output_format"), "webp")
+        self.assertEqual(params_webp.get("output_compression"), 80)
+        self.assertNotIn("frame_count", params_webp)
+
+        plugin_png = self._make_gpt26_plugin(gpt_output_format="jpeg", gpt_background="transparent")
+        params_png = plugin_png._get_model_parameters("m1")
+        self.assertEqual(params_png.get("output_format"), "png")
+        self.assertEqual(params_png.get("background"), "transparent")
+
+    def test_gpt26_complexity_auto_not_sent(self):
+        plugin = self._make_gpt26_plugin(gpt_complexity="auto")
+        self.assertNotIn("complexity", plugin._get_model_parameters("m1"))
+
+    def test_gpt26_edits_sanitizes_gif_and_svg(self):
+        for fmt in ("gif", "svg"):
+            sanitized = FigurineProPlugin._sanitize_edits_image_parameters({
+                "output_format": fmt,
+                "frame_count": 9,
+                "frame_duration_ms": 200,
+                "quality": "high",
+            })
+            self.assertNotIn("output_format", sanitized)
+            self.assertNotIn("frame_count", sanitized)
+            self.assertNotIn("frame_duration_ms", sanitized)
+            self.assertEqual(sanitized.get("quality"), "high")
+
+    def test_gpt26_svg_payload_forces_n_one(self):
+        plugin = self._make_gpt26_plugin(gpt_output_format="svg", gpt_complexity="medium")
+        payload = plugin._build_generic_images_payload("m1", "prompt", [])
+        self.assertEqual(payload.get("output_format"), "svg")
+        self.assertEqual(payload.get("n"), 1)
+        self.assertEqual(payload.get("complexity"), "medium")
+
+    def test_gpt26_gif_payload_includes_frame_params(self):
+        plugin = self._make_gpt26_plugin()
+        payload = plugin._build_generic_images_payload("m1", "prompt", [])
+        self.assertEqual(payload.get("output_format"), "gif")
+        self.assertEqual(payload.get("frame_count"), 9)
+        self.assertEqual(payload.get("frame_duration_ms"), 200)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import math
 import random
 import re
 import time
+import traceback
 import unicodedata
 import uuid
 from dataclasses import field as dataclass_field
@@ -284,6 +285,22 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     "2.1.0",
     "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
 )
+class LayerImageBundle(bytes):
+    """图层拆分结果包。
+
+    本身是底图字节（兼容原有 `isinstance(res, bytes)` 成功判定与计费链路），
+    同时携带全部输出图与元数据：
+    - images：按 z_index 升序的全部输出图（含底图）
+    - items：与 images 一一对应的元数据（z_index/name/description/bounding_box/text_recognition…）
+    """
+
+    def __new__(cls, base: bytes, images: List[bytes], items: List[Dict[str, Any]]):
+        instance = super().__new__(cls, base or b"")
+        instance.images = list(images or [])
+        instance.items = list(items or [])
+        return instance
+
+
 class FigurineProPlugin(Star):
     RESERVED_COMMAND_NAMES = frozenset({
         "切换模型", "SwitchModel", "模型列表", "文生图",
@@ -323,6 +340,7 @@ class FigurineProPlugin(Star):
         ("gemini", "Gemini"),
         ("grok", "Grok"),
         ("seedream", "Seedream"),
+        ("seedream_layer", "Seedream 图层拆分"),
         ("omni", "Omni 视频"),
     )
     PARAMETER_MODE_ENABLE_FIELDS = {
@@ -330,6 +348,7 @@ class FigurineProPlugin(Star):
         "gemini": "enable_gemini_parameters",
         "grok": "enable_grok_parameters",
         "seedream": "enable_seedream_parameters",
+        "seedream_layer": "enable_seedream_layer_parameters",
         "omni": "enable_omni_parameters",
     }
 
@@ -338,7 +357,11 @@ class FigurineProPlugin(Star):
     }
     IMAGE_INPUT_FIDELITY_OPTIONS = {"auto", "low", "high"}
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
+    GPT_COMPLEXITY_OPTIONS = {"auto", "low", "medium", "high"}
+    GPT_OUTPUT_FORMAT_OPTIONS = {"auto", "png", "jpeg", "webp", "gif", "svg"}
     SEND_RETRY_DELAY = 1.0
+    # 模型热备切换之间的最小间隔（毫秒），避免瞬时把全部候选打一遍
+    MODEL_FAILOVER_DELAY_MS_DEFAULT = 100
     GROK_RESOLUTION_OPTIONS = {"1k", "2k"}
     GROK_ASPECT_RATIO_ORDER = (
         "1:2", "9:20", "9:19.5", "9:16", "2:3", "3:4", "1:1",
@@ -387,6 +410,13 @@ class FigurineProPlugin(Star):
     SEEDREAM_ASPECT_RATIO_ORDER = (
         "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9",
     )
+    # 图层拆分（Seedream 5.5 / 5.0 pro / 5.0 flash）
+    SEEDREAM_LAYER_RESOLUTION_OPTIONS = ("1K", "1.5K", "2K", "auto")
+    SEEDREAM_LAYER_MAX_IMAGES_DEFAULT = 30
+    SEEDREAM_LAYER_MAX_IMAGES_MIN = 2
+    SEEDREAM_LAYER_MAX_IMAGES_LIMIT = 100
+    SEEDREAM_LAYER_MAX_LAYERS = {"5.5": 99, "5.0pro": 16}
+    SEEDREAM_BACKGROUND_OPTIONS = ("auto", "transparent", "opaque")
     # --- Omni 1.1 Flash 视频（flow2api）---
     OMNI_DURATION_OPTIONS = ("4", "6", "8", "10")
     OMNI_DURATION_DEFAULT = "8"
@@ -1979,6 +2009,23 @@ class FigurineProPlugin(Star):
                 {"value": "low", "label": "low（低保真度：默认快速风格化）"},
                 {"value": "high", "label": "high（高保真度：最大程度还原输入图片特征与人脸）"},
             ]},
+            {"name": "gpt_complexity", "label": "复杂度 complexity", "group": "GPT", "type": "select", "default": "auto", "options": [
+                {"value": "auto", "label": "auto（不发送，由模型默认 high）"},
+                {"value": "low", "label": "low（快速编辑，规划最少）"},
+                {"value": "medium", "label": "medium"},
+                {"value": "high", "label": "high（复杂布局/多元素）"},
+            ]},
+            {"name": "gpt_output_format", "label": "输出格式", "group": "GPT", "type": "select", "default": "auto", "options": [
+                {"value": "auto", "label": "auto（不发送）"},
+                {"value": "png", "label": "png"},
+                {"value": "jpeg", "label": "jpeg"},
+                {"value": "webp", "label": "webp"},
+                {"value": "gif", "label": "gif（动图，仅文生图）"},
+                {"value": "svg", "label": "svg（矢量，仅文生图，n=1）"},
+            ]},
+            {"name": "gpt_output_compression", "label": "输出压缩率(0-100，0=不传)", "group": "GPT", "type": "number", "default": 0, "min": 0, "max": 100},
+            {"name": "gpt_frame_count", "label": "GIF帧数(2-16，0=默认9)", "group": "GPT", "type": "number", "default": 0, "min": 0, "max": 16},
+            {"name": "gpt_frame_duration_ms", "label": "GIF每帧时长ms(20-2000，0=默认200)", "group": "GPT", "type": "number", "default": 0, "min": 0, "max": 2000},
             {"name": "adaptive_aspect_ratio", "label": "自适应比例", "group": "GPT", "type": "boolean", "default": False},
             {"name": "adaptive_resolution", "label": "自适应比例分辨率", "group": "GPT", "type": "select", "default": "1K", "options": ["1K", "2K", "4K"]},
             {"name": "auto_upgrade_1k_adaptive_resolution", "label": "1K超限自动转2K", "group": "GPT", "type": "boolean", "default": False},
@@ -2003,6 +2050,19 @@ class FigurineProPlugin(Star):
             {"name": "seedream_max_side_2000", "label": "Seedream宽高均不超过2000", "group": "Seedream", "type": "boolean", "default": True},
             {"name": "seedream_side_over_2000_auto_2k", "label": "边长超2000自动升2K", "group": "Seedream", "type": "boolean", "default": True},
             {"name": "seedream_optimize_prompt_mode", "label": "Seedream提示词优化模式", "group": "Seedream", "type": "select", "default": "standard", "options": ["standard", "fast"]},
+            {"name": "seedream_background", "label": "Seedream背景模式", "group": "Seedream", "type": "select", "default": "auto", "options": [
+                {"value": "auto", "label": "auto（自动：5.5 由模型按提示词决定透明与否）"},
+                {"value": "transparent", "label": "transparent（原生透明背景 RGBA，自动锁定 png）"},
+                {"value": "opaque", "label": "opaque（不透明背景，多轮编辑更稳）"},
+            ]},
+            {"name": "seedream_safety_identifier", "label": "Seedream终端用户标识", "group": "Seedream", "type": "text", "default": "", "max_length": 64},
+            {"name": "enable_seedream_layer_parameters", "label": "启用 Seedream 图层拆分", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
+            {"name": "seedream_layer_resolution", "label": "图层拆分分辨率", "group": "Seedream 图层拆分", "type": "select", "default": "auto", "options": ["auto", "1K", "1.5K", "2K"]},
+            {"name": "seedream_layer_max_images", "label": "图层拆分最大输出图数", "group": "Seedream 图层拆分", "type": "number", "default": 30, "min": 2, "max": 100},
+            {"name": "seedream_layer_text_recognition", "label": "图层拆分富文本OCR", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
+            {"name": "seedream_layer_output_format", "label": "图层拆分输出格式", "group": "Seedream 图层拆分", "type": "select", "default": "png", "options": ["png", "jpeg"]},
+            {"name": "seedream_layer_watermark", "label": "图层拆分水印", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
+            {"name": "seedream_layer_show_metadata", "label": "图层拆分显示图层信息", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
             {"name": "enable_omni_parameters", "label": "启用 Omni 视频参数", "group": "Omni", "type": "boolean", "default": False},
             {"name": "omni_model_template", "label": "Omni实际模型名模板", "group": "Omni", "type": "text", "default": self.OMNI_MODEL_TEMPLATE_DEFAULT, "max_length": 128},
             {"name": "omni_video_duration", "label": "Omni视频时长(秒)", "group": "Omni", "type": "select", "default": self.OMNI_DURATION_DEFAULT, "options": list(self.OMNI_DURATION_OPTIONS)},
@@ -2044,6 +2104,8 @@ class FigurineProPlugin(Star):
             "default_resolution", "send_default_size", "enable_gpt_parameters", "omit_n_parameter",
             "quality", "moderation", "gpt_background", "input_fidelity", "adaptive_aspect_ratio", "adaptive_resolution",
             "auto_upgrade_1k_adaptive_resolution", "force_resolution_limit",
+            "gpt_complexity", "gpt_output_format", "gpt_output_compression",
+            "gpt_frame_count", "gpt_frame_duration_ms",
         }
         gemini_fields = {
             "enable_gemini_parameters", "gemini_resolution", "gemini_adaptive_aspect_ratio",
@@ -2056,6 +2118,13 @@ class FigurineProPlugin(Star):
             "seedream_send_aspect_ratio", "seedream_send_detailed_resolution", "seedream_pixel_limit",
             "seedream_adaptive_aspect_ratio", "seedream_max_side_2000",
             "seedream_side_over_2000_auto_2k", "seedream_optimize_prompt_mode",
+            "seedream_background", "seedream_safety_identifier",
+        }
+        seedream_layer_fields = {
+            "enable_seedream_layer_parameters", "seedream_layer_resolution",
+            "seedream_layer_max_images", "seedream_layer_text_recognition",
+            "seedream_layer_output_format", "seedream_layer_watermark",
+            "seedream_layer_show_metadata",
         }
         omni_fields = {
             "enable_omni_parameters", "omni_model_template", "omni_video_duration",
@@ -2073,6 +2142,7 @@ class FigurineProPlugin(Star):
             **{name: "gemini" for name in gemini_fields},
             **{name: "grok" for name in grok_fields},
             **{name: "seedream" for name in seedream_fields},
+            **{name: "seedream_layer" for name in seedream_layer_fields},
             **{name: "omni" for name in omni_fields},
         }
         for field_name in {
@@ -2087,6 +2157,11 @@ class FigurineProPlugin(Star):
             "moderation": "enable_gpt_parameters",
             "gpt_background": "enable_gpt_parameters",
             "input_fidelity": "enable_gpt_parameters",
+            "gpt_complexity": "enable_gpt_parameters",
+            "gpt_output_format": "enable_gpt_parameters",
+            "gpt_output_compression": "enable_gpt_parameters",
+            "gpt_frame_count": "enable_gpt_parameters",
+            "gpt_frame_duration_ms": "enable_gpt_parameters",
             "adaptive_aspect_ratio": "enable_gpt_parameters",
             "adaptive_resolution": "enable_gpt_parameters",
             "auto_upgrade_1k_adaptive_resolution": "enable_gpt_parameters",
@@ -2108,6 +2183,14 @@ class FigurineProPlugin(Star):
             "seedream_max_side_2000": "enable_seedream_parameters",
             "seedream_side_over_2000_auto_2k": "enable_seedream_parameters",
             "seedream_optimize_prompt_mode": "enable_seedream_parameters",
+            "seedream_background": "enable_seedream_parameters",
+            "seedream_safety_identifier": "enable_seedream_parameters",
+            "seedream_layer_resolution": "enable_seedream_layer_parameters",
+            "seedream_layer_max_images": "enable_seedream_layer_parameters",
+            "seedream_layer_text_recognition": "enable_seedream_layer_parameters",
+            "seedream_layer_output_format": "enable_seedream_layer_parameters",
+            "seedream_layer_watermark": "enable_seedream_layer_parameters",
+            "seedream_layer_show_metadata": "enable_seedream_layer_parameters",
             "omni_model_template": "enable_omni_parameters",
             "omni_video_duration": "enable_omni_parameters",
             "omni_aspect_mode": "enable_omni_parameters",
@@ -2151,7 +2234,7 @@ class FigurineProPlugin(Star):
             elif name in grok_fields:
                 field["route"] = "generic"
                 field["endpoint_types"] = ["images_generations", "images_edits"]
-            elif name in seedream_fields:
+            elif name in seedream_fields or name in seedream_layer_fields:
                 field["route"] = "generic"
                 field["endpoint_types"] = ["images_generations"]
             elif name in omni_fields:
@@ -2326,7 +2409,7 @@ class FigurineProPlugin(Star):
                     normalized[name] = normalized_value
                 else:
                     normalized_value = str(raw_value or field["default"]).strip()
-                    if name == "request_model_name":
+                    if name in {"request_model_name", "seedream_safety_identifier"}:
                         if len(normalized_value) > field["max_length"]:
                             raise ValueError(f"{field['label']} 长度无效")
                         normalized[name] = normalized_value
@@ -3333,15 +3416,20 @@ class FigurineProPlugin(Star):
     async def _migrate_failure_deduction_config(self):
         legacy_key = "deduct_on_content_policy_violation"
         current_key = "deduct_on_failure_status_codes"
-        if legacy_key not in self.conf or current_key in self.conf:
-            return
+        if legacy_key in self.conf and current_key not in self.conf:
+            self.conf[current_key] = bool(self.conf.get(legacy_key, True))
+            try:
+                await self._persist_configuration()
+                logger.info("已迁移违规内容扣次配置为错误码扣次配置")
+            except Exception as exc:
+                logger.error(f"迁移错误码扣次配置失败: {exc}")
 
-        self.conf[current_key] = bool(self.conf.get(legacy_key, True))
-        try:
-            await self._persist_configuration()
-            logger.info("已迁移违规内容扣次配置为错误码扣次配置")
-        except Exception as exc:
-            logger.error(f"迁移错误码扣次配置失败: {exc}")
+        billing_codes = self._get_failure_deduction_status_codes()
+        if billing_codes & {413, 451}:
+            logger.info(
+                "提示：failure_deduction_status_codes 中的 413/451 现仅用于扣费，"
+                "不再停止模型热备切换；如需停止热备请配置 failover_stop_status_codes"
+            )
 
     def _extract_image_urls_from_text(self, text: str) -> List[str]:
         """从文本中提取图片链接和本地文件路径"""
@@ -3832,20 +3920,27 @@ class FigurineProPlugin(Star):
 
         return mapping
 
-    def _get_model_failover_candidates(self, model_name: str, rotate: bool = True) -> List[str]:
-        """
-        返回实际调用模型列表；配置映射时首项即为首选模型。
-        若同一源模型下存在多个权重相同的映射模型，则对该权重层级的模型进行负载均衡轮询调用；
-        失败时自动切换到同权重其它模型或下一优先级的热备模型。
+    def _resolve_direct_failover_candidates(
+        self,
+        model_name: str,
+        rotate: bool = True,
+        raw_entries: Optional[Dict[str, List[Tuple[int, str]]]] = None,
+    ) -> List[str]:
+        """解析某个模型在 model_mapping_list 中的**直接**映射候选（单层，不递归展开）。
+
+        - 按权重从大到小分组，同权重去重并保留相对顺序；
+        - 同权重多模型在 rotate=True 时做轮询负载均衡；
+        - 该模型没有可用映射时返回空列表（由调用方决定是否回退到自身）。
         """
         source_name = (model_name or "").strip()
         if not source_name:
             return []
 
-        raw_entries = self._get_raw_model_mapping_entries()
+        if raw_entries is None:
+            raw_entries = self._get_raw_model_mapping_entries()
         candidates = raw_entries.get(source_name, [])
         if not candidates:
-            return [source_name]
+            return []
 
         # 按照权重从大到小分组，同权重去重并保留相对顺序
         ordered = sorted(candidates, key=lambda c: c[0], reverse=True)
@@ -3874,6 +3969,45 @@ class FigurineProPlugin(Star):
                 result.extend(group[idx:] + group[:idx])
             else:
                 result.extend(group)
+
+        return result
+
+    def _get_model_failover_candidates(self, model_name: str, rotate: bool = True) -> List[str]:
+        """返回实际调用模型列表，**支持多层映射递归展开**。
+
+        语义：
+        1. 先解析 source 的直接映射候选（按权重排序，同权重轮询）；
+        2. 若某个候选自身也配置了映射（说明它也是个"别名/入口"），
+           则继续展开它的映射，作为更后一级的兜底；
+        3. 按层级（BFS）拼接：先所有直接候选，再下一层候选……；
+        4. 全局去重，并用 seen 集合防止环（A→B→A 不会死循环）；
+        5. 未配置映射时返回 [source_name]，保持原有单模型行为。
+
+        这样 A→B 且 B→C 时，source=A 的候选为 [B, C]：
+        先真正请求 B，B 失败后自动降级到 B 自己映射的 C。
+        """
+        source_name = (model_name or "").strip()
+        if not source_name:
+            return []
+
+        raw_entries = self._get_raw_model_mapping_entries()
+        result: List[str] = []
+        seen = {source_name}
+        frontier: List[str] = [source_name]
+
+        while frontier:
+            next_frontier: List[str] = []
+            for name in frontier:
+                direct = self._resolve_direct_failover_candidates(
+                    name, rotate=rotate, raw_entries=raw_entries
+                )
+                for candidate in direct:
+                    if candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    result.append(candidate)
+                    next_frontier.append(candidate)
+            frontier = next_frontier
 
         return result or [source_name]
 
@@ -4059,6 +4193,24 @@ class FigurineProPlugin(Star):
             normalized = str(value or "standard").strip().lower()
             return normalized if normalized in {"standard", "fast"} else "standard"
 
+        def normalize_seedream_background(value: Any) -> str:
+            normalized = str(value or "auto").strip().lower()
+            return normalized if normalized in self.SEEDREAM_BACKGROUND_OPTIONS else "auto"
+
+        def normalize_seedream_layer_resolution(value: Any) -> str:
+            normalized = str(value if value is not None else "auto").strip()
+            if normalized.lower() in {"", "auto", "自动"}:
+                return "auto"
+            upper = normalized.upper()
+            return upper if upper in self.SEEDREAM_RESOLUTION_ORDER else "auto"
+
+        def normalize_seedream_layer_output_format(value: Any) -> str:
+            normalized = str(value or "png").strip().lower()
+            return normalized if normalized in {"png", "jpeg"} else "png"
+
+        def normalize_seedream_safety_identifier(value: Any) -> str:
+            return str(value or "").strip()[:64]
+
         def normalize_default_resolution(value: Any) -> str:
             return str(value or "auto").strip() or "auto"
 
@@ -4187,6 +4339,14 @@ class FigurineProPlugin(Star):
                 api_key_tag: Any = "默认",
                 request_model_name: Any = "",
                 raw_entry: Any = None,
+                seedream_background: Any = "auto",
+                seedream_safety_identifier: Any = "",
+                seedream_layer_resolution: Any = "auto",
+                seedream_layer_max_images: Any = 30,
+                seedream_layer_text_recognition: Any = False,
+                seedream_layer_output_format: Any = "png",
+                seedream_layer_watermark: Any = False,
+                seedream_layer_show_metadata: Any = False,
         ):
             model_name = str(model or "").strip()
             if not model_name:
@@ -4201,6 +4361,34 @@ class FigurineProPlugin(Star):
                 "moderation": normalize_option(moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
                 "gpt_background": normalize_gpt_background(gpt_background),
                 "input_fidelity": normalize_option(input_fidelity, self.IMAGE_INPUT_FIDELITY_OPTIONS, "auto"),
+                "gpt_complexity": normalize_option(
+                    get_value(entry, "gpt_complexity", "complexity", "复杂度", default="auto"),
+                    self.GPT_COMPLEXITY_OPTIONS,
+                    "auto",
+                ),
+                "gpt_output_format": normalize_option(
+                    get_value(entry, "gpt_output_format", "输出格式", default="auto"),
+                    self.GPT_OUTPUT_FORMAT_OPTIONS,
+                    "auto",
+                ),
+                "gpt_output_compression": min(
+                    100,
+                    _normalize_nonnegative_int(
+                        get_value(entry, "gpt_output_compression", "输出压缩率", default=0)
+                    ),
+                ),
+                "gpt_frame_count": min(
+                    16,
+                    _normalize_nonnegative_int(
+                        get_value(entry, "gpt_frame_count", "GIF帧数", default=0)
+                    ),
+                ),
+                "gpt_frame_duration_ms": min(
+                    2000,
+                    _normalize_nonnegative_int(
+                        get_value(entry, "gpt_frame_duration_ms", "GIF每帧时长", default=0)
+                    ),
+                ),
                 "adaptive_aspect_ratio": normalize_bool(adaptive_aspect_ratio),
                 "adaptive_resolution": normalize_resolution(adaptive_resolution),
                 "auto_upgrade_1k_adaptive_resolution": auto_upgrade_1k,
@@ -4240,6 +4428,22 @@ class FigurineProPlugin(Star):
                 "seedream_max_side_2000": normalize_bool(seedream_max_side_2000),
                 "seedream_side_over_2000_auto_2k": normalize_bool(seedream_side_over_2000_auto_2k),
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
+                "seedream_background": normalize_seedream_background(seedream_background),
+                "seedream_safety_identifier": normalize_seedream_safety_identifier(seedream_safety_identifier),
+                "enable_seedream_layer_parameters": enabled_field == "enable_seedream_layer_parameters",
+                "seedream_layer_resolution": normalize_seedream_layer_resolution(seedream_layer_resolution),
+                "seedream_layer_max_images": max(
+                    self.SEEDREAM_LAYER_MAX_IMAGES_MIN,
+                    min(
+                        self.SEEDREAM_LAYER_MAX_IMAGES_LIMIT,
+                        _normalize_nonnegative_int(seedream_layer_max_images, self.SEEDREAM_LAYER_MAX_IMAGES_DEFAULT)
+                        or self.SEEDREAM_LAYER_MAX_IMAGES_DEFAULT,
+                    ),
+                ),
+                "seedream_layer_text_recognition": normalize_bool(seedream_layer_text_recognition),
+                "seedream_layer_output_format": normalize_seedream_layer_output_format(seedream_layer_output_format),
+                "seedream_layer_watermark": normalize_bool(seedream_layer_watermark),
+                "seedream_layer_show_metadata": normalize_bool(seedream_layer_show_metadata),
                 "enable_omni_parameters": enabled_field == "enable_omni_parameters",
                 "omni_model_template": normalize_omni_text(
                     get_value(entry, "omni_model_template", "Omni实际模型名模板", "实际模型名模板"),
@@ -4495,6 +4699,14 @@ class FigurineProPlugin(Star):
                         get_value(parameters, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
                         get_value(parameters, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
                         raw_entry=parameters,
+                seedream_background=get_value(parameters, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
+                seedream_safety_identifier=get_value(parameters, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
+                seedream_layer_resolution=get_value(parameters, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
+                seedream_layer_max_images=get_value(parameters, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
+                seedream_layer_text_recognition=get_value(parameters, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
+                seedream_layer_output_format=get_value(parameters, "seedream_layer_output_format", "图层拆分输出格式", default="png"),
+                seedream_layer_watermark=get_value(parameters, "seedream_layer_watermark", "图层拆分水印", default=False),
+                seedream_layer_show_metadata=get_value(parameters, "seedream_layer_show_metadata", "图层拆分显示图层信息", default=False),
                     )
             return mapping
 
@@ -4680,6 +4892,14 @@ class FigurineProPlugin(Star):
                 get_value(item, "api_key_tag", "绑定Key", "绑定key", "key_tag", default="默认"),
                 get_value(item, "request_model_name", "实际请求模型名", "请求模型名", "实际模型名", default=""),
                 raw_entry=item,
+                seedream_background=get_value(item, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
+                seedream_safety_identifier=get_value(item, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
+                seedream_layer_resolution=get_value(item, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
+                seedream_layer_max_images=get_value(item, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
+                seedream_layer_text_recognition=get_value(item, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
+                seedream_layer_output_format=get_value(item, "seedream_layer_output_format", "图层拆分输出格式", default="png"),
+                seedream_layer_watermark=get_value(item, "seedream_layer_watermark", "图层拆分水印", default=False),
+                seedream_layer_show_metadata=get_value(item, "seedream_layer_show_metadata", "图层拆分显示图层信息", default=False),
             )
 
         return mapping
@@ -4698,20 +4918,50 @@ class FigurineProPlugin(Star):
             model_name: str,
             parameters: Optional[Dict[str, Any]] = None,
             image_bytes_list: Optional[List[bytes]] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         parameters = self._parameters_for_request(model_name, parameters)
         if not parameters or not parameters.get("enable_gpt_parameters"):
             return {}
-        result = {
+        result: Dict[str, Any] = {
             "quality": parameters["quality"],
             "moderation": parameters["moderation"],
         }
+
+        # GPT Image 2.6：complexity（不额外收费，auto=不发送，由模型默认 high）
+        complexity = str(parameters.get("gpt_complexity") or "auto").strip().lower()
+        if complexity in {"low", "medium", "high"}:
+            result["complexity"] = complexity
+
+        # 输出格式：auto=不发送；png/jpeg/webp/gif/svg
+        output_format = str(parameters.get("gpt_output_format") or "auto").strip().lower()
+        if output_format not in {"png", "jpeg", "webp", "gif", "svg"}:
+            output_format = "auto"
+
         background = parameters.get("gpt_background") or "auto"
         if background != "auto":
             result["background"] = background
             if background == "transparent":
-                # 透明背景仅支持 png/webp 输出，显式锁定 png，避免网关默认 jpeg
-                result["output_format"] = "png"
+                # 透明背景仅支持 png/webp，否则锁定 png，避免网关默认 jpeg
+                output_format = output_format if output_format in {"png", "webp"} else "png"
+
+        if output_format != "auto":
+            result["output_format"] = output_format
+
+        # 压缩率仅 jpeg/webp 支持
+        if output_format in {"jpeg", "webp"}:
+            compression = _normalize_nonnegative_int(parameters.get("gpt_output_compression", 0))
+            if 0 < compression <= 100:
+                result["output_compression"] = compression
+
+        # GIF 帧参数仅 gif 支持
+        if output_format == "gif":
+            frame_count = _normalize_nonnegative_int(parameters.get("gpt_frame_count", 0))
+            frame_duration = _normalize_nonnegative_int(parameters.get("gpt_frame_duration_ms", 0))
+            if 2 <= frame_count <= 16:
+                result["frame_count"] = frame_count
+            if 20 <= frame_duration <= 2000:
+                result["frame_duration_ms"] = frame_duration
+
         if image_bytes_list:
             input_fidelity = parameters.get("input_fidelity") or "auto"
             if input_fidelity != "auto":
@@ -4741,6 +4991,68 @@ class FigurineProPlugin(Star):
             return None
         return parameters
 
+    def _get_seedream_layer_parameters(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """图层拆分参数模式（与生图模式互斥，单独一套参数）。"""
+        parameters = self._parameters_for_request(model_name, parameters)
+        if not parameters:
+            return None
+        if parameters.get("enable_seedream_layer_parameters"):
+            return parameters
+        if str(parameters.get("parameter_mode") or "").strip().lower() == "seedream_layer":
+            return parameters
+        return None
+
+    def _is_seedream_layer_request(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        return self._get_seedream_layer_parameters(model_name, parameters) is not None
+
+    @staticmethod
+    def _seedream_model_family(model_name: str) -> str:
+        """按模型名识别 Seedream 版本，只适配 5.5 与 5.0 pro。
+
+        - 5.5：模型名含 5.5 / 5-5 / 5_5（如 seedream-v5.5、doubao-seedream-5-5-261028）
+        - 5.0pro：含 5.0-pro / 5-0-pro / 5-pro / v5-pro
+        - 其它（4.x、5.0 lite/flash、无版本关键词）：返回 legacy，不发送任何新参数
+        """
+        name = str(model_name or "").strip().lower()
+        if not name:
+            return "legacy"
+        if re.search(r"(?:^|[^0-9])5[._\-]?5(?:[^0-9]|$)", name):
+            return "5.5"
+        if re.search(r"5[._\-]?0[._\-]?(?:pro|专业)", name) or re.search(r"(?:^|[^0-9])5[._\-]?pro", name):
+            return "5.0pro"
+        return "legacy"
+
+    def _seedream_capabilities(self, model_name: str) -> Dict[str, Any]:
+        """按模型名返回 Seedream 参数能力表（官方文档：Seedream 5.5 / 5.0 / 4.x 参数支持差异）。"""
+        family = self._seedream_model_family(model_name)
+        is_55 = family == "5.5"
+        is_50pro = family == "5.0pro"
+        return {
+            "family": family,
+            # background：5.5 支持 auto/transparent/opaque；5.0 pro 仅 transparent/opaque
+            "background": is_55 or is_50pro,
+            "background_auto": is_55,
+            # tools=[{type:web_search}]：5.5 与 5.0 pro 均不支持，更早模型不再适配 → 永不发送
+            "web_search": False,
+            # optimize_prompt_options.mode=fast：5.0 pro 支持，5.5 仅 standard
+            "fast_prompt": is_50pro,
+            # 图层拆分：5.5（1+99）、5.0 pro（1+16）
+            "layer_decomposition": is_55 or is_50pro,
+            "text_recognition": is_55,
+            "max_layers": self.SEEDREAM_LAYER_MAX_LAYERS.get(family, 0),
+            # safety_identifier：5.5 / 5.0 pro
+            "safety_identifier": is_55 or is_50pro,
+            "output_format_default": "png" if is_55 else "jpeg",
+        }
+
     def _get_reference_image_limit(
             self,
             model_name: str,
@@ -4748,6 +5060,9 @@ class FigurineProPlugin(Star):
     ) -> int:
         global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
         parameters = self._parameters_for_request(model_name, parameters)
+        # 图层拆分官方只允许 1 张待拆分图
+        if self._get_seedream_layer_parameters(model_name, parameters):
+            return 1
         model_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
         return min(model_limit, global_limit) if model_limit else global_limit
 
@@ -4759,6 +5074,9 @@ class FigurineProPlugin(Star):
     ) -> List[bytes]:
         global_limit = _normalize_positive_int(self.conf.get("max_images_count", 10), 10)
         parameters = self._parameters_for_request(model_name, parameters)
+        # 图层拆分官方只允许 1 张待拆分图，忽略超限加费逻辑
+        if self._get_seedream_layer_parameters(model_name, parameters):
+            return image_bytes_list[:1]
         configured_limit = _normalize_nonnegative_int((parameters or {}).get("reference_image_limit", 0))
         quota = _normalize_nonnegative_int((parameters or {}).get("extra_reference_image_quota", 0))
         if configured_limit > 0 and quota > 0:
@@ -5509,16 +5827,60 @@ class FigurineProPlugin(Star):
         if not parameters:
             return {}
 
+        caps = self._seedream_capabilities(model_name)
         request: Dict[str, Any] = {
             "watermark": parameters["seedream_watermark"],
         }
         if parameters["seedream_send_output_format"]:
             request["output_format"] = parameters["seedream_output_format"]
+
+        # 提示词优化模式：5.5 只支持 standard，未知版本不发送陌生枚举 → 统一转成 standard
+        prompt_mode = str(parameters.get("seedream_optimize_prompt_mode") or "standard").strip().lower()
+        if prompt_mode not in {"standard", "fast"}:
+            prompt_mode = "standard"
+        if prompt_mode == "fast" and not caps["fast_prompt"]:
+            logger.info(
+                f"Seedream 模型 {model_name}（版本={caps['family']}）不支持 fast 提示词优化，已自动转为 standard"
+            )
+            prompt_mode = "standard"
         request["optimize_prompt_options"] = {
-            "mode": parameters["seedream_optimize_prompt_mode"],
+            "mode": prompt_mode,
         }
+
+        # 联网搜索：5.5 / 5.0 pro 官方均不支持 tools，更早模型不再适配 → 永不发送
         if parameters["seedream_web_search"]:
-            request["tools"] = [{"type": "web_search"}]
+            if caps["web_search"]:
+                request["tools"] = [{"type": "web_search"}]
+            else:
+                logger.info(
+                    f"Seedream 模型 {model_name}（版本={caps['family']}）不支持联网搜索，已跳过 tools 参数"
+                )
+
+        # 透明通道（v5.5 新增）：auto 仅 5.5 支持；5.0 pro 仅 transparent/opaque
+        background = str(parameters.get("seedream_background") or "auto").strip().lower()
+        if background not in {"auto", "transparent", "opaque"}:
+            background = "auto"
+        if background == "auto":
+            if caps["background_auto"]:
+                request["background"] = "auto"
+        elif caps["background"]:
+            request["background"] = background
+            if background == "transparent":
+                # 官方：background=transparent 与 output_format=jpeg 同时出现会直接报错
+                if str(request.get("output_format") or caps["output_format_default"]).lower() == "jpeg":
+                    logger.info(
+                        f"Seedream 模型 {model_name} 透明背景与 jpeg 冲突，已自动改为 output_format=png"
+                    )
+                request["output_format"] = "png"
+        else:
+            logger.info(
+                f"Seedream 模型 {model_name}（版本={caps['family']}）不支持 background 参数，已跳过"
+            )
+
+        # 终端用户标识（v5.5 新增，5.5 / 5.0 pro 支持）
+        safety_identifier = str(parameters.get("seedream_safety_identifier") or "").strip()
+        if safety_identifier and caps["safety_identifier"]:
+            request["safety_identifier"] = safety_identifier[:64]
 
         selected_aspect_ratio = self._get_seedream_selected_aspect_ratio(
             image_bytes_list,
@@ -5540,6 +5902,66 @@ class FigurineProPlugin(Star):
             )
         else:
             request["size"] = parameters["seedream_resolution"]
+        return request
+
+    # ------------------------------------------------------------------
+    # Seedream 图层拆分（独立参数模式：只负责拆分，不做生图参数）
+    # ------------------------------------------------------------------
+    def _get_seedream_layer_request_parameters(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """组装图层拆分请求参数（layer_decomposition / layer_decomposition_options / size / output_format / watermark）。
+
+        注意：图层拆分场景官方不接受 background，size 只能传 1K/1.5K/2K/auto，
+        且只允许输入 1 张待拆分图片。
+        """
+        parameters = self._get_seedream_layer_parameters(model_name, parameters)
+        if not parameters:
+            return {}
+
+        caps = self._seedream_capabilities(model_name)
+        if not caps["layer_decomposition"]:
+            logger.warning(
+                f"Seedream 模型 {model_name}（版本={caps['family']}）不支持图层拆分，仍按请求发送 layer_decomposition"
+            )
+
+        resolution = str(parameters.get("seedream_layer_resolution") or "auto").strip()
+        size = "auto" if resolution.lower() in {"auto", "自动", ""} else resolution.upper()
+        if size != "auto" and size not in self.SEEDREAM_RESOLUTION_ORDER:
+            size = "auto"
+
+        max_images = _normalize_nonnegative_int(
+            parameters.get("seedream_layer_max_images", self.SEEDREAM_LAYER_MAX_IMAGES_DEFAULT)
+        )
+        if max_images <= 0:
+            max_images = self.SEEDREAM_LAYER_MAX_IMAGES_DEFAULT
+        max_images = max(
+            self.SEEDREAM_LAYER_MAX_IMAGES_MIN,
+            min(self.SEEDREAM_LAYER_MAX_IMAGES_LIMIT, max_images),
+        )
+
+        options: Dict[str, Any] = {"max_images": max_images}
+        if parameters.get("seedream_layer_text_recognition") and caps["text_recognition"]:
+            options["text_recognition"] = True
+        elif parameters.get("seedream_layer_text_recognition"):
+            logger.info(
+                f"Seedream 模型 {model_name}（版本={caps['family']}）不支持富文本 OCR，已跳过 text_recognition"
+            )
+
+        output_format = str(parameters.get("seedream_layer_output_format") or "png").strip().lower()
+        if output_format not in {"png", "jpeg"}:
+            output_format = "png"
+
+        request: Dict[str, Any] = {
+            "layer_decomposition": True,
+            "layer_decomposition_options": options,
+            "size": size,
+            "output_format": output_format,
+            "watermark": bool(parameters.get("seedream_layer_watermark", False)),
+        }
         return request
 
     # ------------------------------------------------------------------
@@ -5690,7 +6112,7 @@ class FigurineProPlugin(Star):
             aspect_ratio: Optional[str] = None,
             force_aspect_ratio: bool = False,
             parameters: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, str]:
+    ) -> Dict[str, Any]:
         model_parameters = self._parameters_for_request(model_name, parameters)
         if not model_parameters:
             return {}
@@ -6011,6 +6433,13 @@ class FigurineProPlugin(Star):
             return "chat_completions"
 
         effective_parameters = self._parameters_for_request(normalized_model, parameters)
+        # 图层拆分只能走 Images Generations（官方 layer_decomposition 仅该端点支持）
+        if (
+                effective_parameters
+                and self._get_seedream_layer_parameters(normalized_model, effective_parameters)
+                and normalized_model in self._get_endpoint_models("images_generations")
+        ):
+            return "images_generations"
         if has_images:
             if (
                     effective_parameters
@@ -6221,20 +6650,26 @@ class FigurineProPlugin(Star):
         note: str = "",
         request_context: Optional[Dict[str, Any]] = None,
     ):
-        identity_snapshot = await self._snapshot_event_identity(event, sender_id, group_id)
         if not self.usage_store:
             if charged_amount:
-                await self._deduct_generation_cost(
-                    deduction_source, sender_id, group_id, charged_amount
-                )
+                try:
+                    await self._deduct_generation_cost(
+                        deduction_source, sender_id, group_id, charged_amount
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.error(f"回退 JSON 扣费失败: {exc}")
             return
-        api_route, endpoint_type = self._get_usage_endpoint_details(
-            actual_model,
-            has_images,
-            source_model=logical_model,
-            request_context=request_context,
-        )
+
         try:
+            identity_snapshot = await self._snapshot_event_identity(event, sender_id, group_id)
+            api_route, endpoint_type = self._get_usage_endpoint_details(
+                actual_model,
+                has_images,
+                source_model=logical_model,
+                request_context=request_context,
+            )
             settlement = await self.usage_store.settle_generation(
                 timestamp=datetime.now().isoformat(timespec="seconds"),
                 source=source,
@@ -6262,12 +6697,19 @@ class FigurineProPlugin(Star):
             elif resulting_balance is not None and subject_type == "group" and subject_id:
                 self.group_balances[subject_id] = int(resulting_balance)
                 await self._save_group_balances()
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             logger.error(f"记录用量账本失败，回退 JSON 扣费: {exc}")
             if charged_amount:
-                await self._deduct_generation_cost(
-                    deduction_source, sender_id, group_id, charged_amount
-                )
+                try:
+                    await self._deduct_generation_cost(
+                        deduction_source, sender_id, group_id, charged_amount
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as fallback_exc:
+                    logger.error(f"回退 JSON 扣费失败: {fallback_exc}")
 
     async def _adjust_usage_balance(
         self,
@@ -6694,6 +7136,103 @@ class FigurineProPlugin(Star):
         urls = self._extract_image_urls_from_response(data)
         return urls[0] if urls else None
 
+    def _extract_seedream_layer_items(self, data: Any) -> List[Dict[str, Any]]:
+        """解析 Seedream 图层拆分响应。
+
+        官方响应 data[] 每项包含：url / b64_json、size、output_format、background、
+        z_index（底图固定 0）、name、description、bounding_box{absolute,normalized}、
+        text_recognition{text, lines[].{bounding_box, runs[].style}}。
+        返回按 z_index 升序排列的条目列表（底图在前）。
+        """
+        if not isinstance(data, dict):
+            return []
+        raw_items = data.get("data")
+        if not isinstance(raw_items, list):
+            return []
+
+        items: List[Dict[str, Any]] = []
+        for index, entry in enumerate(raw_items):
+            if not isinstance(entry, dict):
+                continue
+
+            url = ""
+            for key in ("url", "image_url", "imageUrl"):
+                value = entry.get(key)
+                if isinstance(value, str) and value.strip():
+                    url = value.strip()
+                    break
+
+            b64_data = ""
+            if not url:
+                for key in ("b64_json", "image_base64", "base64"):
+                    value = entry.get(key)
+                    if isinstance(value, str) and value.strip():
+                        b64_data = value.strip()
+                        break
+
+            if not url and not b64_data:
+                continue
+
+            z_index_raw = entry.get("z_index")
+            try:
+                z_index = int(z_index_raw)
+            except (TypeError, ValueError):
+                z_index = index
+
+            bounding_box = entry.get("bounding_box")
+            text_recognition = entry.get("text_recognition")
+
+            items.append({
+                "url": url,
+                "b64": b64_data,
+                "z_index": z_index,
+                "name": str(entry.get("name") or "").strip(),
+                "description": str(entry.get("description") or "").strip(),
+                "bounding_box": bounding_box if isinstance(bounding_box, dict) else {},
+                "text_recognition": text_recognition if isinstance(text_recognition, dict) else {},
+                "output_format": str(entry.get("output_format") or "").strip().lower(),
+                "background": str(entry.get("background") or "").strip().lower(),
+                "size": str(entry.get("size") or "").strip(),
+                "error": entry.get("error") if isinstance(entry.get("error"), dict) else {},
+            })
+
+        items.sort(key=lambda item: item["z_index"])
+        return items
+
+    async def _download_seedream_layer_bundle(
+            self,
+            items: List[Dict[str, Any]],
+    ) -> Optional[LayerImageBundle]:
+        """下载图层拆分全部输出图（保持 z_index 顺序），任一张失败则跳过并记录。"""
+        images: List[bytes] = []
+        kept: List[Dict[str, Any]] = []
+
+        for item in items:
+            image_bytes: Optional[bytes] = None
+            source = str(item.get("url") or "")
+            if source.startswith("data:"):
+                try:
+                    image_bytes = self._decode_data_url_image(source)
+                except Exception as exc:
+                    logger.warning(f"图层拆分 Base64 解码失败 ({exc})，跳过 z_index={item.get('z_index')}")
+            elif source:
+                image_bytes = await self.iwf._download_image(source)
+                if not image_bytes:
+                    logger.warning(f"图层拆分图片下载失败，跳过 z_index={item.get('z_index')}")
+            elif item.get("b64"):
+                try:
+                    image_bytes = base64.b64decode(item["b64"])
+                except Exception as exc:
+                    logger.warning(f"图层拆分 Base64 解码失败 ({exc})，跳过 z_index={item.get('z_index')}")
+
+            if image_bytes:
+                images.append(image_bytes)
+                kept.append(item)
+
+        if not images:
+            return None
+        return LayerImageBundle(images[0], images, kept)
+
     @staticmethod
     def _detect_generic_endpoint_type(url: str) -> str:
         path = urlparse(url).path.rstrip("/").lower()
@@ -6912,8 +7451,15 @@ class FigurineProPlugin(Star):
             "model": model_name,
             "prompt": final_prompt,
         }
-        seedream_parameters = self._get_seedream_parameters(model_name, parameters)
-        if seedream_parameters:
+        seedream_layer_parameters = self._get_seedream_layer_parameters(model_name, parameters)
+        seedream_parameters = None if seedream_layer_parameters else self._get_seedream_parameters(model_name, parameters)
+        if seedream_layer_parameters:
+            payload.update(self._get_seedream_layer_request_parameters(
+                model_name,
+                image_bytes_list,
+                parameters,
+            ))
+        elif seedream_parameters:
             payload.update(self._get_seedream_request_parameters(
                 model_name,
                 image_bytes_list,
@@ -6935,14 +7481,35 @@ class FigurineProPlugin(Star):
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
-            if seedream_parameters:
+            if seedream_layer_parameters:
+                # 图层拆分只允许输入 1 张待拆分图片
+                if len(image_inputs) > 1:
+                    logger.warning(
+                        f"Seedream 图层拆分仅支持 1 张输入图片，已忽略其余 {len(image_inputs) - 1} 张"
+                    )
+                payload["image"] = image_inputs[0]
+            elif seedream_parameters:
                 payload["image"] = image_inputs[0] if len(image_inputs) == 1 else image_inputs
             elif len(image_inputs) == 1:
                 payload["image"] = image_inputs[0]
             else:
                 payload["images"] = image_inputs
 
+        # SVG 输出要求 n=1
+        if payload.get("output_format") == "svg":
+            payload["n"] = 1
+
         return payload
+
+    @staticmethod
+    def _sanitize_edits_image_parameters(parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """编辑端点不支持 GIF/SVG 与帧参数，过滤掉这些字段。"""
+        sanitized = dict(parameters)
+        if str(sanitized.get("output_format") or "").lower() in {"gif", "svg"}:
+            sanitized.pop("output_format", None)
+        sanitized.pop("frame_count", None)
+        sanitized.pop("frame_duration_ms", None)
+        return sanitized
 
     def _build_generic_images_edits_form(
             self,
@@ -6959,15 +7526,18 @@ class FigurineProPlugin(Star):
         form.add_field("prompt", final_prompt)
         if not self._should_omit_n_parameter(model_name, parameters):
             form.add_field("n", "1")
-        for field_name, value in self._get_image_request_parameters(
+        edits_parameters = self._sanitize_edits_image_parameters(
+            self._get_image_request_parameters(
                 model_name,
                 image_bytes_list,
                 resolution,
                 aspect_ratio,
                 force_aspect_ratio,
                 parameters,
-        ).items():
-            form.add_field(field_name, value)
+            )
+        )
+        for field_name, value in edits_parameters.items():
+            form.add_field(field_name, str(value))
 
         for idx, image_bytes in enumerate(image_bytes_list):
             mime_type = self._guess_image_mime_type(image_bytes)
@@ -7051,8 +7621,7 @@ class FigurineProPlugin(Star):
             parameters,
         )
 
-    def _get_failure_deduction_status_codes(self) -> set[int]:
-        raw_codes = self.conf.get("failure_deduction_status_codes", [400])
+    def _normalize_status_code_set(self, raw_codes: Any) -> set[int]:
         if isinstance(raw_codes, str):
             items: List[Any] = re.split(r"[,，\s]+", raw_codes)
         elif isinstance(raw_codes, list):
@@ -7072,6 +7641,18 @@ class FigurineProPlugin(Star):
                 status_codes.add(status_code)
         return status_codes
 
+    def _get_failure_deduction_status_codes(self) -> set[int]:
+        """仅用于“失败是否扣费”，不再参与停止热备。"""
+        return self._normalize_status_code_set(
+            self.conf.get("failure_deduction_status_codes", [400])
+        )
+
+    def _get_failover_stop_status_codes(self) -> set[int]:
+        """显式指定“命中即停止热备”的状态码（默认空，避免 400/413/451 误停）。"""
+        return self._normalize_status_code_set(
+            self.conf.get("failover_stop_status_codes", [])
+        )
+
     def _should_deduct_generation_result(
             self,
             result: Any,
@@ -7081,7 +7662,9 @@ class FigurineProPlugin(Star):
     ) -> bool:
         if isinstance(result, bytes):
             return True
-        if not self._should_send_content_policy_warning(http_status, result):
+        is_violation = self._is_content_policy_violation(result, http_status)
+        hit_failure_code = http_status in self._get_failure_deduction_status_codes()
+        if not is_violation and not hit_failure_code:
             return False
 
         parameters = self._parameters_for_request(model_name, parameters)
@@ -7094,14 +7677,30 @@ class FigurineProPlugin(Star):
         return bool(configured_value)
 
     def _should_send_content_policy_warning(self, http_status: int, result: Any = None) -> bool:
-        return (
-            self._is_content_policy_violation(result)
-            or http_status in self._get_failure_deduction_status_codes()
-        )
+        """仅当确认是内容安全违规时才发送违规警告（不再把失败状态码当作违规）。"""
+        return self._is_content_policy_violation(result, http_status)
 
     def _should_stop_model_failover(self, http_status: int, result: Any = None) -> bool:
-        """违规或命中错误码时，直接返回警告而非继续热备请求。"""
-        return self._should_send_content_policy_warning(http_status, result)
+        """仅在确认内容违规，或状态码命中 failover_stop_status_codes（默认空）时停止热备。"""
+        if self._is_content_policy_violation(result, http_status):
+            return True
+        return http_status in self._get_failover_stop_status_codes()
+
+    def _get_model_failover_delay_seconds(self) -> float:
+        """热备切换之间的延迟（秒），用于错峰，至少 100ms。
+
+        可通过配置 model_failover_delay_ms 调整；低于 100ms 会被钳制为 100ms。
+        """
+        raw = self.conf.get(
+            "model_failover_delay_ms",
+            self.MODEL_FAILOVER_DELAY_MS_DEFAULT,
+        )
+        try:
+            delay_ms = int(raw)
+        except (TypeError, ValueError):
+            delay_ms = self.MODEL_FAILOVER_DELAY_MS_DEFAULT
+        delay_ms = max(self.MODEL_FAILOVER_DELAY_MS_DEFAULT, delay_ms)
+        return delay_ms / 1000.0
 
     async def _deduct_generation_cost(
             self,
@@ -7387,6 +7986,94 @@ class FigurineProPlugin(Star):
             logger.error(f"LLM 工具图片发送失败，不会重试以避免重复发送: {exc}")
             return False
 
+    # ------------------------------------------------------------------
+    # 图层拆分：合并转发发送（不引用消息）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _get_forward_bot_uin(event: AstrMessageEvent) -> str:
+        """取合并转发节点的 uin（机器人自身 QQ 号）。"""
+        try:
+            if hasattr(event, "robot") and event.robot:
+                return str(event.robot.id)
+            if hasattr(event, "bot") and hasattr(event.bot, "self_id"):
+                return str(event.bot.self_id)
+        except Exception:
+            pass
+        return "2854196310"
+
+    @classmethod
+    def _render_layer_metadata(cls, item: Dict[str, Any], index: int, total: int) -> str:
+        """渲染单个图层的元数据文本（z_index / 名称 / 描述 / 尺寸 / 坐标 / OCR）。"""
+        parts = [f"图层 {index + 1}/{total}"]
+        z_index = item.get("z_index")
+        parts.append(f"z_index={z_index}")
+        if item.get("size"):
+            parts.append(f"尺寸={item['size']}")
+        if item.get("name"):
+            parts.append(f"名称={item['name']}")
+        if item.get("description"):
+            parts.append(f"描述={item['description']}")
+        bounding_box = item.get("bounding_box") or {}
+        absolute = bounding_box.get("absolute") if isinstance(bounding_box, dict) else None
+        if isinstance(absolute, (list, tuple)) and len(absolute) == 4:
+            parts.append("坐标=" + ",".join(str(value) for value in absolute))
+        text_recognition = item.get("text_recognition") or {}
+        if isinstance(text_recognition, dict) and text_recognition.get("text"):
+            ocr_text = str(text_recognition.get("text")).replace("\n", " / ")
+            parts.append(f"文字={ocr_text[:80]}")
+        return " | ".join(parts)
+
+    def _build_layer_forward_result(
+            self,
+            event: AstrMessageEvent,
+            bundle: "LayerImageBundle",
+            caption: str,
+            show_metadata: bool = False,
+    ):
+        """构建图层拆分的合并转发消息（Nodes），不包含 Reply 引用段。"""
+        bot_uin = self._get_forward_bot_uin(event)
+        total = len(bundle.images)
+        nodes: List[Any] = []
+        for index, image_bytes in enumerate(bundle.images):
+            item = bundle.items[index] if index < len(bundle.items) else {}
+            content: List[Any] = [Image.fromBytes(image_bytes)]
+            if show_metadata:
+                content.append(Plain(self._render_layer_metadata(item, index, total)))
+            node_name = str(item.get("name") or f"图层 {index + 1}").strip()[:32] or f"图层 {index + 1}"
+            nodes.append(Node(name=node_name, uin=bot_uin, content=content))
+        if caption:
+            nodes.append(Node(name="说明", uin=bot_uin, content=[Plain(caption)]))
+        return event.chain_result([Nodes(nodes=nodes)])
+
+    async def _send_layer_bundle(
+            self,
+            event: AstrMessageEvent,
+            bundle: "LayerImageBundle",
+            caption: str,
+            label: str = "",
+            show_metadata: bool = False,
+    ) -> Tuple[bool, Optional[Path]]:
+        """优先合并转发全部图层；失败时回退为逐张发送（同样不引用消息）。"""
+        try:
+            await event.send(self._build_layer_forward_result(event, bundle, caption, show_metadata))
+            return True, None
+        except Exception as exc:
+            logger.warning(f"图层拆分合并转发失败 ({exc})，回退为逐张发送")
+
+        saved_file: Optional[Path] = None
+        sent_any = False
+        for index, image_bytes in enumerate(bundle.images):
+            chain: List[Any] = [Image.fromBytes(image_bytes)]
+            if index == 0 and caption:
+                chain.append(Plain(caption))
+            try:
+                await event.send(event.chain_result(chain))
+                sent_any = True
+            except Exception as exc:
+                logger.error(f"图层拆分第 {index + 1} 张发送失败 ({exc})")
+                saved_file = self._save_failed_image(image_bytes, label=label)
+        return sent_any, saved_file
+
     @staticmethod
     def _mask_sensitive_text(text: str) -> str:
         text = re.sub(r"sk-[A-Za-z0-9_-]{8,}", lambda m: f"{m.group(0)[:7]}***", text)
@@ -7412,18 +8099,27 @@ class FigurineProPlugin(Star):
     @staticmethod
     def _contains_content_policy_violation_text(text: Any) -> bool:
         normalized = str(text or "").lower()
-        markers = (
+        if not normalized.strip():
+            return False
+        # 服务/限流类故障词优先排除，避免把“safety system overloaded”等误判为违规
+        exclusion_markers = (
+            "overload", "overloaded", "unavailable", "timeout", "timed out",
+            "service error", "internal error", "connection failed", "temporarily",
+            "rate limit", "quota", "too many requests",
+            "服务超时", "过载", "不可用", "限流", "繁忙",
+        )
+        if any(marker in normalized for marker in exclusion_markers):
+            return False
+        precise_markers = (
             "content_policy_violation",
-            "content policy violation",
-            "content policy",
-            "content filter",
-            "content_filter",
+            "violated content policy",
+            "blocked by safety",
+            "flagged as sensitive",
             "safety block",
             "safety_block",
-            "safety filter",
-            "safety system",
+            "content filter",
+            "content_filter",
             "policy violation",
-            "content moderation",
             "moderation block",
             "blocked content",
             "unsafe content",
@@ -7435,10 +8131,10 @@ class FigurineProPlugin(Star):
             "敏感内容",
             "不当内容",
         )
-        return any(marker in normalized for marker in markers)
+        return any(marker in normalized for marker in precise_markers)
 
-    def _is_content_policy_violation(self, result: Any) -> bool:
-        """识别上游返回的内容安全拦截。"""
+    def _is_content_policy_violation(self, result: Any, http_status: Optional[int] = None) -> bool:
+        """识别上游返回的内容安全拦截（结构化优先、状态码硬门禁、关键词精确兜底）。"""
         if not isinstance(result, dict):
             return False
 
@@ -7451,6 +8147,16 @@ class FigurineProPlugin(Star):
             "policy_violation",
         }:
             return True
+
+        # 5xx / 429 属于服务或限流故障，绝不是内容违规（避免误杀可热备的错误）
+        status = http_status
+        if status is None:
+            try:
+                status = int(result.get("http_status") or 0)
+            except (TypeError, ValueError):
+                status = 0
+        if status == 429 or 500 <= status <= 599:
+            return False
 
         return self._contains_content_policy_violation_text(
             " ".join(
@@ -8491,22 +9197,39 @@ class FigurineProPlugin(Star):
                 f"orientation={cand_orientation}, upscale={cand_resolution or 'off'}, "
                 f"agent_ui={cand_agent_ui}, assets={n_img}图+{n_vid}视频"
             )
-            result, http_status, timings = await self._call_omni_video_once(
-                model_name=actual_model,
-                request_model_name=request_model_name,
-                prompt=final_prompt,
-                assets=assets_used,
-                request_context=context,
-                orientation=cand_orientation,
-                resolution=cand_resolution,
-                timeout=timeout,
-                upscale_pattern=upscale_pattern,
-                agent_ui=cand_agent_ui,
-                orig_video_pattern=orig_video_pattern,
-                on_upscale_start=_on_upscale_start,
-                on_preview_gif=_on_preview_gif,
-                on_orig_video=_on_orig_video,
-            )
+            try:
+                result, http_status, timings = await self._call_omni_video_once(
+                    model_name=actual_model,
+                    request_model_name=request_model_name,
+                    prompt=final_prompt,
+                    assets=assets_used,
+                    request_context=context,
+                    orientation=cand_orientation,
+                    resolution=cand_resolution,
+                    timeout=timeout,
+                    upscale_pattern=upscale_pattern,
+                    agent_ui=cand_agent_ui,
+                    orig_video_pattern=orig_video_pattern,
+                    on_upscale_start=_on_upscale_start,
+                    on_preview_gif=_on_preview_gif,
+                    on_orig_video=_on_orig_video,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    f"Omni 视频候选 {actual_model} 处理异常，转为错误并继续热备: {exc}",
+                    exc_info=True,
+                )
+                result = self._build_api_error(
+                    "internal_error",
+                    f"视频请求处理异常: {exc}",
+                    detail=traceback.format_exc(),
+                    model=actual_model,
+                    http_status=0,
+                )
+                http_status = 0
+                timings = {}
             last_error = result if isinstance(result, dict) else {}
             last_status = http_status
             last_model = actual_model
@@ -8596,6 +9319,10 @@ class FigurineProPlugin(Star):
                 )
             if self._should_stop_model_failover(http_status, result):
                 break
+            if index + 1 < len(candidate_contexts):
+                failover_delay = self._get_model_failover_delay_seconds()
+                if failover_delay > 0:
+                    await asyncio.sleep(failover_delay)
 
         message = str(last_error.get("message") or "视频生成失败")
         detail = str(last_error.get("detail") or "").strip()
@@ -8647,26 +9374,55 @@ class FigurineProPlugin(Star):
         last_context = self._get_request_context(source_model, source_model, bool(image_bytes_list))
 
         for index, candidate_model in enumerate(candidate_models):
-            request_context = self._get_request_context(
-                source_model,
-                candidate_model,
-                bool(image_bytes_list),
-            )
-            candidate_images = self._limit_reference_images(
-                candidate_model,
-                image_bytes_list,
-                request_context["parameters"],
-            )
-            request_context["image_bytes_list"] = candidate_images
-            result, http_status = await self._call_api_once(
-                candidate_images,
-                prompt,
-                override_model=candidate_model,
-                request_context=request_context,
-                resolution=resolution,
-                aspect_ratio=aspect_ratio,
-                force_aspect_ratio=force_aspect_ratio,
-            )
+            request_context: Optional[Dict[str, Any]] = None
+            candidate_images: List[bytes] = list(image_bytes_list or [])
+            try:
+                request_context = self._get_request_context(
+                    source_model,
+                    candidate_model,
+                    bool(image_bytes_list),
+                )
+                candidate_images = self._limit_reference_images(
+                    candidate_model,
+                    image_bytes_list,
+                    request_context["parameters"],
+                )
+                request_context["image_bytes_list"] = candidate_images
+                result, http_status = await self._call_api_once(
+                    candidate_images,
+                    prompt,
+                    override_model=candidate_model,
+                    request_context=request_context,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    force_aspect_ratio=force_aspect_ratio,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    f"候选模型 {candidate_model} 处理异常，转为错误并继续热备: {exc}",
+                    exc_info=True,
+                )
+                result = self._build_api_error(
+                    "internal_error",
+                    f"候选模型处理异常: {exc}",
+                    detail=traceback.format_exc(),
+                    model=candidate_model,
+                    http_status=0,
+                )
+                http_status = 0
+                if request_context is None:
+                    try:
+                        request_context = self._get_request_context(
+                            source_model, candidate_model, bool(image_bytes_list)
+                        )
+                    except Exception:
+                        request_context = {
+                            "actual_model": candidate_model,
+                            "image_bytes_list": candidate_images,
+                            "parameters": None,
+                        }
             if isinstance(result, bytes):
                 if index > 0:
                     logger.info(
@@ -8682,15 +9438,26 @@ class FigurineProPlugin(Star):
             last_result, last_status, last_context = result, http_status, request_context
             should_stop = self._should_stop_model_failover(http_status, result)
             if on_attempt and not should_stop and index + 1 < len(candidate_models):
-                await on_attempt(request_context["actual_model"], result, http_status, False)
+                try:
+                    await on_attempt(request_context["actual_model"], result, http_status, False)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        f"热备中间记账失败（已忽略并继续热备）: {exc}",
+                        exc_info=True,
+                    )
             if should_stop:
                 logger.warning(
-                    f"模型调用失败，命中违规内容或配置错误码并停止热备切换: "
+                    f"模型调用失败，命中内容违规或停止热备状态码，终止热备: "
                     f"source={source_model}, failed_model={candidate_model}, "
                     f"status={http_status}"
                 )
                 break
             if index + 1 < len(candidate_models):
+                failover_delay = self._get_model_failover_delay_seconds()
+                if failover_delay > 0:
+                    await asyncio.sleep(failover_delay)
                 error_type = result.get("error_type", "unknown") if isinstance(result, dict) else "unknown"
                 logger.warning(
                     f"模型调用失败，切换热备模型: source={source_model}, "
@@ -8705,6 +9472,50 @@ class FigurineProPlugin(Star):
         return last_result, last_status
 
     async def _call_api_once(
+            self,
+            image_bytes_list: List[bytes],
+            prompt: str,
+            override_model: str | None = None,
+            request_context: Optional[Dict[str, Any]] = None,
+            resolution: Optional[str] = None,
+            aspect_ratio: Optional[str] = None,
+            force_aspect_ratio: bool = False,
+    ) -> Tuple[bytes | str | Dict[str, Any], int]:
+        """单次请求的兜底包装：保证不向调用方抛出未捕获异常（CancelledError 除外）。"""
+        try:
+            return await self._call_api_once_impl(
+                image_bytes_list,
+                prompt,
+                override_model=override_model,
+                request_context=request_context,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                force_aspect_ratio=force_aspect_ratio,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            model_name = (
+                (request_context or {}).get("actual_model")
+                or override_model
+                or self.conf.get("model", "nano-banana")
+            )
+            logger.error(
+                f"单次请求准备/执行异常，已转为错误并允许热备继续: model={model_name}, err={exc}",
+                exc_info=True,
+            )
+            return (
+                self._build_api_error(
+                    "internal_error",
+                    f"请求处理异常: {exc}",
+                    detail=traceback.format_exc(),
+                    model=str(model_name or ""),
+                    http_status=0,
+                ),
+                0,
+            )
+
+    async def _call_api_once_impl(
             self,
             image_bytes_list: List[bytes],
             prompt: str,
@@ -8732,6 +9543,7 @@ class FigurineProPlugin(Star):
             or model_name
         ).strip() or model_name
         final_url = ""
+        base_url = ""
 
         def make_error(error_type: str, message: str, status: int = 0, **kwargs: Any) -> Tuple[Dict[str, Any], int]:
             return (
@@ -9068,7 +9880,7 @@ class FigurineProPlugin(Star):
                         )
                         error_type = (
                             "content_policy_violation"
-                            if self._is_content_policy_violation(provider_fields)
+                            if self._is_content_policy_violation(provider_fields, http_status)
                             else "upstream_error"
                         )
                         return make_error(
@@ -9089,6 +9901,20 @@ class FigurineProPlugin(Star):
                             provider_message=safety_reason,
                             request_id=request_id,
                         )
+
+                    # 图层拆分：一次性取回全部输出图 + 元数据，走合并转发
+                    if self._is_seedream_layer_request(model_name, parameters):
+                        layer_items = self._extract_seedream_layer_items(data)
+                        if layer_items:
+                            bundle = await self._download_seedream_layer_bundle(layer_items)
+                            if bundle is not None:
+                                logger.info(
+                                    f"Seedream 图层拆分完成: model={model_name}, "
+                                    f"images={len(bundle.images)}, "
+                                    f"z_index={[item.get('z_index') for item in bundle.items]}"
+                                )
+                                return (bundle, http_status)
+                            logger.warning("图层拆分响应未取到任何图片，回退到通用图片提取")
 
                     candidates = self._extract_image_urls_from_response(data)
                     url_or_b64 = candidates[0] if candidates else None
@@ -9707,7 +10533,16 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=display_label)
+            if isinstance(res, LayerImageBundle):
+                sent, failed_file = await self._send_layer_bundle(
+                    event,
+                    res,
+                    message_text,
+                    label=display_label,
+                    show_metadata=bool((request_context.get("parameters") or {}).get("seedream_layer_show_metadata")),
+                )
+            else:
+                sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=display_label)
             if not sent:
                 file_hint = f"\n📁 原始图片已安全暂存至服务器备查: {failed_file.name}" if failed_file else ""
                 yield self._reply_plain_result(event, f"❌ 图片发送失败 (网络超时)。{file_hint}")
@@ -10023,7 +10858,16 @@ class FigurineProPlugin(Star):
 
                 message_text = " | ".join(caption_parts)
 
-            sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=actual_model)
+            if isinstance(res, LayerImageBundle):
+                sent, failed_file = await self._send_layer_bundle(
+                    event,
+                    res,
+                    message_text,
+                    label=actual_model,
+                    show_metadata=bool((request_context.get("parameters") or {}).get("seedream_layer_show_metadata")),
+                )
+            else:
+                sent, failed_file = await self._send_image_with_retry(event, res, message_text, label=actual_model)
             if not sent:
                 file_hint = f"\n📁 原始图片已安全暂存至服务器备查: {failed_file.name}" if failed_file else ""
                 yield self._reply_plain_result(event, f"❌ 图片发送失败 (网络超时)。{file_hint}")

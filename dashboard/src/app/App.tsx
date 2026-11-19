@@ -17,9 +17,20 @@ import ConfigPage from "@/pages/config/ConfigPage";
 
 type ViewKey = "overview" | "users" | "groups" | "presets" | "config";
 
+const VIEW_KEYS: ViewKey[] = ["overview", "users", "groups", "presets", "config"];
+
+function getInitialView(): ViewKey {
+  try {
+    const tab = new URLSearchParams(window.location.search).get("tab") || "";
+    return (VIEW_KEYS as string[]).includes(tab) ? (tab as ViewKey) : "overview";
+  } catch {
+    return "overview";
+  }
+}
+
 function DashboardShell() {
   const { isDark } = useTheme();
-  const [activeTab, setActiveTab] = useState<ViewKey>("overview");
+  const [activeTab, setActiveTab] = useState<ViewKey>(getInitialView);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const { message } = AntApp.useApp();
 

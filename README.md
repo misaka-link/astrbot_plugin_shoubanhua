@@ -166,6 +166,13 @@ git clone https://github.com/misaka-link/astrbot_plugin_shoubanhua.git
 
 ---
 
+## 🖼️ Seedream 5.5 与图层拆分
+
+- **按模型名自动裁剪参数**：模型名命中 `5.5`/`5-5` 或 `5.0 pro`/`5-pro` 才发送新参数（`background`、`safety_identifier`、`layer_decomposition`、`text_recognition`）；其它模型名只发送各版本通用字段，`tools`（联网搜索）与不支持的 `fast` 会被自动跳过/转成 `standard`。
+- **透明通道**：`background` 可选 `auto`（仅 5.5）/ `transparent` / `opaque`；选 `transparent` 会自动把 `output_format` 锁成 png，避免官方 “transparent + jpeg” 报错。
+- **图层拆分**：参数模式新增「Seedream 图层拆分」，只做拆分不叠加生图参数，支持 `max_images`(2–100)、`text_recognition`、`size=auto/1K/1.5K/2K`；结果默认以**合并转发**一次性发出（不引用消息），元数据（z_index/名称/描述/坐标/OCR）完整解析，可按需显示。
+- 配置示例（触发词 `s5.5`、0.175 元/次、参考图超 2 张每张 +0.05）：见 [seedream-v5.5-模型配置.md](seedream-v5.5-模型配置.md)。
+
 ## 🖥️ Web 管理仪表盘
 
 插件自带基于 React 18 + Ant Design 5 的独立管理控制台（访问 AstrBot WebUI 插件页面即可进入）：

@@ -104,10 +104,11 @@
                             "gpt",
                             "gemini",
                             "grok",
-                            "seedream"
+                            "seedream",
+                            "seedream_layer"
                         ],
                         "default": "none",
-                        "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
+                        "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream 生图（只生图、不拆分）、seedream_layer=Seedream 图层拆分（只拆分、不叠加生图参数，结果以合并转发发送）。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
                     },
                     "api_key_tag": {
                         "label": "绑定 Key",
@@ -254,6 +255,56 @@
                         "default": "auto",
                         "hint": "仅 GPT 参数模式且包含参考图时生效（GPT Edits 接口）。控制模型对输入参考图的特征与风格（特别是人脸细节）的贴合保真程度。auto（默认）：不传递该参数，由模型默认决定；low：低保真度（快速风格化）；high：高保真度（最大程度贴合原图特征与人脸）。"
                     },
+                    "gpt_complexity": {
+                        "label": "复杂度 complexity",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "low",
+                            "medium",
+                            "high"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 GPT 参数模式生效（gpt-image-2.6 新增）。控制模型绘制前的规划程度：low 适合快速编辑，medium/high 适合多元素、复杂布局；auto 不发送，由模型默认（high）。不额外收费。"
+                    },
+                    "gpt_output_format": {
+                        "label": "输出格式",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "png",
+                            "jpeg",
+                            "webp",
+                            "gif",
+                            "svg"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 GPT 参数模式生效。auto 不发送；png/jpeg/webp 为静态图；gif 为动图（仅文生图 generations 支持）；svg 为矢量（仅 generations，且 n 必须为 1）。透明背景时只允许 png/webp。编辑端点不支持 gif/svg，会自动忽略。"
+                    },
+                    "gpt_output_compression": {
+                        "label": "输出压缩率(0-100，0=不传)",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 100,
+                        "hint": "仅 GPT 参数模式且输出格式为 jpeg/webp 时生效。0 表示不发送（由上游默认，通常 90）；1-100 为压缩质量。"
+                    },
+                    "gpt_frame_count": {
+                        "label": "GIF帧数(2-16，0=默认9)",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 16,
+                        "hint": "仅 GPT 参数模式且输出格式为 gif 时生效。0 表示不发送（官方默认 9 帧）；建议 2-16（官方指南写 2-64、API Reference 写 2-16，存在文档不一致，保守用 2-16）。"
+                    },
+                    "gpt_frame_duration_ms": {
+                        "label": "GIF每帧时长ms(20-2000，0=默认200)",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 2000,
+                        "hint": "仅 GPT 参数模式且输出格式为 gif 时生效。0 表示不发送（官方默认 200ms）；范围 20-2000ms。"
+                    },
                     "adaptive_aspect_ratio": {
                         "label": "自适应比例",
                         "type": "bool",
@@ -362,7 +413,7 @@
                         "label": "Seedream联网搜索",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 Seedream参数设置开启时发送 tools=[{type:web_search}]。是否支持由实际接入的上游模型决定，插件不再按模型名过滤。"
+                        "hint": "仅 Seedream参数设置开启时尝试发送 tools=[{type:web_search}]。官方 Seedream 5.5 与 5.0 pro 均不支持联网搜索，插件按模型名直接跳过该参数（更早的模型也不再适配），避免请求被上游 400。"
                     },
                     "seedream_send_output_format": {
                         "label": "Seedream传递输出格式",
@@ -395,13 +446,13 @@
                             "2K"
                         ],
                         "default": "1.5K",
-                        "hint": "仅 Seedream参数设置开启时生效。直接将该档位字符串（如 1.5K）作为 size 发送；开启“Seedream传递详细分辨率”且有比例来源时，才按 Seedream 5.0 Pro 官方比例尺寸表传递精确 size。各 Seedream 模型支持的档位不同，请按上游模型能力配置。"
+                        "hint": "仅 Seedream参数设置开启时生效。直接将该档位字符串（如 1.5K）作为 size 发送；开启“Seedream传递详细分辨率”且有比例来源时，才按官方比例尺寸表传递精确 size。Seedream 5.5 支持 1K / 1.5K / 2K（官方默认 2K），像素区间 1280x720 ~ 2048x2048x1.1025；各模型档位不同，请按上游模型能力配置。"
                     },
                     "seedream_send_aspect_ratio": {
                         "label": "Seedream传递比例",
                         "type": "bool",
                         "default": false,
-                        "hint": "仅 Seedream参数设置开启且模型走 Images Generations 路由时生效。默认关闭；开启后，有命令 =宽:高 时优先使用该比例，否则读取第一张参考图比例，映射为 Seedream 官方支持的最接近 aspect_ratio 后发送。没有命令比例或参考图时不发送该参数。"
+                        "hint": "仅 Seedream参数设置开启且模型走 Images Generations 路由时生效。默认关闭；开启后，有命令 =宽:高 时优先使用该比例，否则读取第一张参考图比例，映射为最接近的 Seedream 比例后发送为 aspect_ratio。注意：aspect_ratio 不是火山方舟官方 images/generations 字段（官方只能通过 size 或提示词描述比例），只有部分中转网关支持；直连官方 Ark 时建议关闭，改用“传递详细分辨率”控制比例。"
                     },
                     "seedream_send_detailed_resolution": {
                         "label": "Seedream传递详细分辨率",
@@ -443,7 +494,78 @@
                             "fast"
                         ],
                         "default": "standard",
-                        "hint": "仅 Seedream参数设置开启时发送 optimize_prompt_options.mode。standard 为标准优化；fast 生成更快但可能影响效果；支持情况由实际接入的上游模型决定，插件不再按模型名过滤。"
+                        "hint": "仅 Seedream参数设置开启时发送 optimize_prompt_options.mode。standard 为标准优化；fast 生成更快但效果略低。按模型名自动适配：Seedream 5.5 官方只支持 standard，填 fast 会被自动转成 standard；Seedream 5.0 pro 支持 fast；其它模型名（含无版本关键词）一律回落 standard，不发送陌生枚举。"
+                    },
+                    "seedream_background": {
+                        "label": "Seedream背景模式",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "transparent",
+                            "opaque"
+                        ],
+                        "default": "auto",
+                        "hint": "仅 Seedream参数设置开启时生效，发送为 background（Seedream 5.5 新增）。auto：由模型按提示词自动判断是否透明，仅 5.5 支持；transparent：输出原生 RGBA 透明背景图（5.5 文生图/图生图均可，5.0 pro 仅支持 1 张带透明通道 PNG 的图生图），插件会自动把 output_format 锁成 png，避免官方“transparent + jpeg”直接报错；opaque：不透明背景，多轮编辑一致性更好。模型名不含 5.5 / 5.0 pro 版本关键词时不发送该参数。"
+                    },
+                    "seedream_safety_identifier": {
+                        "label": "Seedream终端用户标识",
+                        "type": "string",
+                        "default": "",
+                        "hint": "可选，发送为 safety_identifier（最长 64 字符），用于协助平台检测违规用户，建议填用户 ID 的哈希值。仅 Seedream 5.5 / 5.0 pro 支持；其它模型名不发送；留空不发送。"
+                    },
+                    "enable_seedream_layer_parameters": {
+                        "label": "Seedream图层拆分参数设置",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "旧配置兼容字段。Web 配置页会按“参数模式=Seedream 图层拆分”自动规范化为开启。该模式只做图层拆分（layer_decomposition=true），不叠加生图参数：把一张图拆成 1 张底图 + 多个图层，默认用合并转发一次性发回（不引用消息）。与“Seedream 生图”互斥。"
+                    },
+                    "seedream_layer_resolution": {
+                        "label": "图层拆分分辨率",
+                        "type": "string",
+                        "options": [
+                            "auto",
+                            "1K",
+                            "1.5K",
+                            "2K"
+                        ],
+                        "default": "auto",
+                        "hint": "仅图层拆分模式生效，发送为 size。图层拆分场景官方只接受 1K / 1.5K / 2K / auto：auto（默认）按输入图与各图层原始尺寸自适应；指定档位时底图按该档输出、各图层按接近该档的分辨率输出。不会发送“宽x高”像素值。"
+                    },
+                    "seedream_layer_max_images": {
+                        "label": "图层拆分最大输出图数",
+                        "type": "int",
+                        "default": 30,
+                        "min": 2,
+                        "max": 100,
+                        "hint": "仅图层拆分模式生效，发送为 layer_decomposition_options.max_images（含底图的输出总数，官方范围 2–100，默认 30）。数值越大拆分越细，但会按该值预扣 IPM；提示词未说明拆分方式时，模型会结合本值规划拆分结果。"
+                    },
+                    "seedream_layer_text_recognition": {
+                        "label": "图层拆分富文本OCR",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅图层拆分模式生效，发送为 layer_decomposition_options.text_recognition。开启后，规整文字图层会额外返回文本内容、行位置与近似样式（字体/颜色/粗体/斜体/下划线/删除线/阴影/半透明）。官方仅 Seedream 5.5 支持；开启“显示图层信息”时可一并输出。"
+                    },
+                    "seedream_layer_output_format": {
+                        "label": "图层拆分输出格式",
+                        "type": "string",
+                        "options": [
+                            "png",
+                            "jpeg"
+                        ],
+                        "default": "png",
+                        "hint": "仅图层拆分模式生效，发送为 output_format。官方规则：该字段只控制底图格式，图层始终以 png 输出。默认 png（可保留透明通道）。"
+                    },
+                    "seedream_layer_watermark": {
+                        "label": "图层拆分水印",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅图层拆分模式生效，发送为 watermark。默认关闭；开启后底图右下角会带“AI 生成”标识。"
+                    },
+                    "seedream_layer_show_metadata": {
+                        "label": "图层拆分显示图层信息",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "仅图层拆分模式生效，控制发送内容。默认关闭：合并转发里只发拆分的图片；开启后每张图层额外附带 z_index、名称、描述、尺寸、bounding_box 坐标与 OCR 文本（若上游返回）。元数据无论是否显示都会完整解析。"
                     },
                     "enable_omni_parameters": {
                         "label": "Omni参数设置",
@@ -665,6 +787,14 @@
                 }
             }
         }
+    },
+    "model_failover_delay_ms": {
+        "description": "【通用】模型热备切换延迟(毫秒)",
+        "type": "int",
+        "hint": "热备切换时，每次失败后等待多久再请求下一个模型，用于错峰，避免瞬时把全部候选打一遍。最小 100ms，默认 100。",
+        "default": 100,
+        "min": 100,
+        "max": 5000
     },
     "generic_api_url": {
         "description": "【通用】API地址",
@@ -944,7 +1074,7 @@
     "content_policy_warning_message": {
         "description": "【错误提示】违规内容警告内容",
         "type": "text",
-        "hint": "上游判定输入内容违规、触发安全拦截，或 HTTP 状态码命中“失败仍扣费的错误码设置列表”时单独发送的警告内容。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前任务耗时秒数，{remaining}=个人余额（仅数字），{group_balance}=群余额（仅数字，私聊时为 -），{prompt}=提示词前50字，{reason}=上游返回的主要错误原因。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=触发警告的任务序号，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
+        "hint": "仅在确认上游内容安全违规/安全拦截时单独发送的警告内容（失败状态码不再触发违规警告）。留空使用默认格式。通用变量：{model}=本次实际调用模型，{label}=显示标签/预设名，{image_count}=输入图片数量（文生图为0），{elapsed}=当前任务耗时秒数，{remaining}=个人余额（仅数字），{group_balance}=群余额（仅数字，私聊时为 -），{prompt}=提示词前50字，{reason}=上游返回的主要错误原因。批量/预设/#bnn入口额外变量：{batch_count}=本次总生成次数/倍率，{batch_index}=触发警告的任务序号，{max_batch_concurrency}=本次最大并发数。注意：独立 #文生图 指令当前不会替换这3个批量变量。",
         "editor_mode": true,
         "editor_language": "markdown",
         "default": "您的请求包含违规内容，无法生成图片。\n请更换模型或提示词/参考图 尝试 ！！\n模型: {model}\n\n任务 {batch_index}/{batch_count}"
@@ -1189,7 +1319,7 @@
     "failure_deduction_status_codes": {
         "description": "【计费】失败仍扣费的错误码设置列表",
         "type": "list",
-        "hint": "生成失败时，HTTP 状态码命中本列表会触发违规内容警告，并停止模型热备切换，不再请求后续映射模型。模型参数设置中已配置实际调用模型时，是否扣费由该模型的“违规是否扣费”控制；未配置模型参数项时回退到“错误码是否扣费”。默认仅 400；留空时错误码失败不扣费且不会因错误码停止热备。生成成功始终正常扣费。",
+        "hint": "生成失败时，HTTP 状态码命中本列表只影响“是否扣费”，不再停止模型热备切换、也不再发送违规警告。是否扣费：模型参数设置中已配置实际调用模型时由该模型的“违规是否扣费”控制；未配置时回退到“错误码是否扣费”。默认仅 400；留空时错误码失败不扣费。生成成功始终正常扣费。若希望某些状态码命中时停止热备，请使用下方的“命中即停止热备状态码”。",
         "items": {
             "type": "int",
             "description": "失败仍扣费的 HTTP 状态码"
@@ -1198,10 +1328,20 @@
             400
         ]
     },
+    "failover_stop_status_codes": {
+        "description": "【网络】命中即停止热备的状态码",
+        "type": "list",
+        "hint": "显式指定哪些 HTTP 状态码命中时直接停止模型热备切换（不再请求后续候选）。默认空列表：除内容安全违规外，任何状态码（含 400/413/451）都会继续切换下一个模型。仅在确认某些错误对所有候选都不可恢复时才配置，例如 [401, 403]。",
+        "items": {
+            "type": "int",
+            "description": "命中即停止热备的 HTTP 状态码"
+        },
+        "default": []
+    },
     "deduct_on_failure_status_codes": {
         "description": "【计费】错误码是否扣费",
         "type": "bool",
-        "hint": "仅在实际调用模型未配置“模型参数设置”时生效。开启后，HTTP 状态码命中“失败仍扣费的错误码设置列表”或上游识别为内容安全违规时扣除对应模型的费用；关闭后不扣费。无论开关状态，命中错误码或内容安全违规都会单独发送违规内容警告并停止模型热备切换。默认开启。",
+        "hint": "仅在实际调用模型未配置“模型参数设置”时生效。开启后，HTTP 状态码命中“失败仍扣费的错误码设置列表”或上游识别为内容安全违规时扣除对应模型的费用；关闭后不扣费。内容安全违规始终会发送违规警告并停止热备（与本开关无关）；失败状态码不再发送违规警告、也不再停止热备（停止热备请用“命中即停止热备状态码”）。默认开启。",
         "default": true
     },
     "enable_group_limit": {

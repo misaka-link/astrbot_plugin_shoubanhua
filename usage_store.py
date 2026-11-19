@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import sqlite3
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -417,10 +418,18 @@ class UsageStore:
 
     def _persist_sync(self) -> None:
         data = self._require_data()
-        temporary_path = self.history_path.with_suffix(f"{self.history_path.suffix}.tmp")
         payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        # 每次写入使用独立临时文件：避免插件热重载/多实例同时写同一个 .tmp 时相互截断，
+        # 造成 JSON 内容交错损坏（线上曾出现 "a""b" 粘连的坏档）。
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{self.history_path.name}.",
+            suffix=".tmp",
+            dir=str(self.history_path.parent),
+        )
+        temporary_path = Path(temporary_name)
         try:
-            with temporary_path.open("w", encoding="utf-8") as output:
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
                 output.write(payload)
                 output.flush()
                 os.fsync(output.fileno())

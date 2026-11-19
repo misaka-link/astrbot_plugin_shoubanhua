@@ -1,0 +1,368 @@
+import unittest
+
+try:  # python3 -m unittest discover -s tests
+    from test_resolution_deduction import PLUGIN_MODULE, _TestConfig, _install_import_stubs
+except ImportError:  # python3 -m unittest tests.test_seedream_v55
+    from tests.test_resolution_deduction import PLUGIN_MODULE, _TestConfig, _install_import_stubs
+
+FigurineProPlugin = PLUGIN_MODULE.FigurineProPlugin
+LayerImageBundle = PLUGIN_MODULE.LayerImageBundle
+
+
+class SeedreamModelFamilyTests(unittest.TestCase):
+    def test_family_detection(self):
+        cases = {
+            "seedream-v5.5": "5.5",
+            "seedream-5-5": "5.5",
+            "doubao-seedream-5-5-261028": "5.5",
+            "seedream_v5_5": "5.5",
+            "seedream-v5-pro": "5.0pro",
+            "seedream-5.0-pro": "5.0pro",
+            "doubao-seedream-5-0-pro-260628": "5.0pro",
+            "seedream-4.0": "legacy",
+            "seedream-4-5": "legacy",
+            "seedream-5-0-lite": "legacy",
+            "nano-banana": "legacy",
+            "": "legacy",
+        }
+        for model_name, expected in cases.items():
+            with self.subTest(model=model_name):
+                self.assertEqual(
+                    FigurineProPlugin._seedream_model_family(model_name),
+                    expected,
+                )
+
+    def test_capabilities_only_for_55_and_50pro(self):
+        plugin = object.__new__(FigurineProPlugin)
+        caps_55 = plugin._seedream_capabilities("seedream-v5.5")
+        self.assertTrue(caps_55["background"])
+        self.assertTrue(caps_55["background_auto"])
+        self.assertTrue(caps_55["layer_decomposition"])
+        self.assertTrue(caps_55["text_recognition"])
+        self.assertFalse(caps_55["fast_prompt"])
+        self.assertFalse(caps_55["web_search"])
+        self.assertEqual(caps_55["max_layers"], 99)
+
+        caps_pro = plugin._seedream_capabilities("seedream-v5-pro")
+        self.assertTrue(caps_pro["background"])
+        self.assertFalse(caps_pro["background_auto"])
+        self.assertTrue(caps_pro["fast_prompt"])
+        self.assertTrue(caps_pro["layer_decomposition"])
+        self.assertFalse(caps_pro["text_recognition"])
+        self.assertEqual(caps_pro["max_layers"], 16)
+
+        caps_legacy = plugin._seedream_capabilities("seedream-4.0")
+        self.assertFalse(caps_legacy["background"])
+        self.assertFalse(caps_legacy["layer_decomposition"])
+        self.assertFalse(caps_legacy["safety_identifier"])
+        self.assertFalse(caps_legacy["fast_prompt"])
+
+
+class SeedreamGenerationPayloadTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+
+    @staticmethod
+    def make_plugin(model_parameters, **extra_conf):
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({"model_parameter_list": model_parameters, **extra_conf})
+        plugin.prompt_map = {}
+        return plugin
+
+    def build_payload(self, model, entry, image_bytes=None):
+        entry = {"model": model, **entry}
+        plugin = self.make_plugin([entry])
+        parameters = plugin._get_model_parameter_map()[model]
+        return plugin, plugin._build_generic_images_payload(
+            model,
+            "prompt",
+            [image_bytes] if image_bytes else [],
+            parameters=parameters,
+        )
+
+    def test_v55_sends_background_auto_and_skips_web_search(self):
+        plugin, payload = self.build_payload(
+            "seedream-v5.5",
+            {
+                "parameter_mode": "seedream",
+                "seedream_web_search": True,
+                "seedream_optimize_prompt_mode": "fast",
+                "seedream_resolution": "2K",
+            },
+            image_bytes=b"small",
+        )
+        self.assertEqual(payload["background"], "auto")
+        self.assertNotIn("tools", payload)
+        self.assertEqual(payload["optimize_prompt_options"], {"mode": "standard"})
+        self.assertEqual(payload["size"], "2K")
+        self.assertEqual(payload["watermark"], False)
+
+    def test_v55_transparent_forces_png(self):
+        plugin, payload = self.build_payload(
+            "seedream-v5.5",
+            {
+                "parameter_mode": "seedream",
+                "seedream_background": "transparent",
+                "seedream_send_output_format": True,
+                "seedream_output_format": "jpeg",
+            },
+            image_bytes=b"small",
+        )
+        self.assertEqual(payload["background"], "transparent")
+        self.assertEqual(payload["output_format"], "png")
+
+    def test_v55_safety_identifier_truncated(self):
+        plugin, payload = self.build_payload(
+            "seedream-v5.5",
+            {
+                "parameter_mode": "seedream",
+                "seedream_safety_identifier": "u" * 80,
+            },
+            image_bytes=b"small",
+        )
+        self.assertEqual(len(payload["safety_identifier"]), 64)
+
+    def test_50pro_keeps_fast_and_supports_opaque(self):
+        plugin, payload = self.build_payload(
+            "seedream-v5-pro",
+            {
+                "parameter_mode": "seedream",
+                "seedream_optimize_prompt_mode": "fast",
+                "seedream_background": "opaque",
+            },
+            image_bytes=b"small",
+        )
+        self.assertEqual(payload["optimize_prompt_options"], {"mode": "fast"})
+        self.assertEqual(payload["background"], "opaque")
+
+    def test_legacy_model_gets_no_new_parameters(self):
+        plugin, payload = self.build_payload(
+            "seedream-4.0",
+            {
+                "parameter_mode": "seedream",
+                "seedream_web_search": True,
+                "seedream_optimize_prompt_mode": "fast",
+                "seedream_background": "transparent",
+                "seedream_safety_identifier": "abc",
+            },
+            image_bytes=b"small",
+        )
+        self.assertNotIn("background", payload)
+        self.assertNotIn("tools", payload)
+        self.assertNotIn("safety_identifier", payload)
+        self.assertEqual(payload["optimize_prompt_options"], {"mode": "standard"})
+
+
+class SeedreamLayerPayloadTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+
+    def make_layer_plugin(self, model="seedream-v5.5", **entry_extra):
+        entry = {"model": model, "parameter_mode": "seedream_layer", **entry_extra}
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({"model_parameter_list": [entry]})
+        plugin.prompt_map = {}
+        return plugin
+
+    def test_layer_payload_shape(self):
+        plugin = self.make_layer_plugin(
+            seedream_layer_resolution="1.5K",
+            seedream_layer_max_images=12,
+            seedream_layer_text_recognition=True,
+            seedream_layer_output_format="jpeg",
+            seedream_layer_watermark=True,
+        )
+        parameters = plugin._get_model_parameter_map()["seedream-v5.5"]
+        payload = plugin._build_generic_images_payload(
+            "seedream-v5.5",
+            "拆图层",
+            [b"small", b"small"],
+            parameters=parameters,
+        )
+        self.assertTrue(payload["layer_decomposition"])
+        self.assertEqual(payload["layer_decomposition_options"]["max_images"], 12)
+        self.assertTrue(payload["layer_decomposition_options"]["text_recognition"])
+        self.assertEqual(payload["size"], "1.5K")
+        self.assertEqual(payload["output_format"], "jpeg")
+        self.assertTrue(payload["watermark"])
+        self.assertNotIn("background", payload)
+        self.assertNotIn("n", payload)
+        self.assertIsInstance(payload["image"], str)  # 只发 1 张
+
+    def test_layer_defaults(self):
+        plugin = self.make_layer_plugin()
+        parameters = plugin._get_model_parameter_map()["seedream-v5.5"]
+        payload = plugin._build_generic_images_payload(
+            "seedream-v5.5",
+            "拆图层",
+            [b"small"],
+            parameters=parameters,
+        )
+        self.assertEqual(payload["size"], "auto")
+        self.assertEqual(payload["output_format"], "png")
+        self.assertEqual(payload["layer_decomposition_options"]["max_images"], 30)
+        self.assertNotIn("text_recognition", payload["layer_decomposition_options"])
+
+    def test_layer_max_images_clamped(self):
+        plugin = self.make_layer_plugin(seedream_layer_max_images=500)
+        parameters = plugin._get_model_parameter_map()["seedream-v5.5"]
+        payload = plugin._build_generic_images_payload(
+            "seedream-v5.5", "拆", [b"small"], parameters=parameters
+        )
+        self.assertEqual(payload["layer_decomposition_options"]["max_images"], 100)
+
+    def test_layer_mode_caps_reference_images(self):
+        plugin = self.make_layer_plugin()
+        parameters = plugin._get_model_parameter_map()["seedream-v5.5"]
+        self.assertEqual(plugin._get_reference_image_limit("seedream-v5.5", parameters), 1)
+        limited = plugin._limit_reference_images(
+            "seedream-v5.5", [b"a", b"b", b"c"], parameters
+        )
+        self.assertEqual(limited, [b"a"])
+
+
+class SeedreamLayerResponseTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+        self.plugin = object.__new__(FigurineProPlugin)
+
+    def test_parse_layer_items_sorted_and_metadata(self):
+        response = {
+            "model": "doubao-seedream-5-5-261028",
+            "data": [
+                {
+                    "url": "https://x/layer1.png",
+                    "z_index": 1,
+                    "size": "1273x265",
+                    "output_format": "png",
+                    "name": "标题文字",
+                    "description": "黄色衬线标题",
+                    "bounding_box": {"absolute": [383, 120, 1655, 384], "normalized": [187, 59, 808, 188]},
+                    "text_recognition": {"text": "Seedream", "lines": []},
+                },
+                {"url": "https://x/base.png", "z_index": 0, "size": "2048x2048", "output_format": "png"},
+                {"url": "https://x/layer2.png", "z_index": 2, "name": "鹦鹉"},
+            ],
+            "usage": {"input_images": 1, "generated_images": 3},
+        }
+        items = self.plugin._extract_seedream_layer_items(response)
+        self.assertEqual([item["z_index"] for item in items], [0, 1, 2])
+        self.assertEqual(items[1]["name"], "标题文字")
+        self.assertEqual(items[1]["bounding_box"]["absolute"], [383, 120, 1655, 384])
+        self.assertEqual(items[1]["text_recognition"]["text"], "Seedream")
+        self.assertEqual(items[0]["size"], "2048x2048")
+
+    def test_parse_ignores_non_layer_payload(self):
+        self.assertEqual(self.plugin._extract_seedream_layer_items({"data": []}), [])
+        self.assertEqual(self.plugin._extract_seedream_layer_items({"choices": []}), [])
+        self.assertEqual(self.plugin._extract_seedream_layer_items(None), [])
+
+    def test_bundle_is_bytes_and_keeps_images(self):
+        bundle = LayerImageBundle(b"base", [b"base", b"layer"], [{"z_index": 0}, {"z_index": 1}])
+        self.assertIsInstance(bundle, bytes)
+        self.assertEqual(bytes(bundle), b"base")
+        self.assertEqual(len(bundle.images), 2)
+        self.assertEqual(bundle.items[1]["z_index"], 1)
+
+    def test_render_layer_metadata(self):
+        text = FigurineProPlugin._render_layer_metadata(
+            {
+                "z_index": 1,
+                "size": "1273x265",
+                "name": "标题",
+                "description": "黄色标题",
+                "bounding_box": {"absolute": [1, 2, 3, 4]},
+                "text_recognition": {"text": "A\nB"},
+            },
+            0,
+            3,
+        )
+        self.assertIn("z_index=1", text)
+        self.assertIn("名称=标题", text)
+        self.assertIn("坐标=1,2,3,4", text)
+        self.assertIn("文字=A / B", text)
+
+
+class SeedreamLayerBillingTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+
+    def test_flat_price_with_extra_reference_charge(self):
+        entry = {
+            "model": "seedream-v5.5",
+            "parameter_mode": "seedream",
+            "charge_amount": 0.175,
+            "charge_amount_2k": 0.175,
+            "reference_image_limit": 2,
+            "extra_reference_image_quota": 1,
+            "extra_reference_image_charge": 0.05,
+        }
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({"model_parameter_list": [entry]})
+        plugin.prompt_map = {}
+        parameters = plugin._get_model_parameter_map()["seedream-v5.5"]
+
+        self.assertEqual(
+            plugin._get_required_invocation_cost("seedream-v5.5", image_bytes_list=[], parameters=parameters),
+            175,
+        )
+        self.assertEqual(
+            plugin._get_required_invocation_cost("seedream-v5.5", image_bytes_list=[b"a", b"b"], parameters=parameters),
+            175,
+        )
+        self.assertEqual(
+            plugin._get_required_invocation_cost("seedream-v5.5", image_bytes_list=[b"a", b"b", b"c"], parameters=parameters),
+            225,
+        )
+        self.assertEqual(
+            plugin._get_required_invocation_cost("seedream-v5.5", image_bytes_list=[b"a", b"b", b"c", b"d"], parameters=parameters),
+            275,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class SeedreamLayerRoutingTests(unittest.TestCase):
+    def setUp(self):
+        _install_import_stubs()
+
+    def test_layer_mode_forces_images_generations(self):
+        entry = {"model": "seedream-v5.5", "parameter_mode": "seedream_layer"}
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({
+            "model_parameter_list": [entry],
+            "model": "seedream-v5.5",
+            "model_list": ["seedream-v5.5"],
+            "images_generations_model_list": ["seedream-v5.5"],
+            "images_edits_model_list": ["seedream-v5.5"],
+            "chat_completions_model_list": [],
+            "gemini_model_list": [],
+            "generic_api_url": "https://generic.example/v1",
+        })
+        plugin.prompt_map = {}
+        self.assertEqual(
+            plugin._get_generic_endpoint_type_for_model("seedream-v5.5", has_images=True),
+            "images_generations",
+        )
+
+    def test_generation_mode_with_images_prefers_edits(self):
+        entry = {"model": "seedream-v5.5", "parameter_mode": "seedream"}
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({
+            "model_parameter_list": [entry],
+            "model": "seedream-v5.5",
+            "model_list": ["seedream-v5.5"],
+            "images_generations_model_list": ["seedream-v5.5"],
+            "images_edits_model_list": ["seedream-v5.5"],
+            "chat_completions_model_list": [],
+            "gemini_model_list": [],
+            "generic_api_url": "https://generic.example/v1",
+        })
+        plugin.prompt_map = {}
+        self.assertEqual(
+            plugin._get_generic_endpoint_type_for_model("seedream-v5.5", has_images=True),
+            "images_generations",
+        )
+

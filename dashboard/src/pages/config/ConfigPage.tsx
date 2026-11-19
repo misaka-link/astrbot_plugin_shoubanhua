@@ -102,6 +102,7 @@ const AUTO_DERIVED_FIELDS = new Set([
   "enable_gemini_parameters",
   "enable_grok_parameters",
   "enable_seedream_parameters",
+  "enable_seedream_layer_parameters",
   "enable_omni_parameters",
 ]);
 
@@ -110,6 +111,7 @@ const GROUP_TO_MODE: Record<string, string> = {
   Gemini: "gemini",
   Grok: "grok",
   Seedream: "seedream",
+  "Seedream 图层拆分": "seedream_layer",
   Omni: "omni",
 };
 
@@ -135,7 +137,13 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
   const [metadata, setMetadata] = useState<Metadata | null>(null);
   const [sensitive, setSensitive] = useState<SensitiveState | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [activeSection, setActiveSection] = useState("models");
+  const [activeSection, setActiveSection] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("section") || "models";
+    } catch {
+      return "models";
+    }
+  });
 
   // 敏感配置输入
   const [keyInput, setKeyInput] = useState("");
@@ -362,10 +370,12 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
 
   const renderParamField = (entry: Json, index: number, field: ParamField) => {
     const value = entry[field.name];
-    const hint = field.hint ? { extra: field.hint } : {};
+    // 长说明改为标签旁的 info 提示，避免每个输入框下方堆一大段文字
+    const hint = field.hint ? { tooltip: field.hint } : {};
+    const itemStyle = { marginBottom: 12 };
     if (field.type === "boolean") {
       return (
-        <Form.Item key={field.name} label={field.label} {...hint}>
+        <Form.Item key={field.name} label={field.label} style={itemStyle} {...hint}>
           <Switch checked={!!value} onChange={(checked) => updateParam(index, field.name, checked)} />
         </Form.Item>
       );
@@ -388,8 +398,9 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
         options = dynamicOptions;
       }
       return (
-        <Form.Item key={field.name} label={field.label} {...hint}>
+        <Form.Item key={field.name} label={field.label} style={itemStyle} {...hint}>
           <Select
+            style={{ width: "100%" }}
             value={String(value ?? field.default ?? "默认")}
             options={options}
             onChange={(selected) => updateParam(index, field.name, selected)}
@@ -399,7 +410,7 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
     }
     if (field.type === "number") {
       return (
-        <Form.Item key={field.name} label={field.label} {...hint}>
+        <Form.Item key={field.name} label={field.label} style={itemStyle} {...hint}>
           <InputNumber
             style={{ width: "100%" }}
             value={Number(value ?? field.default ?? 0)}
@@ -412,7 +423,7 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
       );
     }
     return (
-      <Form.Item key={field.name} label={field.label} {...hint}>
+      <Form.Item key={field.name} label={field.label} style={itemStyle} {...hint}>
         <Input
           value={String(value ?? field.default ?? "")}
           placeholder={field.name === "request_model_name" ? `默认不填即为「${entry.model || "当前模型"}」` : undefined}
@@ -425,17 +436,47 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
 
   const renderParamCard = (entry: Json, index: number) => {
     const mode = String(entry.parameter_mode || "none");
-    const visibleFields = paramFields.filter((field) => {
+    const modeLabel =
+      modeOptions.find((option) => option.value === mode)?.label || mode;
+    const basicFields = paramFields.filter((field) => field.group === "基础与额度");
+    const outputFormat = String(entry.gpt_output_format || "auto");
+    const vendorFields = paramFields.filter((field) => {
       if (AUTO_DERIVED_FIELDS.has(field.name)) return false;
-      if (field.group === "基础与额度") return true;
-      return GROUP_TO_MODE[field.group] === mode;
+      if (field.group === "基础与额度") return false;
+      if (GROUP_TO_MODE[field.group] !== mode) return false;
+      // 只在相关输出格式下显示压缩率 / GIF 帧参数，避免无关字段占版面
+      if (field.name === "gpt_output_compression") {
+        return ["jpeg", "webp"].includes(outputFormat);
+      }
+      if (field.name === "gpt_frame_count" || field.name === "gpt_frame_duration_ms") {
+        return outputFormat === "gif";
+      }
+      return true;
     });
+    const renderGrid = (fields: ParamField[]) => (
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))",
+          gap: "0 20px",
+        }}
+      >
+        {fields.map((field) => renderParamField(entry, index, field))}
+      </div>
+    );
+    const sectionTitle = (text: string) => (
+      <div style={{ fontSize: 12, fontWeight: 600, color: "#8c8c8c", margin: "0 0 8px" }}>
+        {text}
+      </div>
+    );
     return (
       <Card
         key={String(entry.model) + index}
         size="small"
+        styles={{ body: { paddingTop: 12 } }}
         title={
-          <Space wrap>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Text type="secondary" style={{ fontSize: 12 }}>模型</Text>
             <Select
               size="small"
               style={{ minWidth: 200 }}
@@ -443,15 +484,20 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
               options={config.model_list.map((name) => ({ value: name, label: name }))}
               onChange={(selected) => updateParam(index, "model", selected)}
               showSearch
+              optionFilterProp="label"
             />
+            <Text type="secondary" style={{ fontSize: 12 }}>参数模式</Text>
             <Select
               size="small"
-              style={{ minWidth: 160 }}
+              style={{ minWidth: 140 }}
               value={mode}
               options={modeOptions}
               onChange={(selected) => updateParam(index, "parameter_mode", selected)}
             />
-          </Space>
+            <Tag color={mode === "none" ? "default" : "blue"} style={{ marginInlineEnd: 0 }}>
+              {modeLabel}
+            </Tag>
+          </div>
         }
         extra={
           <Button
@@ -465,15 +511,15 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
           </Button>
         }
       >
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))",
-            gap: "0 16px",
-          }}
-        >
-          {visibleFields.map((field) => renderParamField(entry, index, field))}
-        </div>
+        {sectionTitle("基础与额度")}
+        {renderGrid(basicFields)}
+        {vendorFields.length > 0 && (
+          <>
+            <div style={{ height: 12 }} />
+            {sectionTitle(modeLabel)}
+            {renderGrid(vendorFields)}
+          </>
+        )}
       </Card>
     );
   };
@@ -946,17 +992,30 @@ export default function ConfigPage({ refreshSignal }: { refreshSignal: number })
       key: "params",
       label: "模型参数",
       content: (
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Button size="small" icon={<PlusOutlined />} onClick={addParamCard}>
-            添加模型参数条目
-          </Button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
+            }}
+          >
+            <Text type="secondary">
+              按模型配置参数；仅当前“参数模式”对应的厂商字段会发送，鼠标悬停字段名可查看说明。
+            </Text>
+            <Button size="small" type="primary" ghost icon={<PlusOutlined />} onClick={addParamCard}>
+              添加模型参数条目
+            </Button>
+          </div>
           {config.model_parameter_list.map((entry, index) => renderParamCard(entry, index))}
           {config.model_parameter_list.length === 0 && (
             <div style={{ textAlign: "center", color: "#8c8c8c", padding: 16 }}>
               未配置模型时默认每次扣费 1 元；添加条目可按模型精细配置
             </div>
           )}
-        </Space>
+        </div>
       ),
     },
     {

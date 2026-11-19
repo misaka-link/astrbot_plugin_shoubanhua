@@ -1,4 +1,6 @@
+import re
 import unittest
+from pathlib import Path
 
 try:  # python3 -m unittest discover -s tests
     from test_resolution_deduction import PLUGIN_MODULE, _TestConfig, _install_import_stubs
@@ -364,5 +366,24 @@ class SeedreamLayerRoutingTests(unittest.TestCase):
         self.assertEqual(
             plugin._get_generic_endpoint_type_for_model("seedream-v5.5", has_images=True),
             "images_generations",
+        )
+
+
+
+class RegisterDecoratorPlacementTests(unittest.TestCase):
+    """回归：@register 必须挂在插件类上，不能被中间插入的辅助类截胡。"""
+
+    def setUp(self):
+        self.source = (Path(__file__).resolve().parents[1] / "main.py").read_text(encoding="utf-8")
+
+    def test_register_decorates_plugin_class(self):
+        match = re.search(r"@register\((?:.|\n)*?\)\s*\nclass\s+(\w+)", self.source)
+        self.assertIsNotNone(match, "@register 装饰器缺失")
+        self.assertEqual(match.group(1), "FigurineProPlugin")
+
+    def test_helper_class_defined_before_register(self):
+        self.assertLess(
+            self.source.index("class LayerImageBundle"),
+            self.source.index("@register("),
         )
 

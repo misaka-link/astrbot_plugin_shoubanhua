@@ -278,13 +278,6 @@ def _build_client_timeout(connect_seconds: int, read_seconds: int | None = None)
     )
 
 
-@register(
-    "astrbot_plugin_shoubanhua",
-    "shskjw",
-    "支持第三方 OpenAI 绘图格式、Gemini 路由和 Seedream 专属图片参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
-    "2.1.0",
-    "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
-)
 class LayerImageBundle(bytes):
     """图层拆分结果包。
 
@@ -292,6 +285,9 @@ class LayerImageBundle(bytes):
     同时携带全部输出图与元数据：
     - images：按 z_index 升序的全部输出图（含底图）
     - items：与 images 一一对应的元数据（z_index/name/description/bounding_box/text_recognition…）
+
+    注意：本类必须定义在 @register 装饰器之前，否则装饰器会挂到本类上，
+    导致 FigurineProPlugin 不再被 AstrBot 注册（插件不会出现在插件列表）。
     """
 
     def __new__(cls, base: bytes, images: List[bytes], items: List[Dict[str, Any]]):
@@ -301,6 +297,13 @@ class LayerImageBundle(bytes):
         return instance
 
 
+@register(
+    "astrbot_plugin_shoubanhua",
+    "shskjw",
+    "支持第三方 OpenAI 绘图格式、Gemini 路由、Seedream 5.5 生图与图层拆分参数的文生图/图生图插件，按金额（元，精确到 0.001）计费",
+    "2.2.0",
+    "https://github.com/misaka-link/astrbot_plugin_shoubanhua",
+)
 class FigurineProPlugin(Star):
     RESERVED_COMMAND_NAMES = frozenset({
         "切换模型", "SwitchModel", "模型列表", "文生图",

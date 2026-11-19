@@ -405,3 +405,42 @@ class LayerOnlyBaseTests(unittest.TestCase):
         self.assertIn("layer_decomposition", hint)
         self.assertIn("请求体透传", hint)
 
+
+
+class LayerCamelCasePayloadTests(unittest.TestCase):
+    """中转网关（如 apilio）返回 camelCase 字段：zindex / boundingBox / outputType。"""
+
+    def setUp(self):
+        _install_import_stubs()
+        self.plugin = object.__new__(FigurineProPlugin)
+
+    def test_parse_camel_case_payload(self):
+        response = {
+            "model": "seedream-v5.5/layer-decomposition",
+            "data": [
+                {"url": "https://x/base.png", "size": "1024x1024", "outputType": "png"},
+                {
+                    "url": "https://x/l1.png",
+                    "zindex": 1,
+                    "name": "标题",
+                    "description": "黄色标题",
+                    "size": "1723x609",
+                    "outputType": "png",
+                    "boundingBox": {"absolute": [71, 0, 943, 308], "normalized": [69, 0, 921, 301]},
+                },
+            ],
+            "usage": {"total_tokens": 10},
+        }
+        items = self.plugin._extract_seedream_layer_items(response)
+        self.assertEqual([item["z_index"] for item in items], [0, 1])
+        self.assertEqual(items[1]["name"], "标题")
+        self.assertEqual(items[1]["bounding_box"]["absolute"], [71, 0, 943, 308])
+        self.assertEqual(items[1]["output_format"], "png")
+        self.assertTrue(FigurineProPlugin._layer_items_have_layers(items))
+
+    def test_missing_zindex_falls_back_to_order(self):
+        response = {"data": [{"url": "https://x/a.png"}, {"url": "https://x/b.png", "name": "图层"}]}
+        items = self.plugin._extract_seedream_layer_items(response)
+        self.assertEqual([item["z_index"] for item in items], [0, 1])
+        self.assertTrue(FigurineProPlugin._layer_items_have_layers(items))
+

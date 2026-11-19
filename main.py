@@ -7176,27 +7176,34 @@ class FigurineProPlugin(Star):
             if not url and not b64_data:
                 continue
 
-            z_index_raw = entry.get("z_index")
+            def pick(*keys: str) -> Any:
+                """兼容官方 snake_case 与中转网关的 camelCase 字段名。"""
+                for key in keys:
+                    if key in entry and entry[key] is not None:
+                        return entry[key]
+                return None
+
+            z_index_raw = pick("z_index", "zindex", "zIndex")
             try:
                 z_index = int(z_index_raw)
             except (TypeError, ValueError):
                 z_index = index
 
-            bounding_box = entry.get("bounding_box")
-            text_recognition = entry.get("text_recognition")
+            bounding_box = pick("bounding_box", "boundingBox")
+            text_recognition = pick("text_recognition", "textRecognition")
 
             items.append({
                 "url": url,
                 "b64": b64_data,
                 "z_index": z_index,
-                "name": str(entry.get("name") or "").strip(),
-                "description": str(entry.get("description") or "").strip(),
+                "name": str(pick("name") or "").strip(),
+                "description": str(pick("description") or "").strip(),
                 "bounding_box": bounding_box if isinstance(bounding_box, dict) else {},
                 "text_recognition": text_recognition if isinstance(text_recognition, dict) else {},
-                "output_format": str(entry.get("output_format") or "").strip().lower(),
-                "background": str(entry.get("background") or "").strip().lower(),
-                "size": str(entry.get("size") or "").strip(),
-                "error": entry.get("error") if isinstance(entry.get("error"), dict) else {},
+                "output_format": str(pick("output_format", "outputType", "output_type") or "").strip().lower(),
+                "background": str(pick("background") or "").strip().lower(),
+                "size": str(pick("size") or "").strip(),
+                "error": pick("error") if isinstance(pick("error"), dict) else {},
             })
 
         items.sort(key=lambda item: item["z_index"])

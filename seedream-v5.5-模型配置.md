@@ -172,15 +172,54 @@
 - 字段是 **camelCase**（`zindex` / `boundingBox` / `outputType`），插件已做双向兼容；
 - 该模型的请求体里**不需要** `layer_decomposition` 参数（传了会被网关忽略）。
 
-### 已写入的配置
+### 已回退（当前线上状态）
 
-| 配置 | 值 |
+apilio 只是用来验证"图层拆分模型变体"这条路可行，验证完已按要求回退：
+
+| 配置 | 当前值 |
 | --- | --- |
-| API Key 列表 | 新增代号 `apilio`，key=`sk-C9xj...`，`api_url=https://api.apilio.ai/` |
-| 模型 `seedream-v5.5-layer` | `api_key_tag=apilio`、`request_model_name=seedream-v5.5/layer-decomposition` |
+| API Key 列表 | **apilio 已删除**，只剩默认等原有 Key |
+| 模型 `seedream-v5.5-layer` | `api_key_tag=默认`、`request_model_name=seedream-v5.5/layer-decomposition` |
 | 触发词 | `s5.5c`（不变） |
+
+回退后原网关（10.10.10.89）实测：**HTTP 200 / 40.8 秒 / data 9 项（1 底图 + 8 图层）**，字段含 `zindex`、`name`、`boundingBox` —— 前提是 New API 后台已给 `seedream-v5.5/layer-decomposition` 配好价格（未配时会直接 400：`Model ... price not configured`）。
 
 生图模型 `s5.5` 仍走原网关（10.10.10.89），只有图层拆分切到 apilio。
 
 > 提示：apilio 的 `/v1/models` 里也有 `seedream-v5.5`（非 layer 版），如果要整体迁移生图模型，把 `s5.5` 的 `api_key_tag` 也改成 `apilio` 即可。
+
+
+
+## 6. 精确比例模式（不吸附 8 档）
+
+**开关**：模型参数 → Seedream → 「Seedream精确比例」（`seedream_exact_aspect_ratio`），默认关；当前 `s5.5` 与 `s5.5c` 已开启。
+
+**开启后**：不再把源比例吸附到 1:1/4:3/3:4/16:9/9:16/3:2/2:3/21:9 八档，而是直接按源比例反算 `宽x高`：
+
+- 像素预算取所选档位：1K=1048576、1.5K=2359296、2K=4194304；
+- 自动夹到官方区间：总像素 [1280x720=921600, 2048x2048x1.1025=4624220]、宽高比 [1/16, 16]；
+- 「像素数上限 (K)」「宽高均不超过2000」「边长超2000自动升2K」仍按原规则参与。
+
+实测（容器内，1400x1000 的参考图，2K 档）：
+
+| 模式 | 发送的 size | 实际比例 |
+| --- | --- | --- |
+| 关闭（8 档吸附） | `2368x1776` | 1.3333（4:3） |
+| **开启（精确）** | `2423x1731` | **1.3998** |
+| 开启 + 命令 `=16:9` | `2731x1536` | 1.7780 |
+
+## 7. 比例来源日志
+
+现在日志会明确写出"比例从哪来、原图多大"：
+
+```
+Seedream 精确比例: model=seedream-v5.5, 来源=第1张参考图 1400x1000, source_ratio=1.4000, resolution=2K, size=2423x1731 (实际比例=1.3998)
+Seedream 自适应尺寸: model=seedream-v5.5, 来源=命令比例 16:9, source_ratio=1.7778, resolution=2K, aspect_ratio=16:9, size=2816x1584
+```
+
+- `来源=命令比例 16:9` → 用了消息里 `=宽:高`；
+- `来源=第1张参考图 1400x1000` → 用了第 1 张图的原始像素；
+- 读图失败会逐张顺延并打 WARNING（`读取 Seedream 第N张参考图尺寸失败`）。
+
+> 注意：素材顺序是 **引用链 → 当前消息 → @头像**，所以"第1张参考图"不一定是你最后发的那张；想强制指定比例就在命令里写 `s5.5=16:9`。
 

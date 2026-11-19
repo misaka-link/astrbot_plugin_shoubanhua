@@ -444,3 +444,99 @@ class LayerCamelCasePayloadTests(unittest.TestCase):
         self.assertEqual([item["z_index"] for item in items], [0, 1])
         self.assertTrue(FigurineProPlugin._layer_items_have_layers(items))
 
+
+
+class SeedreamExactRatioTests(unittest.TestCase):
+    """精确比例模式：不吸附 8 档，按源比例反算 WxH。"""
+
+    def setUp(self):
+        _install_import_stubs()
+        self.plugin = object.__new__(FigurineProPlugin)
+
+    @staticmethod
+    def params(**overrides):
+        base = {
+            "enable_seedream_parameters": True,
+            "seedream_resolution": "2K",
+            "seedream_send_detailed_resolution": True,
+            "seedream_exact_aspect_ratio": True,
+            "seedream_max_side_2000": False,
+            "seedream_side_over_2000_auto_2k": True,
+            "seedream_pixel_limit": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def size_ratio(self, size):
+        width, height = FigurineProPlugin._parse_seedream_size(size)
+        return width, height, width / height
+
+    def test_exact_size_keeps_source_ratio(self):
+        width, height, ratio = self.size_ratio(
+            self.plugin._compute_seedream_exact_size(1.4066, "2K", self.params())
+        )
+        self.assertAlmostEqual(ratio, 1.4066, places=2)
+        self.assertTrue(FigurineProPlugin.SEEDREAM_MIN_PIXELS <= width * height <= FigurineProPlugin.SEEDREAM_MAX_PIXELS)
+
+    def test_exact_size_1k_budget(self):
+        width, height, ratio = self.size_ratio(
+            self.plugin._compute_seedream_exact_size(0.75, "1K", self.params(seedream_resolution="1K"))
+        )
+        self.assertAlmostEqual(ratio, 0.75, places=2)
+        self.assertTrue(900_000 <= width * height <= 1_200_000)
+
+    def test_ratio_clamped_to_official_range(self):
+        width, height, ratio = self.size_ratio(
+            self.plugin._compute_seedream_exact_size(30.0, "1K", self.params())
+        )
+        self.assertLessEqual(ratio, 16.01)
+        self.assertGreaterEqual(width * height, FigurineProPlugin.SEEDREAM_MIN_PIXELS)
+
+    def test_pixel_limit_respected(self):
+        width, height, _ = self.size_ratio(
+            self.plugin._compute_seedream_exact_size(1.0, "2K", self.params(seedream_pixel_limit=1000))
+        )
+        self.assertLessEqual(width * height, 1_000_000 + 1000)
+
+    def test_build_size_uses_exact_when_enabled(self):
+        # 桩 PIL 把 b"small" 解析成 1600x1200（4:3）
+        size = self.plugin._build_seedream_adaptive_size(
+            "seedream-v5.5", [b"small"], None, self.params()
+        )
+        width, height, ratio = self.size_ratio(size)
+        self.assertAlmostEqual(ratio, 1600 / 1200, places=2)
+        self.assertNotEqual(size, "2368x1776")  # 不是 8 档表里的固定值
+
+    def test_build_size_falls_back_to_table_when_disabled(self):
+        size = self.plugin._build_seedream_adaptive_size(
+            "seedream-v5.5", [b"small"], None, self.params(seedream_exact_aspect_ratio=False)
+        )
+        self.assertEqual(size, "2368x1776")
+
+    def test_command_ratio_overrides_image(self):
+        size = self.plugin._build_seedream_adaptive_size(
+            "seedream-v5.5", [b"small"], "16:9", self.params()
+        )
+        _, _, ratio = self.size_ratio(size)
+        self.assertAlmostEqual(ratio, 16 / 9, places=2)
+
+    def test_no_side_upgrade_when_max_side_disabled(self):
+        self.assertFalse(
+            self.plugin._seedream_side_upgrade_hits_2k(
+                "seedream-v5.5",
+                [b"small"],
+                None,
+                self.params(seedream_max_side_2000=False, seedream_resolution="1.5K"),
+            )
+        )
+
+    def test_ratio_source_reports_image_pixels(self):
+        ratio, source = self.plugin._get_seedream_source_ratio_info([b"small"], None, fallback_to_square=False)
+        self.assertAlmostEqual(ratio, 1600 / 1200, places=4)
+        self.assertIn("第1张参考图 1600x1200", source)
+
+    def test_ratio_source_reports_command(self):
+        ratio, source = self.plugin._get_seedream_source_ratio_info([b"small"], "16:9", fallback_to_square=False)
+        self.assertAlmostEqual(ratio, 16 / 9, places=4)
+        self.assertIn("命令比例 16:9", source)
+

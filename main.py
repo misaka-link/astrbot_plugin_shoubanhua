@@ -414,6 +414,11 @@ class FigurineProPlugin(Star):
         "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3", "21:9",
     )
     # 图层拆分（Seedream 5.5 / 5.0 pro / 5.0 flash）
+    # 官方 WxH 模式区间：总像素 [1280x720, 2048x2048x1.1025]，宽高比 [1/16, 16]
+    SEEDREAM_MIN_PIXELS = 921_600
+    SEEDREAM_MAX_PIXELS = 4_624_220
+    SEEDREAM_RATIO_MIN = 1 / 16
+    SEEDREAM_RATIO_MAX = 16.0
     SEEDREAM_LAYER_RESOLUTION_OPTIONS = ("1K", "1.5K", "2K", "auto")
     SEEDREAM_LAYER_MAX_IMAGES_DEFAULT = 30
     SEEDREAM_LAYER_MAX_IMAGES_MIN = 2
@@ -2059,6 +2064,7 @@ class FigurineProPlugin(Star):
                 {"value": "opaque", "label": "opaque（不透明背景，多轮编辑更稳）"},
             ]},
             {"name": "seedream_safety_identifier", "label": "Seedream终端用户标识", "group": "Seedream", "type": "text", "default": "", "max_length": 64},
+            {"name": "seedream_exact_aspect_ratio", "label": "Seedream精确比例（不吸附8档）", "group": "Seedream", "type": "boolean", "default": False},
             {"name": "enable_seedream_layer_parameters", "label": "启用 Seedream 图层拆分", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
             {"name": "seedream_layer_resolution", "label": "图层拆分分辨率", "group": "Seedream 图层拆分", "type": "select", "default": "auto", "options": ["auto", "1K", "1.5K", "2K"]},
             {"name": "seedream_layer_max_images", "label": "图层拆分最大输出图数", "group": "Seedream 图层拆分", "type": "number", "default": 30, "min": 2, "max": 100},
@@ -2121,7 +2127,7 @@ class FigurineProPlugin(Star):
             "seedream_send_aspect_ratio", "seedream_send_detailed_resolution", "seedream_pixel_limit",
             "seedream_adaptive_aspect_ratio", "seedream_max_side_2000",
             "seedream_side_over_2000_auto_2k", "seedream_optimize_prompt_mode",
-            "seedream_background", "seedream_safety_identifier",
+            "seedream_background", "seedream_safety_identifier", "seedream_exact_aspect_ratio",
         }
         seedream_layer_fields = {
             "enable_seedream_layer_parameters", "seedream_layer_resolution",
@@ -2188,6 +2194,7 @@ class FigurineProPlugin(Star):
             "seedream_optimize_prompt_mode": "enable_seedream_parameters",
             "seedream_background": "enable_seedream_parameters",
             "seedream_safety_identifier": "enable_seedream_parameters",
+            "seedream_exact_aspect_ratio": "enable_seedream_parameters",
             "seedream_layer_resolution": "enable_seedream_layer_parameters",
             "seedream_layer_max_images": "enable_seedream_layer_parameters",
             "seedream_layer_text_recognition": "enable_seedream_layer_parameters",
@@ -4344,6 +4351,7 @@ class FigurineProPlugin(Star):
                 raw_entry: Any = None,
                 seedream_background: Any = "auto",
                 seedream_safety_identifier: Any = "",
+                seedream_exact_aspect_ratio: Any = False,
                 seedream_layer_resolution: Any = "auto",
                 seedream_layer_max_images: Any = 30,
                 seedream_layer_text_recognition: Any = False,
@@ -4433,6 +4441,7 @@ class FigurineProPlugin(Star):
                 "seedream_optimize_prompt_mode": normalize_seedream_prompt_optimization(seedream_optimize_prompt_mode),
                 "seedream_background": normalize_seedream_background(seedream_background),
                 "seedream_safety_identifier": normalize_seedream_safety_identifier(seedream_safety_identifier),
+                "seedream_exact_aspect_ratio": normalize_bool(seedream_exact_aspect_ratio),
                 "enable_seedream_layer_parameters": enabled_field == "enable_seedream_layer_parameters",
                 "seedream_layer_resolution": normalize_seedream_layer_resolution(seedream_layer_resolution),
                 "seedream_layer_max_images": max(
@@ -4704,6 +4713,7 @@ class FigurineProPlugin(Star):
                         raw_entry=parameters,
                 seedream_background=get_value(parameters, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
                 seedream_safety_identifier=get_value(parameters, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
+                seedream_exact_aspect_ratio=get_value(parameters, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
                 seedream_layer_resolution=get_value(parameters, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
                 seedream_layer_max_images=get_value(parameters, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
                 seedream_layer_text_recognition=get_value(parameters, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
@@ -4897,6 +4907,7 @@ class FigurineProPlugin(Star):
                 raw_entry=item,
                 seedream_background=get_value(item, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
                 seedream_safety_identifier=get_value(item, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
+                seedream_exact_aspect_ratio=get_value(item, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
                 seedream_layer_resolution=get_value(item, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
                 seedream_layer_max_images=get_value(item, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
                 seedream_layer_text_recognition=get_value(item, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
@@ -5274,18 +5285,58 @@ class FigurineProPlugin(Star):
             return False
         if not seedream_parameters.get("seedream_side_over_2000_auto_2k", True):
             return False
-        selected_ratio = self._get_seedream_selected_aspect_ratio(image_bytes_list, aspect_ratio)
-        if not selected_ratio:
+        # 关闭「宽高均不超过2000」时不会触发升级，计费也不应升档
+        if not seedream_parameters.get("seedream_max_side_2000", True):
             return False
+
         resolution = str(seedream_parameters.get("seedream_resolution") or "1.5K").upper()
         if resolution not in self.SEEDREAM_RESOLUTION_ORDER:
             resolution = "1.5K"
+        if resolution == "2K":
+            return False
+
+        pixel_limit = _normalize_nonnegative_int(seedream_parameters.get("seedream_pixel_limit", 0)) * 1000
+
+        if seedream_parameters.get("seedream_exact_aspect_ratio"):
+            source_ratio = self._get_seedream_source_aspect_ratio(
+                image_bytes_list,
+                aspect_ratio,
+                fallback_to_square=False,
+            )
+            if source_ratio is None:
+                return False
+            ratio = max(self.SEEDREAM_RATIO_MIN, min(self.SEEDREAM_RATIO_MAX, float(source_ratio)))
+            width, height = self._seedream_size_from_ratio(
+                ratio,
+                float(self.SEEDREAM_RESOLUTION_PIXELS[resolution]),
+            )
+            total = width * height
+            if total < self.SEEDREAM_MIN_PIXELS or total > self.SEEDREAM_MAX_PIXELS:
+                width, height = self._seedream_size_from_ratio(
+                    ratio,
+                    max(self.SEEDREAM_MIN_PIXELS, min(total, self.SEEDREAM_MAX_PIXELS)),
+                )
+            if pixel_limit and width * height > pixel_limit:
+                width, height = self._seedream_size_from_ratio(
+                    ratio,
+                    max(self.SEEDREAM_MIN_PIXELS, min(pixel_limit, self.SEEDREAM_MAX_PIXELS)),
+                )
+            if max(width, height) <= self.SEEDREAM_ADAPTIVE_MAX_SIDE:
+                return False
+            if pixel_limit:
+                upgrade_pixels = min(float(self.SEEDREAM_RESOLUTION_PIXELS["2K"]), pixel_limit)
+                if upgrade_pixels < self.SEEDREAM_MIN_PIXELS:
+                    return False
+            return True
+
+        selected_ratio = self._get_seedream_selected_aspect_ratio(image_bytes_list, aspect_ratio)
+        if not selected_ratio:
+            return False
         width, height = self._parse_seedream_size(
             self.SEEDREAM_SIZE_OPTIONS[resolution][selected_ratio]
         )
         if max(width, height) <= self.SEEDREAM_ADAPTIVE_MAX_SIDE:
             return False
-        pixel_limit = _normalize_nonnegative_int(seedream_parameters.get("seedream_pixel_limit", 0)) * 1000
         if pixel_limit:
             upgrade_width, upgrade_height = self._parse_seedream_size(
                 self.SEEDREAM_SIZE_OPTIONS["2K"][selected_ratio]
@@ -5679,23 +5730,45 @@ class FigurineProPlugin(Star):
             )
         return request
 
+    def _get_seedream_source_ratio_info(
+            self,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+            fallback_to_square: bool = True,
+    ) -> Tuple[Optional[float], str]:
+        """返回 (源宽高比, 来源说明)。
+
+        优先级：命令里的 =宽:高 → 第一张参考图（读不到尺寸时顺延到下一张）→ 1:1/None。
+        来源说明会打进日志，便于确认到底用的是哪张图。
+        """
+        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
+        if parsed_ratio:
+            return parsed_ratio[0] / parsed_ratio[1], f"命令比例 {aspect_ratio}"
+        for index, image_bytes in enumerate(image_bytes_list or []):
+            try:
+                with PILImage.open(io.BytesIO(image_bytes)) as image:
+                    width, height = int(image.width), int(image.height)
+                if width > 0 and height > 0:
+                    return width / height, f"第{index + 1}张参考图 {width}x{height}"
+            except Exception as exc:
+                logger.warning(f"读取 Seedream 第{index + 1}张参考图尺寸失败: {exc}")
+                continue
+        if fallback_to_square:
+            return 1.0, "无比例来源，回退 1:1"
+        return None, "无比例来源"
+
     def _get_seedream_source_aspect_ratio(
             self,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
             fallback_to_square: bool = True,
     ) -> Optional[float]:
-        parsed_ratio = self._parse_aspect_ratio(aspect_ratio)
-        if parsed_ratio:
-            return parsed_ratio[0] / parsed_ratio[1]
-        if image_bytes_list:
-            try:
-                with PILImage.open(io.BytesIO(image_bytes_list[0])) as image:
-                    return image.width / image.height
-            except Exception as exc:
-                fallback = "使用 1:1" if fallback_to_square else "不传递比例"
-                logger.warning(f"读取 Seedream 首图尺寸失败，{fallback}: {exc}")
-        return 1.0 if fallback_to_square else None
+        ratio, _ = self._get_seedream_source_ratio_info(
+            image_bytes_list,
+            aspect_ratio,
+            fallback_to_square,
+        )
+        return ratio
 
     @classmethod
     def _get_nearest_seedream_aspect_ratio(cls, source_ratio: float) -> str:
@@ -5725,6 +5798,84 @@ class FigurineProPlugin(Star):
         width_text, height_text = str(value).split("x", 1)
         return int(width_text), int(height_text)
 
+    @staticmethod
+    def _seedream_size_from_ratio(ratio: float, pixels: float) -> Tuple[float, float]:
+        """按宽高比与目标像素数反推浮点尺寸（保持比例不变）。"""
+        width = math.sqrt(max(pixels, 1.0) * ratio)
+        return width, width / ratio
+
+    def _compute_seedream_exact_size(
+            self,
+            source_ratio: float,
+            resolution: str,
+            parameters: Optional[Dict[str, Any]] = None,
+            allow_upgrade: bool = True,
+    ) -> str:
+        """精确比例模式：直接按源宽高比算 宽x高，不吸附 8 档比例表。
+
+        规则（与官方 WxH 模式一致）：
+        1. 目标像素取档位预算（1K=1048576 / 1.5K=2359296 / 2K=4194304），保持比例；
+        2. 总像素夹到官方区间 [921600, 4624220]，比例夹到 [1/16, 16]；
+        3. 应用模型「Seedream像素数上限」(K)；
+        4. 开启「边长超2000自动升2K」时，边长超限先升 2K 预算；否则按「宽高均不超过2000」等比缩小。
+        """
+        parameters = parameters or {}
+        ratio = float(source_ratio or 1.0)
+        if ratio <= 0:
+            ratio = 1.0
+        ratio = max(self.SEEDREAM_RATIO_MIN, min(self.SEEDREAM_RATIO_MAX, ratio))
+
+        target_pixels = float(
+            self.SEEDREAM_RESOLUTION_PIXELS.get(resolution, self.SEEDREAM_RESOLUTION_PIXELS["2K"])
+        )
+        width, height = self._seedream_size_from_ratio(ratio, target_pixels)
+
+        def clamp_pixels(pixels: float) -> None:
+            nonlocal width, height
+            width, height = self._seedream_size_from_ratio(ratio, pixels)
+
+        pixel_limit = _normalize_nonnegative_int(parameters.get("seedream_pixel_limit", 0)) * 1000
+        max_side_limit = (
+            self.SEEDREAM_ADAPTIVE_MAX_SIDE
+            if parameters.get("seedream_max_side_2000", True)
+            else 0
+        )
+
+        # 官方像素区间
+        if width * height < self.SEEDREAM_MIN_PIXELS:
+            clamp_pixels(self.SEEDREAM_MIN_PIXELS)
+        elif width * height > self.SEEDREAM_MAX_PIXELS:
+            clamp_pixels(self.SEEDREAM_MAX_PIXELS)
+
+        # 模型像素数上限
+        if pixel_limit and width * height > pixel_limit:
+            clamp_pixels(max(self.SEEDREAM_MIN_PIXELS, min(pixel_limit, self.SEEDREAM_MAX_PIXELS)))
+
+        # 边长超 2000 自动升 2K（与旧表逻辑保持一致：升级后不再压边长）
+        side_auto_upgrade = (
+            allow_upgrade
+            and bool(max_side_limit)
+            and bool(parameters.get("seedream_side_over_2000_auto_2k", True))
+            and resolution != "2K"
+        )
+        if side_auto_upgrade and max(width, height) > max_side_limit:
+            upgrade_pixels = float(self.SEEDREAM_RESOLUTION_PIXELS["2K"])
+            if pixel_limit:
+                upgrade_pixels = min(upgrade_pixels, pixel_limit)
+            upgrade_pixels = max(self.SEEDREAM_MIN_PIXELS, min(upgrade_pixels, self.SEEDREAM_MAX_PIXELS))
+            width, height = self._seedream_size_from_ratio(ratio, upgrade_pixels)
+            return f"{max(1, int(round(width)))}x{max(1, int(round(height)))}"
+
+        # 宽高上限：等比缩小，但不低于官方最小像素
+        if max_side_limit and max(width, height) > max_side_limit:
+            factor = max_side_limit / max(width, height)
+            width *= factor
+            height *= factor
+            if width * height < self.SEEDREAM_MIN_PIXELS:
+                clamp_pixels(self.SEEDREAM_MIN_PIXELS)
+
+        return f"{max(1, int(round(width)))}x{max(1, int(round(height)))}"
+
     def _build_seedream_adaptive_size(
             self,
             model_name: str,
@@ -5740,7 +5891,28 @@ class FigurineProPlugin(Star):
             )
             requested_resolution = "1.5K"
 
-        source_ratio = self._get_seedream_source_aspect_ratio(image_bytes_list, aspect_ratio)
+        source_ratio_value, ratio_source = self._get_seedream_source_ratio_info(
+            image_bytes_list,
+            aspect_ratio,
+            fallback_to_square=True,
+        )
+        source_ratio = float(source_ratio_value or 1.0)
+
+        # 精确比例模式：直接按源比例算 WxH，不吸附 8 档比例表
+        if parameters.get("seedream_exact_aspect_ratio"):
+            exact_size = self._compute_seedream_exact_size(
+                source_ratio,
+                requested_resolution,
+                parameters,
+            )
+            exact_width, exact_height = self._parse_seedream_size(exact_size)
+            logger.info(
+                f"Seedream 精确比例: model={model_name}, 来源={ratio_source}, "
+                f"source_ratio={source_ratio:.4f}, resolution={requested_resolution}, "
+                f"size={exact_size} (实际比例={exact_width / exact_height:.4f})"
+            )
+            return exact_size
+
         selected_ratio = self._get_nearest_seedream_aspect_ratio(source_ratio)
         # Seedream 价格表的 K px 使用十进制换算，例如 2360K = 2,360,000 px。
         pixel_limit = _normalize_nonnegative_int(parameters.get("seedream_pixel_limit", 0)) * 1000
@@ -5813,8 +5985,9 @@ class FigurineProPlugin(Star):
 
         size = self.SEEDREAM_SIZE_OPTIONS[requested_resolution][selected_ratio]
         logger.info(
-            f"Seedream 自适应尺寸: model={model_name}, source_ratio={source_ratio:.4f}, "
-            f"resolution={requested_resolution}, aspect_ratio={selected_ratio}, size={size}"
+            f"Seedream 自适应尺寸: model={model_name}, 来源={ratio_source}, "
+            f"source_ratio={source_ratio:.4f}, resolution={requested_resolution}, "
+            f"aspect_ratio={selected_ratio}, size={size}"
         )
         return size
 

@@ -153,3 +153,34 @@
 
 同时日志会打印 `图层拆分响应结构: top=[...], items=[[...]]`，可据此判断网关到底返回了什么字段。
 
+
+
+## 5. 换到 apilio 网关（图层拆分已可用）
+
+`https://api.apilio.ai/` 把图层拆分做成了**独立模型 ID**，而不是请求体参数：
+
+| 模型 ID | 说明 |
+| --- | --- |
+| `seedream-v5.5/layer-decomposition` | Seedream 5.5 图层拆分 |
+| `seedream-v5-pro/layer-decomposition` | 5.0 pro 图层拆分 |
+| `seedream-v5-flash/layer-decomposition` | 5.0 flash 图层拆分 |
+
+实测（1 张海报 → 拆分）：
+
+- `POST /v1/images/generations`，model=`seedream-v5.5/layer-decomposition`，`size` 传 1K 或 auto 均可，约 39 秒返回；
+- 响应 `data` **9 项**（1 张底图 + 8 个图层），每项带 `url`、`size`、`name`、`description`、`boundingBox`、`zindex`；
+- 字段是 **camelCase**（`zindex` / `boundingBox` / `outputType`），插件已做双向兼容；
+- 该模型的请求体里**不需要** `layer_decomposition` 参数（传了会被网关忽略）。
+
+### 已写入的配置
+
+| 配置 | 值 |
+| --- | --- |
+| API Key 列表 | 新增代号 `apilio`，key=`sk-C9xj...`，`api_url=https://api.apilio.ai/` |
+| 模型 `seedream-v5.5-layer` | `api_key_tag=apilio`、`request_model_name=seedream-v5.5/layer-decomposition` |
+| 触发词 | `s5.5c`（不变） |
+
+生图模型 `s5.5` 仍走原网关（10.10.10.89），只有图层拆分切到 apilio。
+
+> 提示：apilio 的 `/v1/models` 里也有 `seedream-v5.5`（非 layer 版），如果要整体迁移生图模型，把 `s5.5` 的 `api_key_tag` 也改成 `apilio` 即可。
+

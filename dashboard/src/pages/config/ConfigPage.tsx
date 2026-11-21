@@ -103,6 +103,7 @@ const AUTO_DERIVED_FIELDS = new Set([
   "enable_grok_parameters",
   "enable_seedream_parameters",
   "enable_seedream_layer_parameters",
+  "enable_gpt_gif_parameters",
   "enable_omni_parameters",
 ]);
 
@@ -112,6 +113,7 @@ const GROUP_TO_MODE: Record<string, string> = {
   Grok: "grok",
   Seedream: "seedream",
   "Seedream 图层拆分": "seedream_layer",
+  "GPT GIF": "gpt_gif",
   Omni: "omni",
 };
 

@@ -105,10 +105,11 @@
                             "gemini",
                             "grok",
                             "seedream",
-                            "seedream_layer"
+                            "seedream_layer",
+                            "gpt_gif"
                         ],
                         "default": "none",
-                        "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream 生图（只生图、不拆分）、seedream_layer=Seedream 图层拆分（只拆分、不叠加生图参数，结果以合并转发发送）。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
+                        "hint": "选择本条目实际生效的单一厂商参数模式：none=无厂商参数、gpt=GPT、gemini=Gemini、grok=Grok、seedream=Seedream 生图（只生图、不拆分）、seedream_layer=Seedream 图层拆分（只拆分、不叠加生图参数，结果以合并转发发送）、gpt_gif=GPT GIF 动图（专用于 gpt-image-2.6 的 output_format=gif，自动钳制帧尺寸）。旧配置缺失本项时，会从旧的厂商开关按 GPT > Gemini > Grok > Seedream 推断；通过 Web 保存后会写为规范的单一模式。"
                     },
                     "api_key_tag": {
                         "label": "绑定 Key",
@@ -518,6 +519,64 @@
                         "type": "bool",
                         "default": false,
                         "hint": "仅 Seedream参数设置开启且「传递详细分辨率」开启时生效。关闭（默认）时把源比例吸附到 8 档官方比例（1:1/4:3/3:4/16:9/9:16/3:2/2:3/21:9）里最近的一档；开启后不再吸附，直接按源比例（命令 =宽:高 优先，否则第一张参考图）反算 宽x高，输出比例与参考图一致。像素预算取所选档位（1K/1.5K/2K），并自动夹到官方区间：总像素 [1280x720, 2048x2048x1.1025]、宽高比 [1/16, 16]；「像素数上限」「宽高均不超过2000」「边长超2000自动升2K」仍按原规则参与。"
+                    },
+                    "enable_gpt_gif_parameters": {
+                        "label": "GPT GIF动图参数设置",
+                        "type": "bool",
+                        "default": false,
+                        "hint": "旧配置兼容字段。Web 配置页会按「参数模式=GPT GIF 动图」自动规范化为开启。该模式专用于 GPT Image 2.6（gpt-image-2.6-sunburst / -flare）的 GIF 输出：请求固定带 output_format=gif，并按帧数/帧时长/长边上限组装 size；文生图与图生图（edits）都支持。与「GPT」生图模式互斥。"
+                    },
+                    "gpt_gif_frame_count": {
+                        "label": "GIF帧数",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 16,
+                        "hint": "发送为 frame_count，官方范围 2–16（默认 9）。填 0 表示不发送，由上游用默认 9 帧。GIF 是把所有帧拼成一张 sheet 生成的，帧数越多越容易超尺寸预算。"
+                    },
+                    "gpt_gif_frame_duration_ms": {
+                        "label": "GIF每帧时长(ms)",
+                        "type": "int",
+                        "default": 0,
+                        "min": 0,
+                        "max": 2000,
+                        "hint": "发送为 frame_duration_ms，官方范围 20–2000（默认 200，按 10ms 取整）。填 0 表示不发送。例：9 帧 × 200ms ≈ 1.8 秒一轮。"
+                    },
+                    "gpt_gif_max_side": {
+                        "label": "GIF长边上限(px)",
+                        "type": "int",
+                        "default": 512,
+                        "min": 256,
+                        "max": 1024,
+                        "hint": "GIF 帧尺寸的长边上限，默认 512。GIF 会把 N 帧拼成一张 sheet 一起生成，官方限制最长边 ≤3840 且总像素有预算——1024x1024 配 9 帧会直接报 No supported sheet fits，所以这里必须小：512 对应 1:1 出 512x512、16:9 出 512x288（8 的倍数对齐）。没有参考图/比例来源时固定 512x512。"
+                    },
+                    "gpt_gif_quality": {
+                        "label": "GIF质量",
+                        "type": "string",
+                        "options": ["auto", "low", "medium", "high", "xhigh", "max"],
+                        "default": "auto",
+                        "hint": "发送为 quality。auto=不发送由模型决定；帧数越多/质量越高越贵。"
+                    },
+                    "gpt_gif_moderation": {
+                        "label": "GIF审核",
+                        "type": "string",
+                        "options": ["auto", "low"],
+                        "default": "auto",
+                        "hint": "发送为 moderation。auto=不发送（默认审核）；low=更宽松。"
+                    },
+                    "gpt_gif_complexity": {
+                        "label": "GIF复杂度",
+                        "type": "string",
+                        "options": ["auto", "low", "medium", "high"],
+                        "default": "auto",
+                        "hint": "发送为 complexity，仅 GPT Image 2.6 支持。auto=不发送。"
+                    },
+                    "gpt_gif_input_fidelity": {
+                        "label": "GIF参考图保真度",
+                        "type": "string",
+                        "options": ["auto", "low", "high"],
+                        "default": "auto",
+                        "hint": "发送为 input_fidelity，仅在带参考图（图生图）时生效。auto=不发送。"
                     },
                     "enable_seedream_layer_parameters": {
                         "label": "Seedream图层拆分参数设置",

@@ -592,3 +592,79 @@ class SeedreamLayerPerImageBillingTests(unittest.TestCase):
             260,
         )
 
+
+
+class GptGifModeTests(unittest.TestCase):
+    """GPT GIF 动图参数模式（gpt-image-2.6 的 output_format=gif）。"""
+
+    def setUp(self):
+        _install_import_stubs()
+
+    def make_plugin(self, **entry_extra):
+        entry = {
+            "model": "gpt-image-2.6-sunburst-gif",
+            "parameter_mode": "gpt_gif",
+            "charge_amount": 0.215,
+            **entry_extra,
+        }
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = _TestConfig({"model_parameter_list": [entry]})
+        plugin.prompt_map = {}
+        return plugin
+
+    def params(self, **entry_extra):
+        plugin = self.make_plugin(**entry_extra)
+        return plugin, plugin._get_model_parameter_map()["gpt-image-2.6-sunburst-gif"]
+
+    def test_gif_payload_defaults(self):
+        plugin, params = self.params()
+        payload = plugin._build_generic_images_payload(
+            "gpt-image-2.6-sunburst", "a fox waving", [], parameters=params
+        )
+        self.assertEqual(payload["output_format"], "gif")
+        self.assertEqual(payload["size"], "512x512")
+        self.assertNotIn("frame_count", payload)      # 0 = 不发送
+        self.assertNotIn("frame_duration_ms", payload)
+        self.assertNotIn("n", payload)                # GIF 不发 n
+        self.assertNotIn("quality", payload)          # auto = 不发送
+
+    def test_gif_payload_frames_and_quality(self):
+        plugin, params = self.params(
+            gpt_gif_frame_count=4,
+            gpt_gif_frame_duration_ms=100,
+            gpt_gif_quality="high",
+            gpt_gif_complexity="medium",
+        )
+        payload = plugin._build_generic_images_payload(
+            "gpt-image-2.6-sunburst", "a fox waving", [], parameters=params
+        )
+        self.assertEqual(payload["frame_count"], 4)
+        self.assertEqual(payload["frame_duration_ms"], 100)
+        self.assertEqual(payload["quality"], "high")
+        self.assertEqual(payload["complexity"], "medium")
+
+    def test_gif_size_follows_ratio(self):
+        plugin, params = self.params()
+        # 桩 PIL 把 b"small" 解析成 1600x1200（4:3）
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], None, params), "512x384")
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "16:9", params), "512x288")
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "9:16", params), "288x512")
+
+    def test_gif_size_respects_max_side(self):
+        plugin, params = self.params(gpt_gif_max_side=768)
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "768x768")
+
+    def test_gif_frame_params_out_of_range(self):
+        plugin, params = self.params(gpt_gif_frame_count=40, gpt_gif_frame_duration_ms=5)
+        # 帧数在配置归一化时被夹到上限 16；帧时长 <20 则直接不发送
+        self.assertEqual(params["gpt_gif_frame_count"], 16)
+        request = plugin._get_gpt_gif_request_parameters("gpt-image-2.6-sunburst", [], None, params)
+        self.assertEqual(request["frame_count"], 16)
+        self.assertNotIn("frame_duration_ms", request)
+
+    def test_gif_mode_detection(self):
+        plugin, params = self.params()
+        self.assertIsNotNone(plugin._get_gpt_gif_parameters("gpt-image-2.6-sunburst-gif", params))
+        self.assertTrue(params["enable_gpt_gif_parameters"])
+        self.assertFalse(params["enable_gpt_parameters"])
+

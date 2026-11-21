@@ -344,6 +344,7 @@ class FigurineProPlugin(Star):
         ("grok", "Grok"),
         ("seedream", "Seedream"),
         ("seedream_layer", "Seedream 图层拆分"),
+        ("gpt_gif", "GPT GIF 动图"),
         ("omni", "Omni 视频"),
     )
     PARAMETER_MODE_ENABLE_FIELDS = {
@@ -352,6 +353,7 @@ class FigurineProPlugin(Star):
         "grok": "enable_grok_parameters",
         "seedream": "enable_seedream_parameters",
         "seedream_layer": "enable_seedream_layer_parameters",
+        "gpt_gif": "enable_gpt_gif_parameters",
         "omni": "enable_omni_parameters",
     }
 
@@ -362,6 +364,14 @@ class FigurineProPlugin(Star):
     IMAGE_MODERATION_OPTIONS = {"auto", "low"}
     GPT_COMPLEXITY_OPTIONS = {"auto", "low", "medium", "high"}
     GPT_OUTPUT_FORMAT_OPTIONS = {"auto", "png", "jpeg", "webp", "gif", "svg"}
+    # GPT GIF 动图（gpt-image-2.6 的 output_format=gif）
+    GPT_GIF_FRAME_COUNT_MIN = 2
+    GPT_GIF_FRAME_COUNT_MAX = 16
+    GPT_GIF_FRAME_DURATION_MIN = 20
+    GPT_GIF_FRAME_DURATION_MAX = 2000
+    GPT_GIF_MAX_SIDE_DEFAULT = 512
+    GPT_GIF_MAX_SIDE_MIN = 256
+    GPT_GIF_MAX_SIDE_LIMIT = 1024
     SEND_RETRY_DELAY = 1.0
     # 模型热备切换之间的最小间隔（毫秒），避免瞬时把全部候选打一遍
     MODEL_FAILOVER_DELAY_MS_DEFAULT = 100
@@ -2065,6 +2075,14 @@ class FigurineProPlugin(Star):
             ]},
             {"name": "seedream_safety_identifier", "label": "Seedream终端用户标识", "group": "Seedream", "type": "text", "default": "", "max_length": 64},
             {"name": "seedream_exact_aspect_ratio", "label": "Seedream精确比例（不吸附8档）", "group": "Seedream", "type": "boolean", "default": False},
+            {"name": "enable_gpt_gif_parameters", "label": "启用 GPT GIF 动图参数", "group": "GPT GIF", "type": "boolean", "default": False},
+            {"name": "gpt_gif_frame_count", "label": "GIF帧数(2-16，0=默认9)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 16},
+            {"name": "gpt_gif_frame_duration_ms", "label": "GIF每帧时长ms(20-2000，0=默认200)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 2000},
+            {"name": "gpt_gif_max_side", "label": "GIF长边上限(px)", "group": "GPT GIF", "type": "number", "default": 512, "min": 256, "max": 1024},
+            {"name": "gpt_gif_quality", "label": "GIF质量", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high", "xhigh", "max"]},
+            {"name": "gpt_gif_moderation", "label": "GIF审核", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low"]},
+            {"name": "gpt_gif_complexity", "label": "GIF复杂度", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high"]},
+            {"name": "gpt_gif_input_fidelity", "label": "GIF参考图保真度", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "high"]},
             {"name": "enable_seedream_layer_parameters", "label": "启用 Seedream 图层拆分", "group": "Seedream 图层拆分", "type": "boolean", "default": False},
             {"name": "seedream_layer_resolution", "label": "图层拆分分辨率", "group": "Seedream 图层拆分", "type": "select", "default": "auto", "options": ["auto", "1K", "1.5K", "2K"]},
             {"name": "seedream_layer_max_images", "label": "图层拆分最大输出图数", "group": "Seedream 图层拆分", "type": "number", "default": 30, "min": 2, "max": 100},
@@ -2129,6 +2147,11 @@ class FigurineProPlugin(Star):
             "seedream_side_over_2000_auto_2k", "seedream_optimize_prompt_mode",
             "seedream_background", "seedream_safety_identifier", "seedream_exact_aspect_ratio",
         }
+        gpt_gif_fields = {
+            "enable_gpt_gif_parameters", "gpt_gif_frame_count", "gpt_gif_frame_duration_ms",
+            "gpt_gif_max_side", "gpt_gif_quality", "gpt_gif_moderation",
+            "gpt_gif_complexity", "gpt_gif_input_fidelity",
+        }
         seedream_layer_fields = {
             "enable_seedream_layer_parameters", "seedream_layer_resolution",
             "seedream_layer_max_images", "seedream_layer_text_recognition",
@@ -2152,6 +2175,7 @@ class FigurineProPlugin(Star):
             **{name: "grok" for name in grok_fields},
             **{name: "seedream" for name in seedream_fields},
             **{name: "seedream_layer" for name in seedream_layer_fields},
+            **{name: "gpt_gif" for name in gpt_gif_fields},
             **{name: "omni" for name in omni_fields},
         }
         for field_name in {
@@ -2195,6 +2219,13 @@ class FigurineProPlugin(Star):
             "seedream_background": "enable_seedream_parameters",
             "seedream_safety_identifier": "enable_seedream_parameters",
             "seedream_exact_aspect_ratio": "enable_seedream_parameters",
+            "gpt_gif_frame_count": "enable_gpt_gif_parameters",
+            "gpt_gif_frame_duration_ms": "enable_gpt_gif_parameters",
+            "gpt_gif_max_side": "enable_gpt_gif_parameters",
+            "gpt_gif_quality": "enable_gpt_gif_parameters",
+            "gpt_gif_moderation": "enable_gpt_gif_parameters",
+            "gpt_gif_complexity": "enable_gpt_gif_parameters",
+            "gpt_gif_input_fidelity": "enable_gpt_gif_parameters",
             "seedream_layer_resolution": "enable_seedream_layer_parameters",
             "seedream_layer_max_images": "enable_seedream_layer_parameters",
             "seedream_layer_text_recognition": "enable_seedream_layer_parameters",
@@ -2242,6 +2273,9 @@ class FigurineProPlugin(Star):
             elif name in gemini_fields:
                 field["route"] = "gemini"
             elif name in grok_fields:
+                field["route"] = "generic"
+                field["endpoint_types"] = ["images_generations", "images_edits"]
+            elif name in gpt_gif_fields:
                 field["route"] = "generic"
                 field["endpoint_types"] = ["images_generations", "images_edits"]
             elif name in seedream_fields or name in seedream_layer_fields:
@@ -4352,6 +4386,13 @@ class FigurineProPlugin(Star):
                 seedream_background: Any = "auto",
                 seedream_safety_identifier: Any = "",
                 seedream_exact_aspect_ratio: Any = False,
+                gpt_gif_frame_count: Any = 0,
+                gpt_gif_frame_duration_ms: Any = 0,
+                gpt_gif_max_side: Any = 512,
+                gpt_gif_quality: Any = "auto",
+                gpt_gif_moderation: Any = "auto",
+                gpt_gif_complexity: Any = "auto",
+                gpt_gif_input_fidelity: Any = "auto",
                 seedream_layer_resolution: Any = "auto",
                 seedream_layer_max_images: Any = 30,
                 seedream_layer_text_recognition: Any = False,
@@ -4442,6 +4483,35 @@ class FigurineProPlugin(Star):
                 "seedream_background": normalize_seedream_background(seedream_background),
                 "seedream_safety_identifier": normalize_seedream_safety_identifier(seedream_safety_identifier),
                 "seedream_exact_aspect_ratio": normalize_bool(seedream_exact_aspect_ratio),
+                "enable_gpt_gif_parameters": enabled_field == "enable_gpt_gif_parameters",
+                "gpt_gif_frame_count": max(
+                    0,
+                    min(
+                        self.GPT_GIF_FRAME_COUNT_MAX,
+                        _normalize_nonnegative_int(gpt_gif_frame_count),
+                    ),
+                ),
+                "gpt_gif_frame_duration_ms": max(
+                    0,
+                    min(
+                        self.GPT_GIF_FRAME_DURATION_MAX,
+                        _normalize_nonnegative_int(gpt_gif_frame_duration_ms),
+                    ),
+                ),
+                "gpt_gif_max_side": max(
+                    self.GPT_GIF_MAX_SIDE_MIN,
+                    min(
+                        self.GPT_GIF_MAX_SIDE_LIMIT,
+                        _normalize_nonnegative_int(gpt_gif_max_side, self.GPT_GIF_MAX_SIDE_DEFAULT)
+                        or self.GPT_GIF_MAX_SIDE_DEFAULT,
+                    ),
+                ),
+                "gpt_gif_quality": normalize_option(gpt_gif_quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
+                "gpt_gif_moderation": normalize_option(gpt_gif_moderation, self.IMAGE_MODERATION_OPTIONS, "auto"),
+                "gpt_gif_complexity": normalize_option(gpt_gif_complexity, self.GPT_COMPLEXITY_OPTIONS, "auto"),
+                "gpt_gif_input_fidelity": normalize_option(
+                    gpt_gif_input_fidelity, self.IMAGE_INPUT_FIDELITY_OPTIONS, "auto"
+                ),
                 "enable_seedream_layer_parameters": enabled_field == "enable_seedream_layer_parameters",
                 "seedream_layer_resolution": normalize_seedream_layer_resolution(seedream_layer_resolution),
                 "seedream_layer_max_images": max(
@@ -4714,6 +4784,13 @@ class FigurineProPlugin(Star):
                 seedream_background=get_value(parameters, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
                 seedream_safety_identifier=get_value(parameters, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
                 seedream_exact_aspect_ratio=get_value(parameters, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
+                gpt_gif_frame_count=get_value(parameters, "gpt_gif_frame_count", "GIF帧数", default=0),
+                gpt_gif_frame_duration_ms=get_value(parameters, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
+                gpt_gif_max_side=get_value(parameters, "gpt_gif_max_side", "GIF长边上限", default=512),
+                gpt_gif_quality=get_value(parameters, "gpt_gif_quality", "GIF质量", default="auto"),
+                gpt_gif_moderation=get_value(parameters, "gpt_gif_moderation", "GIF审核", default="auto"),
+                gpt_gif_complexity=get_value(parameters, "gpt_gif_complexity", "GIF复杂度", default="auto"),
+                gpt_gif_input_fidelity=get_value(parameters, "gpt_gif_input_fidelity", "GIF参考图保真度", default="auto"),
                 seedream_layer_resolution=get_value(parameters, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
                 seedream_layer_max_images=get_value(parameters, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
                 seedream_layer_text_recognition=get_value(parameters, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
@@ -4908,6 +4985,13 @@ class FigurineProPlugin(Star):
                 seedream_background=get_value(item, "seedream_background", "Seedream背景模式", "背景模式", default="auto"),
                 seedream_safety_identifier=get_value(item, "seedream_safety_identifier", "Seedream终端用户标识", default=""),
                 seedream_exact_aspect_ratio=get_value(item, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
+                gpt_gif_frame_count=get_value(item, "gpt_gif_frame_count", "GIF帧数", default=0),
+                gpt_gif_frame_duration_ms=get_value(item, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
+                gpt_gif_max_side=get_value(item, "gpt_gif_max_side", "GIF长边上限", default=512),
+                gpt_gif_quality=get_value(item, "gpt_gif_quality", "GIF质量", default="auto"),
+                gpt_gif_moderation=get_value(item, "gpt_gif_moderation", "GIF审核", default="auto"),
+                gpt_gif_complexity=get_value(item, "gpt_gif_complexity", "GIF复杂度", default="auto"),
+                gpt_gif_input_fidelity=get_value(item, "gpt_gif_input_fidelity", "GIF参考图保真度", default="auto"),
                 seedream_layer_resolution=get_value(item, "seedream_layer_resolution", "图层拆分分辨率", default="auto"),
                 seedream_layer_max_images=get_value(item, "seedream_layer_max_images", "图层拆分最大输出图数", default=30),
                 seedream_layer_text_recognition=get_value(item, "seedream_layer_text_recognition", "图层拆分富文本OCR", default=False),
@@ -5026,6 +5110,104 @@ class FigurineProPlugin(Star):
             parameters: Optional[Dict[str, Any]] = None,
     ) -> bool:
         return self._get_seedream_layer_parameters(model_name, parameters) is not None
+
+    # ------------------------------------------------------------------
+    # GPT GIF 动图（gpt-image-2.6 的 output_format=gif）
+    # ------------------------------------------------------------------
+    def _get_gpt_gif_parameters(
+            self,
+            model_name: str,
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """GPT GIF 动图参数模式（与 gpt 生图模式互斥）。"""
+        parameters = self._parameters_for_request(model_name, parameters)
+        if not parameters:
+            return None
+        if parameters.get("enable_gpt_gif_parameters"):
+            return parameters
+        if str(parameters.get("parameter_mode") or "").strip().lower() == "gpt_gif":
+            return parameters
+        return None
+
+    def _build_gpt_gif_size(
+            self,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """GIF 帧尺寸：GIF 会把 N 帧拼成一张 sheet，尺寸必须很小。
+
+        取「长边 = gpt_gif_max_side（默认 512）」并按源比例算另一边，8 的倍数对齐；
+        没有比例来源时用 512x512。
+        """
+        parameters = parameters or {}
+        max_side = _normalize_nonnegative_int(
+            parameters.get("gpt_gif_max_side", self.GPT_GIF_MAX_SIDE_DEFAULT)
+        )
+        if max_side <= 0:
+            max_side = self.GPT_GIF_MAX_SIDE_DEFAULT
+        max_side = max(self.GPT_GIF_MAX_SIDE_MIN, min(self.GPT_GIF_MAX_SIDE_LIMIT, max_side))
+
+        ratio, _ = self._get_seedream_source_ratio_info(
+            image_bytes_list,
+            aspect_ratio,
+            fallback_to_square=False,
+        )
+        if not ratio or ratio <= 0:
+            ratio = 1.0
+        ratio = max(0.125, min(8.0, float(ratio)))
+
+        if ratio >= 1:
+            width, height = float(max_side), max_side / ratio
+        else:
+            width, height = max_side * ratio, float(max_side)
+
+        def align(value: float) -> int:
+            return max(64, int(round(value / 8.0)) * 8)
+
+        return f"{align(width)}x{align(height)}"
+
+    def _get_gpt_gif_request_parameters(
+            self,
+            model_name: str,
+            image_bytes_list: List[bytes],
+            aspect_ratio: Optional[str],
+            parameters: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """组装 GIF 请求参数：output_format=gif + frame_count/frame_duration_ms + 小尺寸。"""
+        parameters = self._get_gpt_gif_parameters(model_name, parameters)
+        if not parameters:
+            return {}
+
+        request: Dict[str, Any] = {"output_format": "gif"}
+
+        quality = str(parameters.get("gpt_gif_quality") or "auto").strip().lower()
+        if quality in self.IMAGE_QUALITY_OPTIONS and quality != "auto":
+            request["quality"] = quality
+
+        moderation = str(parameters.get("gpt_gif_moderation") or "auto").strip().lower()
+        if moderation in self.IMAGE_MODERATION_OPTIONS and moderation != "auto":
+            request["moderation"] = moderation
+
+        complexity = str(parameters.get("gpt_gif_complexity") or "auto").strip().lower()
+        if complexity in self.GPT_COMPLEXITY_OPTIONS and complexity != "auto":
+            request["complexity"] = complexity
+
+        frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
+        if self.GPT_GIF_FRAME_COUNT_MIN <= frame_count <= self.GPT_GIF_FRAME_COUNT_MAX:
+            request["frame_count"] = frame_count
+
+        frame_duration = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_duration_ms", 0))
+        if self.GPT_GIF_FRAME_DURATION_MIN <= frame_duration <= self.GPT_GIF_FRAME_DURATION_MAX:
+            request["frame_duration_ms"] = frame_duration
+
+        if image_bytes_list:
+            fidelity = str(parameters.get("gpt_gif_input_fidelity") or "auto").strip().lower()
+            if fidelity in self.IMAGE_INPUT_FIDELITY_OPTIONS and fidelity != "auto":
+                request["input_fidelity"] = fidelity
+
+        request["size"] = self._build_gpt_gif_size(image_bytes_list, aspect_ratio, parameters)
+        return request
 
     @staticmethod
     def _seedream_model_family(model_name: str) -> str:
@@ -7655,9 +7837,21 @@ class FigurineProPlugin(Star):
             "model": model_name,
             "prompt": final_prompt,
         }
-        seedream_layer_parameters = self._get_seedream_layer_parameters(model_name, parameters)
-        seedream_parameters = None if seedream_layer_parameters else self._get_seedream_parameters(model_name, parameters)
-        if seedream_layer_parameters:
+        gpt_gif_parameters = self._get_gpt_gif_parameters(model_name, parameters)
+        seedream_layer_parameters = None if gpt_gif_parameters else self._get_seedream_layer_parameters(model_name, parameters)
+        seedream_parameters = (
+            None
+            if (gpt_gif_parameters or seedream_layer_parameters)
+            else self._get_seedream_parameters(model_name, parameters)
+        )
+        if gpt_gif_parameters:
+            payload.update(self._get_gpt_gif_request_parameters(
+                model_name,
+                image_bytes_list,
+                aspect_ratio,
+                parameters,
+            ))
+        elif seedream_layer_parameters:
             payload.update(self._get_seedream_layer_request_parameters(
                 model_name,
                 image_bytes_list,
@@ -7685,7 +7879,9 @@ class FigurineProPlugin(Star):
 
         if image_bytes_list:
             image_inputs = [self._image_bytes_to_data_url(img) for img in image_bytes_list]
-            if seedream_layer_parameters:
+            if gpt_gif_parameters:
+                payload["image"] = image_inputs[0] if len(image_inputs) == 1 else image_inputs
+            elif seedream_layer_parameters:
                 # 图层拆分只允许输入 1 张待拆分图片
                 if len(image_inputs) > 1:
                     logger.warning(
@@ -7728,18 +7924,28 @@ class FigurineProPlugin(Star):
         form = aiohttp.FormData()
         form.add_field("model", model_name)
         form.add_field("prompt", final_prompt)
-        if not self._should_omit_n_parameter(model_name, parameters):
+        gpt_gif_parameters = self._get_gpt_gif_parameters(model_name, parameters)
+        if not gpt_gif_parameters and not self._should_omit_n_parameter(model_name, parameters):
             form.add_field("n", "1")
-        edits_parameters = self._sanitize_edits_image_parameters(
-            self._get_image_request_parameters(
+        if gpt_gif_parameters:
+            # GPT GIF：编辑端点同样支持 output_format=gif，保留帧参数，不走 gif/svg 过滤
+            edits_parameters = self._get_gpt_gif_request_parameters(
                 model_name,
                 image_bytes_list,
-                resolution,
                 aspect_ratio,
-                force_aspect_ratio,
                 parameters,
             )
-        )
+        else:
+            edits_parameters = self._sanitize_edits_image_parameters(
+                self._get_image_request_parameters(
+                    model_name,
+                    image_bytes_list,
+                    resolution,
+                    aspect_ratio,
+                    force_aspect_ratio,
+                    parameters,
+                )
+            )
         for field_name, value in edits_parameters.items():
             form.add_field(field_name, str(value))
 

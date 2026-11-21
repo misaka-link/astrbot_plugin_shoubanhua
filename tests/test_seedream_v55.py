@@ -1,3 +1,4 @@
+import asyncio
 import re
 import unittest
 from pathlib import Path
@@ -667,4 +668,52 @@ class GptGifModeTests(unittest.TestCase):
         self.assertIsNotNone(plugin._get_gpt_gif_parameters("gpt-image-2.6-sunburst-gif", params))
         self.assertTrue(params["enable_gpt_gif_parameters"])
         self.assertFalse(params["enable_gpt_parameters"])
+
+
+
+class BindingPrefixMigrationTests(unittest.TestCase):
+    """绑定命令必须同时出现在「自定义触发词」(extra_prefix) 里才能触发。"""
+
+    def setUp(self):
+        _install_import_stubs()
+
+    def make_plugin(self, conf):
+        plugin = object.__new__(FigurineProPlugin)
+        plugin.conf = conf
+        plugin.prompt_map = {}
+        return plugin
+
+    def test_missing_binding_added_to_prefixes(self):
+        conf = _TestConfig({
+            "extra_prefix": [{"__template_key": "prefix", "prefix": "bnn"}],
+            "command_model_list": [
+                {"command": "bnn", "model": "m1"},
+                {"command": "gpt2.6g", "model": "m2"},
+                {"command": "s5.5c", "model": "m3"},
+            ],
+        })
+        plugin = self.make_plugin(conf)
+        asyncio.run(plugin._migrate_binding_prefixes())
+        prefixes = [item["prefix"] for item in conf["extra_prefix"]]
+        self.assertEqual(prefixes, ["bnn", "gpt2.6g", "s5.5c"])
+
+    def test_preset_names_are_not_added(self):
+        conf = _TestConfig({
+            "extra_prefix": [{"__template_key": "prefix", "prefix": "bnn"}],
+            "command_model_list": [{"command": "手办化", "model": "m1"}],
+        })
+        plugin = self.make_plugin(conf)
+        plugin.prompt_map = {"手办化": "prompt"}
+        asyncio.run(plugin._migrate_binding_prefixes())
+        self.assertEqual([item["prefix"] for item in conf["extra_prefix"]], ["bnn"])
+
+    def test_nothing_to_do_keeps_config(self):
+        conf = _TestConfig({
+            "extra_prefix": [{"__template_key": "prefix", "prefix": "bnn"}],
+            "command_model_list": [{"command": "bnn", "model": "m1"}],
+        })
+        plugin = self.make_plugin(conf)
+        asyncio.run(plugin._migrate_binding_prefixes())
+        self.assertEqual([item["prefix"] for item in conf["extra_prefix"]], ["bnn"])
+        self.assertEqual(conf.save_calls, 0)
 

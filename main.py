@@ -1325,6 +1325,7 @@ class FigurineProPlugin(Star):
         await self._migrate_prompt_list_config()
         await self._migrate_api_keys_config()
         await self._load_prompt_map()
+        await self._migrate_binding_prefixes()
         await self._load_preset_images()
         self._register_llm_tools()
 
@@ -6692,6 +6693,45 @@ class FigurineProPlugin(Star):
                 logger.info(f"已自动从 generic_api_keys 迁移到 api_key_list，共 {len(migrated_from_generic)} 条")
             except Exception as e:
                 logger.error(f"自动迁移 generic_api_keys 配置失败: {e}")
+
+    async def _migrate_binding_prefixes(self):
+        """把「指令模型绑定」里的命令自动补进「自定义触发词」(extra_prefix)。
+
+        绑定只决定 命令→模型；命令本身必须出现在 extra_prefix（或预设列表）里才会被
+        识别，否则消息会被静默忽略。这里启动时补齐，避免"配了绑定却触发不了"。
+        预设名（prompt_map 里的键）不补，避免覆盖预设行为。
+        """
+        raw_list = self.conf.get("command_model_list") or []
+        commands: List[str] = []
+        for item in raw_list:
+            if not isinstance(item, dict):
+                continue
+            command = str(item.get("command") or "").strip()
+            if command:
+                commands.append(command)
+        if not commands:
+            return
+
+        existing = self._get_extra_prefixes()
+        missing: List[str] = []
+        for command in commands:
+            if command in existing or command in missing:
+                continue
+            if command in self.prompt_map:
+                continue
+            missing.append(command)
+        if not missing:
+            return
+
+        prefixes = existing + missing
+        self.conf["extra_prefix"] = [
+            {"__template_key": "prefix", "prefix": prefix} for prefix in prefixes
+        ]
+        try:
+            await self._persist_configuration()
+            logger.info(f"已自动把绑定命令补进自定义触发词: {', '.join(missing)}")
+        except Exception as exc:
+            logger.error(f"自动补全自定义触发词失败: {exc}")
 
     def _get_extra_prefixes(self) -> List[str]:
         raw_prefixes = self.conf.get("extra_prefix", "bnn")

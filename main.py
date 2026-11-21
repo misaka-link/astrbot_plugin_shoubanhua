@@ -376,6 +376,10 @@ class FigurineProPlugin(Star):
     GPT_GIF_SHEET_MAX_SIDE = 3840
     GPT_GIF_SHEET_MAX_PIXELS = 3840 * 2160
     GPT_GIF_SHEET_MIN_PIXELS = 655_360
+    # 参考图 GIF 自动适配：帧数上限 16，帧率上限换算成最短帧时长
+    GPT_GIF_MAX_FRAMES_DEFAULT = 16
+    GPT_GIF_MAX_FPS_DEFAULT = 20
+    GPT_GIF_MAX_FPS_LIMIT = 50
     SEND_RETRY_DELAY = 1.0
     # 模型热备切换之间的最小间隔（毫秒），避免瞬时把全部候选打一遍
     MODEL_FAILOVER_DELAY_MS_DEFAULT = 100
@@ -2084,6 +2088,9 @@ class FigurineProPlugin(Star):
             {"name": "gpt_gif_frame_count", "label": "GIF帧数(2-16，0=默认9)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 16},
             {"name": "gpt_gif_frame_duration_ms", "label": "GIF每帧时长ms(20-2000，0=默认200)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 2000},
             {"name": "gpt_gif_max_side", "label": "GIF长边上限(px)", "group": "GPT GIF", "type": "number", "default": 960, "min": 256, "max": 1024},
+            {"name": "gpt_gif_auto_reference", "label": "参考GIF自动适配帧数/帧率", "group": "GPT GIF", "type": "boolean", "default": True},
+            {"name": "gpt_gif_max_frames", "label": "GIF帧数上限(2-16)", "group": "GPT GIF", "type": "number", "default": 16, "min": 2, "max": 16},
+            {"name": "gpt_gif_max_fps", "label": "GIF帧率上限(fps)", "group": "GPT GIF", "type": "number", "default": 20, "min": 1, "max": 50},
             {"name": "gpt_gif_quality", "label": "GIF质量", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high", "xhigh", "max"]},
             {"name": "gpt_gif_moderation", "label": "GIF审核", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low"]},
             {"name": "gpt_gif_complexity", "label": "GIF复杂度", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high"]},
@@ -2156,6 +2163,7 @@ class FigurineProPlugin(Star):
             "enable_gpt_gif_parameters", "gpt_gif_frame_count", "gpt_gif_frame_duration_ms",
             "gpt_gif_max_side", "gpt_gif_quality", "gpt_gif_moderation",
             "gpt_gif_complexity", "gpt_gif_input_fidelity",
+            "gpt_gif_auto_reference", "gpt_gif_max_frames", "gpt_gif_max_fps",
         }
         seedream_layer_fields = {
             "enable_seedream_layer_parameters", "seedream_layer_resolution",
@@ -2231,6 +2239,9 @@ class FigurineProPlugin(Star):
             "gpt_gif_moderation": "enable_gpt_gif_parameters",
             "gpt_gif_complexity": "enable_gpt_gif_parameters",
             "gpt_gif_input_fidelity": "enable_gpt_gif_parameters",
+            "gpt_gif_auto_reference": "enable_gpt_gif_parameters",
+            "gpt_gif_max_frames": "enable_gpt_gif_parameters",
+            "gpt_gif_max_fps": "enable_gpt_gif_parameters",
             "seedream_layer_resolution": "enable_seedream_layer_parameters",
             "seedream_layer_max_images": "enable_seedream_layer_parameters",
             "seedream_layer_text_recognition": "enable_seedream_layer_parameters",
@@ -4394,6 +4405,9 @@ class FigurineProPlugin(Star):
                 gpt_gif_frame_count: Any = 0,
                 gpt_gif_frame_duration_ms: Any = 0,
                 gpt_gif_max_side: Any = 960,
+                gpt_gif_auto_reference: Any = True,
+                gpt_gif_max_frames: Any = 16,
+                gpt_gif_max_fps: Any = 20,
                 gpt_gif_quality: Any = "auto",
                 gpt_gif_moderation: Any = "auto",
                 gpt_gif_complexity: Any = "auto",
@@ -4509,6 +4523,23 @@ class FigurineProPlugin(Star):
                         self.GPT_GIF_MAX_SIDE_LIMIT,
                         _normalize_nonnegative_int(gpt_gif_max_side, self.GPT_GIF_MAX_SIDE_DEFAULT)
                         or self.GPT_GIF_MAX_SIDE_DEFAULT,
+                    ),
+                ),
+                "gpt_gif_auto_reference": normalize_bool(gpt_gif_auto_reference),
+                "gpt_gif_max_frames": max(
+                    self.GPT_GIF_FRAME_COUNT_MIN,
+                    min(
+                        self.GPT_GIF_FRAME_COUNT_MAX,
+                        _normalize_nonnegative_int(gpt_gif_max_frames, self.GPT_GIF_MAX_FRAMES_DEFAULT)
+                        or self.GPT_GIF_MAX_FRAMES_DEFAULT,
+                    ),
+                ),
+                "gpt_gif_max_fps": max(
+                    1,
+                    min(
+                        self.GPT_GIF_MAX_FPS_LIMIT,
+                        _normalize_nonnegative_int(gpt_gif_max_fps, self.GPT_GIF_MAX_FPS_DEFAULT)
+                        or self.GPT_GIF_MAX_FPS_DEFAULT,
                     ),
                 ),
                 "gpt_gif_quality": normalize_option(gpt_gif_quality, self.IMAGE_QUALITY_OPTIONS, "auto"),
@@ -4792,6 +4823,9 @@ class FigurineProPlugin(Star):
                 gpt_gif_frame_count=get_value(parameters, "gpt_gif_frame_count", "GIF帧数", default=0),
                 gpt_gif_frame_duration_ms=get_value(parameters, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
                 gpt_gif_max_side=get_value(parameters, "gpt_gif_max_side", "GIF长边上限", default=960),
+                gpt_gif_auto_reference=get_value(parameters, "gpt_gif_auto_reference", "GIF参考图自动适配", default=True),
+                gpt_gif_max_frames=get_value(parameters, "gpt_gif_max_frames", "GIF帧数上限", default=16),
+                gpt_gif_max_fps=get_value(parameters, "gpt_gif_max_fps", "GIF帧率上限", default=20),
                 gpt_gif_quality=get_value(parameters, "gpt_gif_quality", "GIF质量", default="auto"),
                 gpt_gif_moderation=get_value(parameters, "gpt_gif_moderation", "GIF审核", default="auto"),
                 gpt_gif_complexity=get_value(parameters, "gpt_gif_complexity", "GIF复杂度", default="auto"),
@@ -4993,6 +5027,9 @@ class FigurineProPlugin(Star):
                 gpt_gif_frame_count=get_value(item, "gpt_gif_frame_count", "GIF帧数", default=0),
                 gpt_gif_frame_duration_ms=get_value(item, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
                 gpt_gif_max_side=get_value(item, "gpt_gif_max_side", "GIF长边上限", default=960),
+                gpt_gif_auto_reference=get_value(item, "gpt_gif_auto_reference", "GIF参考图自动适配", default=True),
+                gpt_gif_max_frames=get_value(item, "gpt_gif_max_frames", "GIF帧数上限", default=16),
+                gpt_gif_max_fps=get_value(item, "gpt_gif_max_fps", "GIF帧率上限", default=20),
                 gpt_gif_quality=get_value(item, "gpt_gif_quality", "GIF质量", default="auto"),
                 gpt_gif_moderation=get_value(item, "gpt_gif_moderation", "GIF审核", default="auto"),
                 gpt_gif_complexity=get_value(item, "gpt_gif_complexity", "GIF复杂度", default="auto"),
@@ -5146,11 +5183,38 @@ class FigurineProPlugin(Star):
             return 4, 3
         return 4, 4
 
+    def _detect_gif_reference_info(
+            self,
+            image_bytes_list: Optional[List[bytes]],
+    ) -> Optional[Tuple[int, Optional[int]]]:
+        """识别参考图是否为 GIF，返回（帧数，每帧时长ms）。
+
+        不是 GIF / 单帧 / 解析失败时返回 None。多张参考图取第一张是 GIF 的。
+        """
+        for raw in image_bytes_list or []:
+            if not raw:
+                continue
+            try:
+                with PILImage.open(io.BytesIO(raw)) as image:
+                    frames = int(getattr(image, "n_frames", 1) or 1)
+                    if frames <= 1:
+                        continue
+                    duration = image.info.get("duration")
+                    try:
+                        duration_ms = int(duration) if duration else None
+                    except (TypeError, ValueError):
+                        duration_ms = None
+                    return frames, duration_ms
+            except Exception:
+                continue
+        return None
+
     def _build_gpt_gif_size(
             self,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
             parameters: Optional[Dict[str, Any]] = None,
+            frame_count_override: Optional[int] = None,
     ) -> str:
         """GIF 帧尺寸：GIF 把 N 帧拼成一张 sheet 一起生成，单帧尺寸必须很小。
 
@@ -5179,7 +5243,10 @@ class FigurineProPlugin(Star):
             ratio = 1.0
         ratio = max(0.125, min(8.0, float(ratio)))
 
-        frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
+        if frame_count_override is not None:
+            frame_count = int(frame_count_override)
+        else:
+            frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
         if not (self.GPT_GIF_FRAME_COUNT_MIN <= frame_count <= self.GPT_GIF_FRAME_COUNT_MAX):
             frame_count = 9
         cols, rows = self._gpt_gif_sheet_grid(frame_count)
@@ -5249,20 +5316,64 @@ class FigurineProPlugin(Star):
         if complexity in self.GPT_COMPLEXITY_OPTIONS and complexity != "auto":
             request["complexity"] = complexity
 
-        frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
-        if self.GPT_GIF_FRAME_COUNT_MIN <= frame_count <= self.GPT_GIF_FRAME_COUNT_MAX:
-            request["frame_count"] = frame_count
+        max_frames = _normalize_nonnegative_int(
+            parameters.get("gpt_gif_max_frames", self.GPT_GIF_MAX_FRAMES_DEFAULT)
+        )
+        if max_frames <= 0:
+            max_frames = self.GPT_GIF_MAX_FRAMES_DEFAULT
+        max_frames = max(
+            self.GPT_GIF_FRAME_COUNT_MIN,
+            min(self.GPT_GIF_FRAME_COUNT_MAX, max_frames),
+        )
 
-        frame_duration = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_duration_ms", 0))
-        if self.GPT_GIF_FRAME_DURATION_MIN <= frame_duration <= self.GPT_GIF_FRAME_DURATION_MAX:
-            request["frame_duration_ms"] = frame_duration
+        max_fps = _normalize_nonnegative_int(
+            parameters.get("gpt_gif_max_fps", self.GPT_GIF_MAX_FPS_DEFAULT)
+        )
+        if max_fps <= 0:
+            max_fps = self.GPT_GIF_MAX_FPS_DEFAULT
+        max_fps = max(1, min(self.GPT_GIF_MAX_FPS_LIMIT, max_fps))
+        min_duration = int(math.ceil(1000.0 / max_fps))
+
+        # 图生图：识别参考 GIF 的帧数/帧时长，优先贴近参考图
+        reference_info = None
+        if parameters.get("gpt_gif_auto_reference") and image_bytes_list:
+            reference_info = self._detect_gif_reference_info(image_bytes_list)
+
+        if reference_info:
+            ref_frames, ref_duration = reference_info
+            frame_count = max(self.GPT_GIF_FRAME_COUNT_MIN, min(max_frames, int(ref_frames)))
+            request["frame_count"] = frame_count
+            logger.info(
+                f"GIF 参考图适配: 参考帧数={ref_frames}, 参考帧时长={ref_duration}ms, "
+                f"帧数上限={max_frames}, 帧率上限={max_fps}fps(最短{min_duration}ms) "
+                f"→ frame_count={frame_count}"
+            )
+            if ref_duration:
+                duration = max(int(ref_duration), min_duration)
+                duration = max(self.GPT_GIF_FRAME_DURATION_MIN, min(self.GPT_GIF_FRAME_DURATION_MAX, duration))
+                request["frame_duration_ms"] = duration
+                logger.info(f"GIF 参考图适配: frame_duration_ms={duration}（参考 {ref_duration}ms）")
+        else:
+            frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
+            if self.GPT_GIF_FRAME_COUNT_MIN <= frame_count <= self.GPT_GIF_FRAME_COUNT_MAX:
+                request["frame_count"] = min(frame_count, max_frames)
+
+            frame_duration = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_duration_ms", 0))
+            if self.GPT_GIF_FRAME_DURATION_MIN <= frame_duration <= self.GPT_GIF_FRAME_DURATION_MAX:
+                request["frame_duration_ms"] = max(frame_duration, min_duration)
 
         if image_bytes_list:
             fidelity = str(parameters.get("gpt_gif_input_fidelity") or "auto").strip().lower()
             if fidelity in self.IMAGE_INPUT_FIDELITY_OPTIONS and fidelity != "auto":
                 request["input_fidelity"] = fidelity
 
-        request["size"] = self._build_gpt_gif_size(image_bytes_list, aspect_ratio, parameters)
+        size_frames = request.get("frame_count") or 9
+        request["size"] = self._build_gpt_gif_size(
+            image_bytes_list,
+            aspect_ratio,
+            parameters,
+            frame_count_override=int(size_frames),
+        )
         return request
 
     @staticmethod

@@ -748,3 +748,87 @@ class BindingPrefixMigrationTests(unittest.TestCase):
         self.assertEqual(conf.save_calls, 0)
 
 
+
+
+class _FakeGifPlugin(FigurineProPlugin):
+    """把参考图检测替换成固定值，便于测试自动适配逻辑。"""
+
+    GIF_INFO = (12, 80)
+
+    def _detect_gif_reference_info(self, image_bytes_list):
+        return self.GIF_INFO
+
+
+class GptGifReferenceTests(unittest.TestCase):
+    """图生图：按参考 GIF 的帧数/帧时长自动适配。"""
+
+    def setUp(self):
+        _install_import_stubs()
+
+    def make_plugin(self, info=(12, 80), **entry_extra):
+        entry = {
+            "model": "gpt-image-2.6-sunburst-gif",
+            "parameter_mode": "gpt_gif",
+            "charge_amount": 0.215,
+            **entry_extra,
+        }
+        plugin = object.__new__(_FakeGifPlugin)
+        plugin.GIF_INFO = info
+        plugin.conf = _TestConfig({"model_parameter_list": [entry]})
+        plugin.prompt_map = {}
+        return plugin, plugin._get_model_parameter_map()["gpt-image-2.6-sunburst-gif"]
+
+    def test_reference_frames_and_duration(self):
+        plugin, params = self.make_plugin(info=(12, 80))
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"gif"], "1:1", params
+        )
+        self.assertEqual(request["frame_count"], 12)
+        self.assertEqual(request["frame_duration_ms"], 80)
+        self.assertEqual(request["size"], "816x816")   # 12 帧 4x3 下的最大尺寸
+
+    def test_reference_frames_clamped_by_max_frames(self):
+        plugin, params = self.make_plugin(info=(40, 10))
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"gif"], "1:1", params
+        )
+        self.assertEqual(request["frame_count"], 16)          # 上限 16
+        self.assertEqual(request["frame_duration_ms"], 50)    # 20fps → 最短 50ms
+        self.assertEqual(request["size"], "720x720")          # 16 帧 4x4
+
+    def test_reference_respects_custom_max_frames(self):
+        plugin, params = self.make_plugin(info=(12, 80), gpt_gif_max_frames=8)
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"gif"], "1:1", params
+        )
+        self.assertEqual(request["frame_count"], 8)
+        self.assertEqual(request["size"], "960x960")          # 8 帧 4x2，960 能放下
+
+    def test_reference_respects_max_fps(self):
+        plugin, params = self.make_plugin(info=(9, 10), gpt_gif_max_fps=10)
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"gif"], "1:1", params
+        )
+        self.assertEqual(request["frame_duration_ms"], 100)   # 10fps → 100ms
+
+    def test_auto_reference_disabled_uses_fixed_settings(self):
+        plugin, params = self.make_plugin(
+            info=(12, 80),
+            gpt_gif_auto_reference=False,
+            gpt_gif_frame_count=4,
+            gpt_gif_frame_duration_ms=200,
+        )
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"gif"], "1:1", params
+        )
+        self.assertEqual(request["frame_count"], 4)
+        self.assertEqual(request["frame_duration_ms"], 200)
+
+    def test_no_gif_reference_falls_back(self):
+        plugin, params = self.make_plugin(info=None, gpt_gif_frame_count=9)
+        request = plugin._get_gpt_gif_request_parameters(
+            "gpt-image-2.6-sunburst", [b"png"], "1:1", params
+        )
+        self.assertEqual(request["frame_count"], 9)
+        self.assertEqual(request["size"], "960x960")
+

@@ -655,6 +655,33 @@ class GptGifModeTests(unittest.TestCase):
         plugin, params = self.params(gpt_gif_max_side=768)
         self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "768x768")
 
+    def test_gif_size_sheet_limits(self):
+        # 9 帧 3x3：单帧最大 960（1024 会超出 8,294,400 的 sheet 预算）
+        plugin, params = self.params(gpt_gif_max_side=1024, gpt_gif_frame_count=9)
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "960x960")
+        # 16 帧 4x4：单帧最大 720
+        plugin, params = self.params(gpt_gif_max_side=1024, gpt_gif_frame_count=16)
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "720x720")
+        # 2 帧 4x2：4x1024=4096 超 3840，同样夹到 960
+        plugin, params = self.params(gpt_gif_max_side=1024, gpt_gif_frame_count=2)
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "960x960")
+
+    def test_gif_size_min_pixel_budget(self):
+        plugin, params = self.params(gpt_gif_max_side=256, gpt_gif_frame_count=9)
+        size = plugin._build_gpt_gif_size([b"small"], "1:1", params)
+        width, height = FigurineProPlugin._parse_seedream_size(size)
+        self.assertGreaterEqual(width * height * 9, FigurineProPlugin.GPT_GIF_SHEET_MIN_PIXELS)
+        self.assertEqual(size, "272x272")
+
+    def test_gif_size_aligned_to_16(self):
+        plugin, params = self.params(gpt_gif_frame_count=9)
+        for ratio in ("1:1", "16:9", "9:16", "4:3"):
+            width, height = FigurineProPlugin._parse_seedream_size(
+                plugin._build_gpt_gif_size([b"small"], ratio, params)
+            )
+            self.assertEqual(width % 16, 0, ratio)
+            self.assertEqual(height % 16, 0, ratio)
+
     def test_gif_frame_params_out_of_range(self):
         plugin, params = self.params(gpt_gif_frame_count=40, gpt_gif_frame_duration_ms=5)
         # 帧数在配置归一化时被夹到上限 16；帧时长 <20 则直接不发送
@@ -716,4 +743,5 @@ class BindingPrefixMigrationTests(unittest.TestCase):
         asyncio.run(plugin._migrate_binding_prefixes())
         self.assertEqual([item["prefix"] for item in conf["extra_prefix"]], ["bnn"])
         self.assertEqual(conf.save_calls, 0)
+
 

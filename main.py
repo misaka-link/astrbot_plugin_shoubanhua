@@ -372,6 +372,10 @@ class FigurineProPlugin(Star):
     GPT_GIF_MAX_SIDE_DEFAULT = 512
     GPT_GIF_MAX_SIDE_MIN = 256
     GPT_GIF_MAX_SIDE_LIMIT = 1024
+    # 官方 GIF sheet 限制：最长边 3840，总像素 [655360, 3840x2160]
+    GPT_GIF_SHEET_MAX_SIDE = 3840
+    GPT_GIF_SHEET_MAX_PIXELS = 3840 * 2160
+    GPT_GIF_SHEET_MIN_PIXELS = 655_360
     SEND_RETRY_DELAY = 1.0
     # 模型热备切换之间的最小间隔（毫秒），避免瞬时把全部候选打一遍
     MODEL_FAILOVER_DELAY_MS_DEFAULT = 100
@@ -5130,16 +5134,33 @@ class FigurineProPlugin(Star):
             return parameters
         return None
 
+    @staticmethod
+    def _gpt_gif_sheet_grid(frame_count: int) -> Tuple[int, int]:
+        """GIF sheet 的拼图网格（官方实现按帧数固定网格）。"""
+        count = max(1, min(16, int(frame_count or 9)))
+        if count <= 8:
+            return 4, 2
+        if count == 9:
+            return 3, 3
+        if count <= 12:
+            return 4, 3
+        return 4, 4
+
     def _build_gpt_gif_size(
             self,
             image_bytes_list: List[bytes],
             aspect_ratio: Optional[str],
             parameters: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """GIF 帧尺寸：GIF 会把 N 帧拼成一张 sheet，尺寸必须很小。
+        """GIF 帧尺寸：GIF 把 N 帧拼成一张 sheet 一起生成，单帧尺寸必须很小。
 
-        取「长边 = gpt_gif_max_side（默认 512）」并按源比例算另一边，8 的倍数对齐；
-        没有比例来源时用 512x512。
+        官方 sheet 约束：
+        - 最长边 ≤ 3840px，总像素 ≤ 3840×2160 = 8,294,400，且 ≥ 655,360；
+        - 帧边长必须是 16 的倍数；
+        - 网格：2–8 帧按 4×2，9 帧 3×3，12 帧 4×3，16 帧 4×4。
+
+        先按「长边 = gpt_gif_max_side（默认 512）+ 源比例」算，再按网格/像素预算夹紧，
+        最后对齐 16。没有比例来源时用 max_side 的正方形。
         """
         parameters = parameters or {}
         max_side = _normalize_nonnegative_int(
@@ -5158,13 +5179,40 @@ class FigurineProPlugin(Star):
             ratio = 1.0
         ratio = max(0.125, min(8.0, float(ratio)))
 
+        frame_count = _normalize_nonnegative_int(parameters.get("gpt_gif_frame_count", 0))
+        if not (self.GPT_GIF_FRAME_COUNT_MIN <= frame_count <= self.GPT_GIF_FRAME_COUNT_MAX):
+            frame_count = 9
+        cols, rows = self._gpt_gif_sheet_grid(frame_count)
+
         if ratio >= 1:
             width, height = float(max_side), max_side / ratio
         else:
             width, height = max_side * ratio, float(max_side)
 
+        # 单边不能超过 sheet 上限 / 网格数
+        max_frame_w = self.GPT_GIF_SHEET_MAX_SIDE / cols
+        max_frame_h = self.GPT_GIF_SHEET_MAX_SIDE / rows
+        scale = min(1.0, max_frame_w / max(width, 1e-6), max_frame_h / max(height, 1e-6))
+        width *= scale
+        height *= scale
+
+        # 总像素预算（sheet ≤ 3840×2160）
+        sheet_pixels = width * height * cols * rows
+        if sheet_pixels > self.GPT_GIF_SHEET_MAX_PIXELS:
+            factor = math.sqrt(self.GPT_GIF_SHEET_MAX_PIXELS / sheet_pixels)
+            width *= factor
+            height *= factor
+
+        # 最小像素预算：太小会报 below the minimum pixel budget
+        sheet_pixels = width * height * cols * rows
+        if sheet_pixels < self.GPT_GIF_SHEET_MIN_PIXELS:
+            factor = math.sqrt(self.GPT_GIF_SHEET_MIN_PIXELS / max(sheet_pixels, 1e-6))
+            grown_w = min(width * factor, max_frame_w)
+            grown_h = min(height * factor, max_frame_h)
+            width, height = grown_w, grown_h
+
         def align(value: float) -> int:
-            return max(64, int(round(value / 8.0)) * 8)
+            return max(16, int(round(value / 16.0)) * 16)
 
         return f"{align(width)}x{align(height)}"
 

@@ -665,6 +665,9 @@ class GptGifModeTests(unittest.TestCase):
         # 2 帧 4x2：4x1024=4096 超 3840，同样夹到 960
         plugin, params = self.params(gpt_gif_max_side=1024, gpt_gif_frame_count=2)
         self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "960x960")
+        # 12 帧 4x3：960 的 sheet 会到 3840x2880 超预算，向下取整到 816
+        plugin, params = self.params(gpt_gif_max_side=1024, gpt_gif_frame_count=12)
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "1:1", params), "816x816")
 
     def test_gif_size_min_pixel_budget(self):
         plugin, params = self.params(gpt_gif_max_side=256, gpt_gif_frame_count=9)

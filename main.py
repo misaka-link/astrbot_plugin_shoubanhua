@@ -5211,10 +5211,17 @@ class FigurineProPlugin(Star):
             grown_h = min(height * factor, max_frame_h)
             width, height = grown_w, grown_h
 
-        def align(value: float) -> int:
-            return max(16, int(round(value / 16.0)) * 16)
+        def align_down(value: float) -> int:
+            return max(16, int(value // 16) * 16)
 
-        return f"{align(width)}x{align(height)}"
+        def align_up(value: float) -> int:
+            return max(16, int(math.ceil(value / 16.0)) * 16)
+
+        # 向下取整到 16 的倍数，保证不越界；若因此低于最小像素预算，再向上取整
+        out_w, out_h = align_down(width), align_down(height)
+        if out_w * out_h * cols * rows < self.GPT_GIF_SHEET_MIN_PIXELS:
+            out_w, out_h = align_up(width), align_up(height)
+        return f"{out_w}x{out_h}"
 
     def _get_gpt_gif_request_parameters(
             self,

@@ -623,7 +623,7 @@ class GptGifModeTests(unittest.TestCase):
             "gpt-image-2.6-sunburst", "a fox waving", [], parameters=params
         )
         self.assertEqual(payload["output_format"], "gif")
-        self.assertEqual(payload["size"], "512x512")
+        self.assertEqual(payload["size"], "960x960")
         self.assertNotIn("frame_count", payload)      # 0 = 不发送
         self.assertNotIn("frame_duration_ms", payload)
         self.assertNotIn("n", payload)                # GIF 不发 n
@@ -647,9 +647,9 @@ class GptGifModeTests(unittest.TestCase):
     def test_gif_size_follows_ratio(self):
         plugin, params = self.params()
         # 桩 PIL 把 b"small" 解析成 1600x1200（4:3）
-        self.assertEqual(plugin._build_gpt_gif_size([b"small"], None, params), "512x384")
-        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "16:9", params), "512x288")
-        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "9:16", params), "288x512")
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], None, params), "960x720")
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "16:9", params), "960x528")
+        self.assertEqual(plugin._build_gpt_gif_size([b"small"], "9:16", params), "528x960")
 
     def test_gif_size_respects_max_side(self):
         plugin, params = self.params(gpt_gif_max_side=768)

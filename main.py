@@ -369,7 +369,7 @@ class FigurineProPlugin(Star):
     GPT_GIF_FRAME_COUNT_MAX = 16
     GPT_GIF_FRAME_DURATION_MIN = 20
     GPT_GIF_FRAME_DURATION_MAX = 2000
-    GPT_GIF_MAX_SIDE_DEFAULT = 512
+    GPT_GIF_MAX_SIDE_DEFAULT = 960
     GPT_GIF_MAX_SIDE_MIN = 256
     GPT_GIF_MAX_SIDE_LIMIT = 1024
     # 官方 GIF sheet 限制：最长边 3840，总像素 [655360, 3840x2160]
@@ -2083,7 +2083,7 @@ class FigurineProPlugin(Star):
             {"name": "enable_gpt_gif_parameters", "label": "启用 GPT GIF 动图参数", "group": "GPT GIF", "type": "boolean", "default": False},
             {"name": "gpt_gif_frame_count", "label": "GIF帧数(2-16，0=默认9)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 16},
             {"name": "gpt_gif_frame_duration_ms", "label": "GIF每帧时长ms(20-2000，0=默认200)", "group": "GPT GIF", "type": "number", "default": 0, "min": 0, "max": 2000},
-            {"name": "gpt_gif_max_side", "label": "GIF长边上限(px)", "group": "GPT GIF", "type": "number", "default": 512, "min": 256, "max": 1024},
+            {"name": "gpt_gif_max_side", "label": "GIF长边上限(px)", "group": "GPT GIF", "type": "number", "default": 960, "min": 256, "max": 1024},
             {"name": "gpt_gif_quality", "label": "GIF质量", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high", "xhigh", "max"]},
             {"name": "gpt_gif_moderation", "label": "GIF审核", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low"]},
             {"name": "gpt_gif_complexity", "label": "GIF复杂度", "group": "GPT GIF", "type": "select", "default": "auto", "options": ["auto", "low", "medium", "high"]},
@@ -4393,7 +4393,7 @@ class FigurineProPlugin(Star):
                 seedream_exact_aspect_ratio: Any = False,
                 gpt_gif_frame_count: Any = 0,
                 gpt_gif_frame_duration_ms: Any = 0,
-                gpt_gif_max_side: Any = 512,
+                gpt_gif_max_side: Any = 960,
                 gpt_gif_quality: Any = "auto",
                 gpt_gif_moderation: Any = "auto",
                 gpt_gif_complexity: Any = "auto",
@@ -4791,7 +4791,7 @@ class FigurineProPlugin(Star):
                 seedream_exact_aspect_ratio=get_value(parameters, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
                 gpt_gif_frame_count=get_value(parameters, "gpt_gif_frame_count", "GIF帧数", default=0),
                 gpt_gif_frame_duration_ms=get_value(parameters, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
-                gpt_gif_max_side=get_value(parameters, "gpt_gif_max_side", "GIF长边上限", default=512),
+                gpt_gif_max_side=get_value(parameters, "gpt_gif_max_side", "GIF长边上限", default=960),
                 gpt_gif_quality=get_value(parameters, "gpt_gif_quality", "GIF质量", default="auto"),
                 gpt_gif_moderation=get_value(parameters, "gpt_gif_moderation", "GIF审核", default="auto"),
                 gpt_gif_complexity=get_value(parameters, "gpt_gif_complexity", "GIF复杂度", default="auto"),
@@ -4992,7 +4992,7 @@ class FigurineProPlugin(Star):
                 seedream_exact_aspect_ratio=get_value(item, "seedream_exact_aspect_ratio", "Seedream精确比例", "精确比例", default=False),
                 gpt_gif_frame_count=get_value(item, "gpt_gif_frame_count", "GIF帧数", default=0),
                 gpt_gif_frame_duration_ms=get_value(item, "gpt_gif_frame_duration_ms", "GIF每帧时长", default=0),
-                gpt_gif_max_side=get_value(item, "gpt_gif_max_side", "GIF长边上限", default=512),
+                gpt_gif_max_side=get_value(item, "gpt_gif_max_side", "GIF长边上限", default=960),
                 gpt_gif_quality=get_value(item, "gpt_gif_quality", "GIF质量", default="auto"),
                 gpt_gif_moderation=get_value(item, "gpt_gif_moderation", "GIF审核", default="auto"),
                 gpt_gif_complexity=get_value(item, "gpt_gif_complexity", "GIF复杂度", default="auto"),
